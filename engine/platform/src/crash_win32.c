@@ -17,6 +17,7 @@
 
 #include <dbghelp.h>
 #include <intrin.h> // __cpuid, __cpuidex: the system line's processor
+#include <psapi.h>  // K32GetProcessMemoryInfo, in kernel32: the memory line
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -386,6 +387,46 @@ static void describe_system(void)
     }
 }
 
+// The report's "memory:" line: the machine's physical memory and commit charge, free of their
+// totals, and the process's working set and private commit, as the fault found them (ADR-0103):
+// on some of CI's runners every dump fails, perhaps for want of them. Kernel queries alone.
+static void out_memory(CrashOut *o)
+{
+    MEMORYSTATUSEX ms;
+    memset(&ms, 0, sizeof ms);
+    ms.dwLength = (DWORD)sizeof ms;
+    PROCESS_MEMORY_COUNTERS pmc;
+    memset(&pmc, 0, sizeof pmc);
+    pmc.cb = (DWORD)sizeof pmc;
+    const u64 mb = (u64)1024U * 1024U;
+    crash_out_str(o, "memory:    ");
+    if (GlobalMemoryStatusEx(&ms)) {
+        crash_out_dec(o, ms.ullAvailPhys / mb);
+        crash_out_str(o, " of ");
+        crash_out_dec(o, ms.ullTotalPhys / mb);
+        crash_out_str(o, " MB physical free, ");
+        crash_out_dec(o, ms.ullAvailPageFile / mb);
+        crash_out_str(o, " of ");
+        crash_out_dec(o, ms.ullTotalPageFile / mb);
+        crash_out_str(o, " MB commit free");
+    } else {
+        crash_out_str(o, "(the machine's unknown)");
+    }
+    if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, (DWORD)sizeof pmc)) {
+        crash_out_str(o, "; the process ");
+        crash_out_dec(o, (u64)pmc.WorkingSetSize / mb);
+        crash_out_str(o, " MB working set, ");
+        crash_out_dec(o, (u64)pmc.PagefileUsage / mb);
+        crash_out_str(o, " MB committed");
+    }
+    crash_out_str(o, "\n");
+}
+
+const char *crash_os_system(void)
+{
+    return g_system;
+}
+
 // The dumps tests make fail, and whether the attempts after them are stand-ins
 // (crash_win32_fail_dumps).
 static volatile LONG g_dump_failures;
@@ -519,6 +560,7 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
     crash_out_str(&o, "system:    ");
     crash_out_str(&o, g_system);
     crash_out_str(&o, "\n");
+    out_memory(&o);
     crash_out_flush(&o);
 
     // The dump first: it says the most, and what follows reads the modules'

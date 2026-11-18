@@ -122,6 +122,9 @@ void crash_drain_log(void);
 
 // After the common checks: set the OS's hooks. Called with g_crash filled.
 NphResult crash_os_install(void);
+// What the reports say of the machine (their "system:" line), made by crash_os_install: "" where
+// the OS's half says nothing.
+const char *crash_os_system(void);
 // Give the hooks back.
 void crash_os_uninstall(void);
 NphResult crash_os_thread_attach(void);

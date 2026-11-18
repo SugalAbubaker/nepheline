@@ -305,7 +305,10 @@ process. When one happens, it writes into the directory it was given:
   - on Windows, the machine (`system:`): the system's version, the
     processor and whether it has shadow stacks (CET), dbghelp's version,
     and whether the process runs with user shadow stacks. It is made when
-    the handler installs, so writing it takes no lock. On some of CI's
+    the handler installs, so writing it takes no lock, and the install's
+    log line says it too. Then the memory (`memory:`): the machine's
+    physical memory and commit charge free, and the process's working set
+    and commit, as the fault found them. On some of CI's
     runners dbghelp fails every dump of a process where on others none
     fails, and this is what tells them apart; the crash tests keep each
     report's `system:` and `dump:` lines after they pass

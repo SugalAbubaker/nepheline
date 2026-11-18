@@ -329,6 +329,11 @@ static void crash_signal(int sig, siginfo_t *info, void *ucontext)
 // Install
 // ---------------------------------------------------------------------------
 
+const char *crash_os_system(void)
+{
+    return "";
+}
+
 NphResult crash_os_install(void)
 {
     // glibc's backtrace() loads the unwinder (dlopen, malloc) on its first

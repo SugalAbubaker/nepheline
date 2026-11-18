@@ -547,6 +547,9 @@ NTEST_F(CrashDir, a_report_and_its_dump_are_written_for_an_exception)
     NTEST_EXPECT_TRUE(contains(text, "shadow stacks; dbghelp") ||
                       contains(text, "no shadow stacks; dbghelp"));
     NTEST_EXPECT_TRUE(contains(text, "; user shadow stacks "));
+    NTEST_EXPECT_TRUE(contains(text, "memory:    "));
+    NTEST_EXPECT_TRUE(contains(text, " MB physical free, "));
+    NTEST_EXPECT_TRUE(contains(text, " MB commit free; the process "));
 
     // The dump beside the report, a minidump by its signature.
     char dump[CRASH_PATH_MAX];

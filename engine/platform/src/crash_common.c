@@ -442,7 +442,15 @@ NphResult nph_crash_install(const NphCrashDesc *desc)
         return r;
     }
     nph_atomic_store_u32(&g_crash.installed, 1U, NPH_MEMORY_ORDER_RELEASE);
-    NPH_LOG_INFO(&NPH_LOG_PLATFORM, "crash handler: reports go to %s", g_crash.dir);
+    // With the machine, which the log shows where a failure writes no report at all (ADR-0103).
+    const char *machine = crash_os_system();
+    if (machine[0] != '\0') {
+        // (The machine first: a long directory would cut it off at the log's line length.)
+        NPH_LOG_INFO(&NPH_LOG_PLATFORM, "crash handler on system: %s; reports go to %s", machine,
+                     g_crash.dir);
+    } else {
+        NPH_LOG_INFO(&NPH_LOG_PLATFORM, "crash handler: reports go to %s", g_crash.dir);
+    }
     return NPH_RESULT_OK;
 #endif
 }
