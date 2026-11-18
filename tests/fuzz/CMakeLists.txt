@@ -30,6 +30,11 @@ nph_add_fuzzer(image SOURCES fuzz_image.c DEPS nph::cook MUTATIONS 60)
 # Editable meshes (tools/cook/polymesh.h): read, written back, extruded,
 # and cooked.
 nph_add_fuzzer(nmesh SOURCES fuzz_nmesh.c fuzz_mesh_check.h DEPS nph::cook)
+# Material sources and images' import settings (tools/cook/material.h,
+# texture_import.h; ADR-0105): read, written back, and the material's asset
+# viewed as the runtime views it.
+nph_add_fuzzer(nmat SOURCES fuzz_nmat.c DEPS nph::cook)
+nph_add_fuzzer(texture_import SOURCES fuzz_texture_import.c DEPS nph::cook)
 # Sounds (tools/cook/sound.h): a WAV file cooked under the settings the
 # input picks, the asset checked and decoded back.
 nph_add_fuzzer(cook_sound SOURCES fuzz_cook_sound.c DEPS nph::cook)

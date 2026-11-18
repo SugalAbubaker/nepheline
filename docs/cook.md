@@ -45,8 +45,9 @@ nph_cook --pack-only -o <out_dir> --pack <file.npk>
 ```
 
 A source is a `.gltf`, a `.glb`, an image (`.png`, `.jpg`, `.tga`, `.bmp`,
-`.hdr`), an editable mesh (`.nmesh`), or a directory, whose scenes and
-editable meshes are cooked in sorted order. `--root` is the source root that identities are relative to
+`.hdr`), an editable mesh (`.nmesh`), a sound (`.wav`), a material
+(`.nmat`), or a directory, whose scenes, editable meshes, sounds, and
+materials are cooked in sorted order. `--root` is the source root that identities are relative to
 (default: the current directory); a source outside it is refused. The
 output directory receives the cooked files and the database; `--pack`
 then writes every asset the database knows into one archive. The exit
@@ -339,6 +340,57 @@ extrudes a set of faces as one region:
 
 A closed mesh stays closed.
 
+## Materials (`material.h`)
+
+A material the editor makes is a `.nmat` source (ADR-0105): JSON in one canonical form, as an
+editable mesh's. It holds glTF's metallic-roughness factors (colours linear), the alpha mode and
+cutoff, double-sidedness, unlit, the five texture slots, and a tiling, rotation and offset of
+every texture coordinate:
+
+    {
+      "nmat": 1,
+      "base_color": [0.8, 0.8, 0.8, 1],
+      "metallic": 0,
+      "roughness": 0.5,
+      "emissive": [0, 0, 0],
+      "emissive_strength": 1,
+      "normal_scale": 1,
+      "occlusion_strength": 1,
+      "alpha": "opaque",
+      "alpha_cutoff": 0.5,
+      "double_sided": false,
+      "unlit": false,
+      "tiling": [1, 1],
+      "rotation": 0,
+      "offset": [0, 0],
+      "textures": {
+        "base_color": {"image": "textures/brick.png", "wrap": ["repeat", "repeat"],
+                       "filter": "linear"}
+      }
+    }
+
+Every key but `"nmat"` may be left out, taking the value above (a new material: light grey, not
+metallic, roughness 0.5); the writer writes every one, and an unused slot not at all. A slot names
+an image by its source key: a relative path inside the project with `/` between its parts, of a
+kind the cooker reads as an image. Reading refuses an unknown or repeated key, a value out of its
+range (colours, metallic, roughness, occlusion and the cutoff 0..1; a tiling's size 10^-4..10^4),
+and a key that would leave the project.
+
+`cooker_cook_material` cooks a `.nmat` into one material asset, sub-asset `material`. It also
+cooks each image the material names into a texture of the usage its slot needs, as glTF's
+importer does: colour for base colour and emissive, linear for metallic-roughness, normal for
+normal, mask for occlusion. That texture is keyed under the image's own key (`<image>#<usage>`),
+so materials naming the same image share it, and an occlusion image that is also the
+metallic-roughness one shares that linear texture. A missing image fails the material's cook. The
+material's content hash is its source's bytes: a change to an image cooks the image's texture
+again, and not the material. Its alpha key is 0, so no mesh's triangles for the rays depend on it
+("Cards trimmed for the rays"), and it may go on any mesh.
+
+The tiling, rotation (degrees) and offset compose into the material's texture transform (material
+type version 3, [asset.md](asset.md)) as `KHR_texture_transform`'s do: scale, then rotation, then
+offset, the glTF importer's composition. An untiled material has none. It is for the renderer to
+apply to every texture coordinate of the material (ADR-0105).
+
 ## The mesh pipeline (`mesh.h`)
 
 `cook_mesh_process` runs, in order:
@@ -609,6 +661,25 @@ exact). The tolerance (1.5 levels plus a fifth of the block's palette
 step) still catches any bitstream error, which moves texels by whole
 steps.
 
+### Texture import settings (`texture_import.h`)
+
+An image may have a settings file beside it, `<image>.import.json` (ADR-0105), which the cooker
+reads when it cooks the image alone or for a material:
+
+    {"texture": 1, "usage": "normal", "max_extent": 2048, "uncompressed": false, "mips": true,
+     "normal_green": "down"}
+
+Every key but `"texture"` may be left out, and the cooker's setting then holds:
+- `usage` is the image's data kind when it is cooked alone (from the editor or `nph_cook`); in a
+  material, the slot says it.
+- `max_extent` caps the largest side (0: no cap), `uncompressed` skips block compression, and
+  `"mips": false` keeps the base level alone.
+- `normal_green` is a normal map's green convention: `up` (OpenGL's and glTF's, the renderer's)
+  or `down` (DirectX's), whose green the cooker flips before the normals are renormalised.
+
+The file's bytes join the image's content hash, so a change cooks the image again. A glTF's images
+keep the cooker's settings.
+
 ## Sounds (`sound.h`)
 
 A WAV file (`.wav`: integer PCM of 8 to 32 bits or floats of 32 or 64,
@@ -675,6 +746,11 @@ input must never crash"):
   when its faces (up to 64) are extruded, and cook, before and after, into
   a mesh the runtime can view (the check `fuzz_mesh_check.h` shares with
   the glTF target).
+- `tests/fuzz/fuzz_nmat.c`: material sources. One that reads must
+  validate, write back to text that reads as the same material, and make
+  a header and a texture transform that `nph_material_view` takes.
+- `tests/fuzz/fuzz_texture_import.c`: images' import settings, read and
+  written back to the same settings.
 - The glTF target also gives every mesh's material slots an alpha test (a
   texture of 16 texels a side of the input's own bytes, the material's
   factor, cutoff and wrap modes), so the triangles for the rays alone are

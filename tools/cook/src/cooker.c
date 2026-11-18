@@ -14,8 +14,10 @@
 #include <cook/cooker.h>
 #include <cook/gltf.h>
 #include <cook/image.h>
+#include <cook/material.h>
 #include <cook/polymesh.h>
 #include <cook/ray_trim.h>
+#include <cook/texture_import.h>
 #include <cook/voxel.h>
 #include <stdio.h>
 #include <string.h>
@@ -523,10 +525,10 @@ static const char *const usage_names[] = {"color", "linear", "normal", "mask", "
 // Writes texture `sub` of `key` from a decoded image (RGBA8, or RGBA32F
 // for HDR), whatever the database says: the callers ask it first.
 static NphResult write_texture(Cooker *c, const char *key, const char *sub, const char *file,
-                               const CookImage *image, CookTextureUsage usage, u64 content_hash,
-                               u64 shash, NphGuid guid)
+                               const CookImage *image, const CookTextureSettings *base,
+                               CookTextureUsage usage, u64 content_hash, u64 shash, NphGuid guid)
 {
-    CookTextureSettings settings = c->texture;
+    CookTextureSettings settings = *base;
     settings.usage = usage;
     NphAssetWriter w;
     nph_asset_writer_init(&w, c->alloc, NPH_ASSET_TYPE_TEXTURE, NPH_TEXTURE_TYPE_VERSION, guid,
@@ -546,9 +548,30 @@ static u64 texture_settings_hash(const Cooker *c, CookTextureUsage usage)
     return nph_hash_combine(settings_hash(c, NPH_ASSET_TYPE_TEXTURE), (u64)usage);
 }
 
+// A normal map in DirectX's convention, its green pointing down, turned to OpenGL's (glTF's, the
+// renderer's): its green inverted.
+static void flip_green(CookImage *image)
+{
+    const u64 texels = (u64)image->width * (u64)image->height;
+    if (image->format == COOK_IMAGE_RGBA32F) {
+        f32 *p = (f32 *)image->pixels;
+        for (u64 i = 0U; i < texels; ++i) {
+            p[i * 4U + 1U] = 1.0F - p[i * 4U + 1U];
+        }
+    } else {
+        u8 *p = (u8 *)image->pixels;
+        for (u64 i = 0U; i < texels; ++i) {
+            p[i * 4U + 1U] = (u8)(255U - p[i * 4U + 1U]);
+        }
+    }
+}
+
+// `settings` are the image's: the cooker's, or its import settings over them. `green_down`: a
+// normal map in DirectX's convention, flipped to the renderer's.
 static NphResult cook_texture_bytes(Cooker *c, const char *key, const char *sub, const char *file,
-                                    const void *bytes, u64 size, CookTextureUsage usage,
-                                    u64 content_hash, NphGuid *out_guid)
+                                    const void *bytes, u64 size,
+                                    const CookTextureSettings *settings, CookTextureUsage usage,
+                                    bool green_down, u64 content_hash, NphGuid *out_guid)
 {
     const u64 shash = texture_settings_hash(c, usage);
     *out_guid = asset_guid(key, sub);
@@ -581,10 +604,84 @@ static NphResult cook_texture_bytes(Cooker *c, const char *key, const char *sub,
             image = ldr;
         }
     }
+    if (r == NPH_RESULT_OK && green_down && usage == COOK_TEXTURE_NORMAL) {
+        flip_green(&image);
+    }
     if (r == NPH_RESULT_OK) {
-        r = write_texture(c, key, sub, file, &image, usage, content_hash, shash, *out_guid);
+        r = write_texture(c, key, sub, file, &image, settings, usage, content_hash, shash,
+                          *out_guid);
     }
     cook_image_free(&image);
+    return r;
+}
+
+// The settings file beside an image (cook/texture_import.h): its settings in `*out` (none when
+// there is no file), and its bytes into `*inout_hash`.
+static NphResult read_texture_import(Cooker *c, const char *source_path, CookTextureImport *out,
+                                     u64 *inout_hash)
+{
+    cook_texture_import_default(out);
+    char path[COOKER_PATH_MAX + 16U];
+    if ((u64)snprintf(path, sizeof path, "%s.import.json", source_path) >= sizeof path) {
+        return NPH_RESULT_OVERFLOW;
+    }
+    if (!nph_fs_exists(path)) {
+        return NPH_RESULT_OK;
+    }
+    void *json = NULL;
+    u64 size = 0U;
+    NphResult r = nph_file_read_all(path, c->alloc, &json, &size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", path, nph_result_string(r));
+        return r;
+    }
+    *inout_hash = nph_hash_combine(*inout_hash, nph_hash64(json, size, NPH_HASH_DEFAULT_SEED));
+    *inout_hash = nph_hash_combine(*inout_hash, size);
+    r = cook_texture_import_read(c->alloc, nph_str((const char *)json, size), out);
+    nph_file_free_all(c->alloc, json, size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", path,
+                      r == NPH_RESULT_VERSION_MISMATCH
+                          ? "another version of the settings"
+                          : "not texture settings (docs/cook.md \"Texture import settings\")");
+    }
+    return r;
+}
+
+// Cooks the image at `source_path`, source key `key`, as a texture of `usage` under its own key
+// (`<key>#<usage>`), with its import settings over the cooker's: their usage too when it is
+// cooked `alone`. HDR texels (a Radiance file, a BC6H DDS) take the HDR pipeline whatever usage
+// was asked for, as a scene's images do.
+static NphResult cook_image_as(Cooker *c, const char *key, const char *source_path,
+                               CookTextureUsage usage, bool alone, NphGuid *out_guid)
+{
+    void *bytes = NULL;
+    u64 size = 0U;
+    NphResult r = nph_file_read_all(source_path, c->alloc, &bytes, &size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", source_path, nph_result_string(r));
+        return r;
+    }
+    u64 content_hash = nph_hash_combine(nph_hash64(bytes, size, NPH_HASH_DEFAULT_SEED), size);
+    CookTextureImport import;
+    r = read_texture_import(c, source_path, &import, &content_hash);
+    if (r == NPH_RESULT_OK) {
+        if (alone && import.has_usage != 0) {
+            usage = import.usage;
+        }
+        if (cook_image_data_is_hdr(bytes, size)) {
+            usage = COOK_TEXTURE_HDR;
+        }
+        const CookTextureSettings settings = cook_texture_import_apply(&import, &c->texture, false);
+        // Each usage of an image is a sub-asset of its own.
+        char sub[32];
+        snprintf(sub, sizeof sub, "%s", usage_names[usage]);
+        char file[48];
+        snprintf(file, sizeof file, "tex_%s", usage_names[usage]);
+        r = cook_texture_bytes(c, key, sub, file, bytes, size, &settings, usage,
+                               import.green_down != 0, content_hash, out_guid);
+    }
+    nph_file_free_all(c->alloc, bytes, size);
     return r;
 }
 
@@ -601,28 +698,8 @@ NphResult cooker_cook_image(Cooker *c, const char *source_path, CookTextureUsage
         c->stats.failed += 1U;
         return r;
     }
-    void *bytes = NULL;
-    u64 size = 0U;
-    r = nph_file_read_all(source_path, c->alloc, &bytes, &size);
-    if (r != NPH_RESULT_OK) {
-        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", source_path, nph_result_string(r));
-        c->stats.failed += 1U;
-        return r;
-    }
-    const u64 content_hash = nph_hash_combine(nph_hash64(bytes, size, NPH_HASH_DEFAULT_SEED), size);
-    // HDR texels (a Radiance file, a BC6H DDS) take the HDR pipeline
-    // whatever usage was asked for, as a scene's images do.
-    if (cook_image_data_is_hdr(bytes, size)) {
-        usage = COOK_TEXTURE_HDR;
-    }
-    // A standalone image keys each usage as its own sub-asset.
-    char sub[32];
-    snprintf(sub, sizeof sub, "%s", usage_names[usage]);
-    char file[48];
-    snprintf(file, sizeof file, "tex_%s", usage_names[usage]);
     NphGuid guid;
-    r = cook_texture_bytes(c, key, sub, file, bytes, size, usage, content_hash, &guid);
-    nph_file_free_all(c->alloc, bytes, size);
+    r = cook_image_as(c, key, source_path, usage, true, &guid);
     if (r != NPH_RESULT_OK) {
         c->stats.failed += 1U;
     }
@@ -944,32 +1021,16 @@ static NphResult cook_specgloss(Cooker *c, const char *key, const CookGltfScene 
     cook_image_free(&diffuse);
     cook_image_free(&specgloss);
     if (r == NPH_RESULT_OK) {
-        r = write_texture(c, key, sub_base, file_base, &base, COOK_TEXTURE_COLOR, content,
-                          shash_base, use->base);
+        r = write_texture(c, key, sub_base, file_base, &base, &c->texture, COOK_TEXTURE_COLOR,
+                          content, shash_base, use->base);
         if (r == NPH_RESULT_OK) {
-            r = write_texture(c, key, sub_mr, file_mr, &mr, COOK_TEXTURE_LINEAR, content, shash_mr,
-                              use->mr);
+            r = write_texture(c, key, sub_mr, file_mr, &mr, &c->texture, COOK_TEXTURE_LINEAR,
+                              content, shash_mr, use->mr);
         }
         cook_image_free(&base);
         cook_image_free(&mr);
     }
     return r;
-}
-
-// The usage a material slot implies for its texture.
-static CookTextureUsage slot_usage(u32 slot)
-{
-    switch (slot) {
-    case NPH_MATERIAL_TEXTURE_BASE_COLOR:
-    case NPH_MATERIAL_TEXTURE_EMISSIVE:
-        return COOK_TEXTURE_COLOR;
-    case NPH_MATERIAL_TEXTURE_NORMAL:
-        return COOK_TEXTURE_NORMAL;
-    case NPH_MATERIAL_TEXTURE_OCCLUSION:
-        return COOK_TEXTURE_MASK;
-    default:
-        return COOK_TEXTURE_LINEAR;
-    }
 }
 
 // Textures: one per (image, usage) pair the materials reference. An
@@ -995,7 +1056,7 @@ static NphResult cook_scene_textures(Cooker *c, const char *key, CookGltfScene *
                 continue;
             }
             const CookGltfImage *img = &scene->images[image];
-            CookTextureUsage usage = slot_usage(slot);
+            CookTextureUsage usage = cook_material_slot_usage(slot);
             if (slot == NPH_MATERIAL_TEXTURE_OCCLUSION &&
                 mat->image[NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS] == image) {
                 usage = COOK_TEXTURE_LINEAR;
@@ -1019,8 +1080,8 @@ static NphResult cook_scene_textures(Cooker *c, const char *key, CookGltfScene *
                 char file[COOK_GLTF_NAME_MAX + 64U];
                 snprintf(file, sizeof file, "tex_%d_%s_%s", image, img->name, usage_names[usage]);
                 // A texture depends on its image's bytes, not the document.
-                r = cook_texture_bytes(c, key, sub, file, img->data, img->size, usage,
-                                       nph_hash_combine(img->hash, img->size), &use->guid);
+                r = cook_texture_bytes(c, key, sub, file, img->data, img->size, &c->texture, usage,
+                                       false, nph_hash_combine(img->hash, img->size), &use->guid);
                 if (r == NPH_RESULT_OK) {
                     r = NPH_ARRAY_PUSH(produced, use->guid);
                 }
@@ -1080,7 +1141,8 @@ static NphResult cook_scene_textures(Cooker *c, const char *key, CookGltfScene *
 }
 
 static NphResult cook_material(Cooker *c, const char *key, const char *sub, const char *file,
-                               const NphMaterialHeader *h, u64 content_hash, NphGuid guid)
+                               const NphMaterialHeader *h, const NphMaterialUvTransform *uv,
+                               u64 content_hash, NphGuid guid)
 {
     const u64 shash = settings_hash(c, NPH_ASSET_TYPE_MATERIAL);
     if (is_current(c, key, sub, content_hash, shash)) {
@@ -1092,6 +1154,10 @@ static NphResult cook_material(Cooker *c, const char *key, const char *sub, cons
                           content_hash);
     NphResult r = nph_asset_writer_add_blob(&w, NPH_MATERIAL_TAG_HEADER, 0U, h, sizeof *h,
                                             NPH_ASSET_CODEC_NONE, 0U);
+    if (r == NPH_RESULT_OK && uv != NULL) {
+        r = nph_asset_writer_add_blob(&w, NPH_MATERIAL_TAG_UV, 0U, uv, sizeof *uv,
+                                      NPH_ASSET_CODEC_NONE, 0U);
+    }
     if (r == NPH_RESULT_OK) {
         NphGuid deps[NPH_MATERIAL_TEXTURE_COUNT];
         u32 dep_count = 0U;
@@ -1111,6 +1177,85 @@ static NphResult cook_material(Cooker *c, const char *key, const char *sub, cons
                  dep_count);
     }
     nph_asset_writer_free(&w);
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Material sources
+// ---------------------------------------------------------------------------
+
+static const char *const k_slot_log_names[NPH_MATERIAL_TEXTURE_COUNT] = {
+    "base colour", "metallic-roughness", "normal", "occlusion", "emissive"};
+
+NphResult cooker_cook_material(Cooker *c, const char *source_path)
+{
+    NPH_ASSERT(c != NULL && source_path != NULL);
+    char key[COOKER_PATH_MAX];
+    NphResult r = cooker_source_key(c, source_path, key, sizeof key);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: not under the source root %s", source_path, c->root);
+        c->stats.failed += 1U;
+        return r;
+    }
+    void *bytes = NULL;
+    u64 size = 0U;
+    r = nph_file_read_all(source_path, c->alloc, &bytes, &size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", source_path, nph_result_string(r));
+        c->stats.failed += 1U;
+        return r;
+    }
+    // The material refers to its textures by GUIDs its source names: a change to an image cooks
+    // the image's texture again, and not the material.
+    const u64 content_hash = nph_hash_combine(nph_hash64(bytes, size, NPH_HASH_DEFAULT_SEED), size);
+    CookMaterialSource m;
+    r = cook_material_source_read(c->alloc, nph_str((const char *)bytes, size), &m);
+    nph_file_free_all(c->alloc, bytes, size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: not a material source (docs/cook.md \"Materials\"): %s",
+                      key, nph_result_string(r));
+    }
+    // Its images, each a texture of its slot's usage under the image's own key, shared by every
+    // material naming it. An occlusion image that is also the metallic-roughness one shares that
+    // linear texture, as a glTF's does.
+    NphGuid textures[NPH_MATERIAL_TEXTURE_COUNT];
+    for (u32 slot = 0; slot < NPH_MATERIAL_TEXTURE_COUNT; ++slot) {
+        textures[slot] = NPH_GUID_NULL;
+    }
+    for (u32 slot = 0; slot < NPH_MATERIAL_TEXTURE_COUNT && r == NPH_RESULT_OK; ++slot) {
+        const char *image = m.textures[slot].image;
+        if (image[0] == '\0') {
+            continue;
+        }
+        CookTextureUsage usage = cook_material_slot_usage(slot);
+        if (slot == NPH_MATERIAL_TEXTURE_OCCLUSION &&
+            strcmp(image, m.textures[NPH_MATERIAL_TEXTURE_METALLIC_ROUGHNESS].image) == 0) {
+            usage = COOK_TEXTURE_LINEAR;
+        }
+        char path[COOKER_PATH_MAX];
+        if ((u64)snprintf(path, sizeof path, "%s/%s", c->root, image) >= sizeof path) {
+            r = NPH_RESULT_OVERFLOW;
+        } else if (!nph_fs_exists(path)) {
+            r = NPH_RESULT_NOT_FOUND;
+        } else {
+            r = cook_image_as(c, image, path, usage, false, &textures[slot]);
+        }
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: its %s image %s: %s", key, k_slot_log_names[slot],
+                          image, nph_result_string(r));
+        }
+    }
+    if (r == NPH_RESULT_OK) {
+        NphMaterialHeader h;
+        cook_material_source_header(&m, textures, &h);
+        const NphMaterialUvTransform uv = cook_material_source_uv(&m);
+        r = cook_material(c, key, "material", "material", &h,
+                          nph_material_uv_is_identity(&uv) ? NULL : &uv, content_hash,
+                          asset_guid(key, "material"));
+    }
+    if (r != NPH_RESULT_OK) {
+        c->stats.failed += 1U;
+    }
     return r;
 }
 
@@ -2236,7 +2381,8 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         char file[COOK_GLTF_NAME_MAX + 32U];
         snprintf(file, sizeof file, "material_%u_%s", m, mat->name);
         material_guids[m] = asset_guid(key, sub);
-        r = cook_material(c, key, sub, file, &mat->header, scene.content_hash, material_guids[m]);
+        r = cook_material(c, key, sub, file, &mat->header, NULL, scene.content_hash,
+                          material_guids[m]);
         if (r == NPH_RESULT_OK) {
             r = NPH_ARRAY_PUSH(&produced, material_guids[m]);
         }
@@ -2255,8 +2401,8 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         NphMaterialHeader h;
         nph_material_header_default(&h);
         default_material = asset_guid(key, "material/default");
-        r = cook_material(c, key, "material/default", "material_default", &h, scene.content_hash,
-                          default_material);
+        r = cook_material(c, key, "material/default", "material_default", &h, NULL,
+                          scene.content_hash, default_material);
         if (r == NPH_RESULT_OK) {
             r = NPH_ARRAY_PUSH(&produced, default_material);
         }
@@ -2488,6 +2634,9 @@ CookerSourceKind cooker_source_kind(const char *path)
     if (nph_str_equals_ignore_case(ext, NPH_STR(".wav"))) {
         return COOKER_SOURCE_SOUND;
     }
+    if (nph_str_equals_ignore_case(ext, NPH_STR(".nmat"))) {
+        return COOKER_SOURCE_MATERIAL;
+    }
     for (u32 i = 0; i < NPH_ARRAY_COUNT(images); ++i) {
         if (nph_str_equals_ignore_case(ext, nph_str_from_cstr(images[i]))) {
             return COOKER_SOURCE_IMAGE;
@@ -2510,6 +2659,8 @@ NphResult cooker_cook_file(Cooker *c, const char *source_path)
         return cooker_cook_mesh(c, source_path);
     case COOKER_SOURCE_SOUND:
         return cooker_cook_sound(c, source_path);
+    case COOKER_SOURCE_MATERIAL:
+        return cooker_cook_material(c, source_path);
     case COOKER_SOURCE_IMAGE: {
         const NphStr ext = nph_path_extension(nph_str_from_cstr(source_path));
         return cooker_cook_image(
@@ -2577,13 +2728,24 @@ static NphResult cook_tree(Cooker *c, const char *dir, u32 depth, NphResult *fir
             continue;
         }
         const CookerSourceKind kind = cooker_source_kind(e->name);
-        if (kind != COOKER_SOURCE_SCENE && kind != COOKER_SOURCE_MESH &&
-            kind != COOKER_SOURCE_SOUND) {
+        NphResult fr = NPH_RESULT_OK;
+        switch (kind) {
+        case COOKER_SOURCE_SCENE:
+            fr = cooker_cook_gltf(c, path);
+            break;
+        case COOKER_SOURCE_MESH:
+            fr = cooker_cook_mesh(c, path);
+            break;
+        case COOKER_SOURCE_SOUND:
+            fr = cooker_cook_sound(c, path);
+            break;
+        case COOKER_SOURCE_MATERIAL:
+            fr = cooker_cook_material(c, path);
+            break;
+        case COOKER_SOURCE_IMAGE: // cooked through what uses them, or one by one
+        case COOKER_SOURCE_NONE:
             continue;
         }
-        const NphResult fr = kind == COOKER_SOURCE_SCENE  ? cooker_cook_gltf(c, path)
-                             : kind == COOKER_SOURCE_MESH ? cooker_cook_mesh(c, path)
-                                                          : cooker_cook_sound(c, path);
         if (fr != NPH_RESULT_OK && *first_error == NPH_RESULT_OK) {
             *first_error = fr; // keep going: one bad file does not stop the rest
         }

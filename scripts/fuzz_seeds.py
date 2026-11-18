@@ -518,6 +518,10 @@ def main():
     write(os.path.join(CORPUS, "nph", "material"), nph_file(fourcc("MATL"), 1, material_blobs()))
     write(os.path.join(CORPUS, "nph", "material_keyed"),
           nph_file(fourcc("MATL"), 2, material_blobs(alpha_mode=1, alpha_key=7)))
+    # Version 3: the texture coordinates' transform (UVTR), tiled twice by three and moved.
+    uv = struct.pack("<6f", 2, 0, 0.25, 0, 3, 0.5)
+    write(os.path.join(CORPUS, "nph", "material_uv"),
+          nph_file(fourcc("MATL"), 3, material_blobs() + [("UVTR", 0, 0, 16, uv, uv)]))
     write(os.path.join(CORPUS, "nph", "scene"), nph_file(fourcc("SCEN"), 1, scene_blobs()))
     write(os.path.join(CORPUS, "nph", "scene_cells"), nph_file(fourcc("SCEN"), 2, scene_cell_blobs()))
     write(os.path.join(CORPUS, "nph", "sound"), nph_file(fourcc("SND "), 1, sound_blobs(False)))

@@ -1,0 +1,33 @@
+{
+  "nmat": 1,
+  "base_color": [
+    0.8,
+    0.8,
+    0.8,
+    1
+  ],
+  "metallic": 0,
+  "roughness": 0.5,
+  "emissive": [
+    0,
+    0,
+    0
+  ],
+  "emissive_strength": 1,
+  "normal_scale": 1,
+  "occlusion_strength": 1,
+  "alpha": "opaque",
+  "alpha_cutoff": 0.5,
+  "double_sided": false,
+  "unlit": false,
+  "tiling": [
+    1,
+    1
+  ],
+  "rotation": 0,
+  "offset": [
+    0,
+    0
+  ],
+  "textures": {}
+}

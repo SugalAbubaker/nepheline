@@ -549,6 +549,63 @@ def nmesh_seeds():
     return seeds
 
 
+def nmat_seeds():
+    """Material sources (tools/cook/material.h; ADR-0105): the version alone, every key at its
+    default, every field and slot, a tiled and turned one, and an alpha-tested one."""
+    import json
+
+    def doc(d, pretty=False):
+        if pretty:
+            return (json.dumps(d, indent=2) + "\n").encode("utf-8")
+        return json.dumps(d, separators=(",", ":")).encode("utf-8")
+
+    default = {"nmat": 1, "base_color": [0.8, 0.8, 0.8, 1], "metallic": 0, "roughness": 0.5,
+               "emissive": [0, 0, 0], "emissive_strength": 1, "normal_scale": 1,
+               "occlusion_strength": 1, "alpha": "opaque", "alpha_cutoff": 0.5,
+               "double_sided": False, "unlit": False, "tiling": [1, 1], "rotation": 0,
+               "offset": [0, 0], "textures": {}}
+    every = dict(default)
+    every.update({
+        "base_color": [0.25, 0.5, 0.75, 0.875], "metallic": 1, "roughness": 0.125,
+        "emissive": [1, 0.5, 0], "emissive_strength": 40, "normal_scale": -0.75,
+        "occlusion_strength": 0.625, "alpha": "blend", "alpha_cutoff": 0.375,
+        "double_sided": True, "unlit": True, "tiling": [4, -2], "rotation": 33.5,
+        "offset": [0.25, -0.5],
+        "textures": {
+            "base_color": {"image": "textures/brick.png"},
+            "metallic_roughness": {"image": "textures/orm.png", "wrap": ["clamp", "mirror"]},
+            "normal": {"image": "textures/deep/brick_n.tga", "filter": "nearest"},
+            "occlusion": {"image": "textures/orm.png"},
+            "emissive": {"image": "glow.jpg", "wrap": ["mirror", "repeat"], "filter": "linear"},
+        },
+    })
+    return {
+        "version_only": doc({"nmat": 1}),
+        "default": doc(default, pretty=True),
+        "every_field": doc(every),
+        "tiled_turned": doc({"nmat": 1, "tiling": [8, 8], "rotation": 90, "offset": [0.5, 0.25]}),
+        "masked_foliage": doc({"nmat": 1, "alpha": "mask", "alpha_cutoff": 0.3,
+                               "double_sided": True,
+                               "textures": {"base_color": {"image": "leaves/oak.png",
+                                                           "wrap": ["clamp", "clamp"]}}}),
+    }
+
+
+def texture_import_seeds():
+    """Images' import settings (tools/cook/texture_import.h; ADR-0105)."""
+    import json
+
+    def doc(d):
+        return json.dumps(d, separators=(",", ":")).encode("utf-8")
+
+    return {
+        "version_only": doc({"texture": 1}),
+        "normal_directx": doc({"texture": 1, "usage": "normal", "normal_green": "down"}),
+        "every_key": doc({"texture": 1, "usage": "linear", "max_extent": 2048,
+                          "uncompressed": False, "mips": True, "normal_green": "up"}),
+    }
+
+
 def write_cook_seeds(write, corpus):
     import os
     for name, data in image_seeds().items():
@@ -557,3 +614,7 @@ def write_cook_seeds(write, corpus):
         write(os.path.join(corpus, "gltf", name), data)
     for name, data in nmesh_seeds().items():
         write(os.path.join(corpus, "nmesh", name), data)
+    for name, data in nmat_seeds().items():
+        write(os.path.join(corpus, "nmat", name), data)
+    for name, data in texture_import_seeds().items():
+        write(os.path.join(corpus, "texture_import", name), data)

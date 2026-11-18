@@ -306,7 +306,7 @@ can be handed to the renderer without further checks:
   bytes the format and extent imply (whole 4x4 blocks for BC formats).
   Formats: R8, RG8, RGBA8 (UNORM and sRGB), RGBA16F, BC4, BC5, BC6H, BC7
   (UNORM and sRGB).
-- **Material** (`material.h`, type version 2; version 1 still reads): one
+- **Material** (`material.h`, type version 3; versions 1 and 2 still read): one
   `HEAD` with glTF's metallic-roughness parameters, alpha mode and cutoff,
   flags, and five texture references (GUID, UV set, wrap modes, filter,
   scale). From version 2, an alpha-tested material may carry its alpha key
@@ -315,7 +315,12 @@ can be handed to the renderer without further checks:
   cooked, that texture's wrap modes and filter, the base colour factor's
   alpha and the cutoff. A mesh's triangles for the rays hold for a material
   of the same key. The view refuses a key on a material that is not alpha
-  tested, and one in a version 1 material.
+  tested, and one in a version 1 material. From version 3, an optional
+  `UVTR` (`NphMaterialUvTransform`; ADR-0105) holds the 2x3 matrix every
+  texture coordinate of the material goes through before it is sampled,
+  composed as `KHR_texture_transform`'s; a material without it has the
+  identity. The view refuses one before version 3, of another size, not
+  finite, or whose linear part is singular.
 - **Scene** (`scene.h`, type version 2; version 1 still reads): `HEAD`,
   `NODE` (parent-before-child hierarchy with local TRS, child and sibling
   links, names), `INST` (a mesh GUID at a node with a range of material

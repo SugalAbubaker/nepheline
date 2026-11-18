@@ -185,12 +185,14 @@ typedef struct TestAsset {
     NphAsset asset;
 } TestAsset;
 
-static inline void test_asset_from_writer(NphAllocator *alloc, NphAssetWriter *w, TestAsset *out)
+// The asset in `image` (`size` bytes, allocated from `alloc` with NPH_ASSET_BLOB_MAX_ALIGN),
+// which `out` then owns, its blobs unpacked.
+static inline void test_asset_from_image(NphAllocator *alloc, void *image, u64 size, TestAsset *out)
 {
     memset(out, 0, sizeof *out);
     out->alloc = alloc;
-    NTEST_ASSERT_EQ_INT(nph_asset_writer_finish_alloc(w, alloc, &out->image, &out->size),
-                        NPH_RESULT_OK);
+    out->image = image;
+    out->size = size;
     NphAssetFileInfo info;
     NTEST_ASSERT_EQ_INT(nph_asset_file_validate(out->image, out->size, &info), NPH_RESULT_OK);
     NTEST_ASSERT_LE_UINT(info.blob_count, NPH_ARRAY_COUNT(out->blobs));
@@ -213,6 +215,28 @@ static inline void test_asset_from_writer(NphAllocator *alloc, NphAssetWriter *w
     out->asset.blobs = out->blobs;
     out->asset.blob_count = info.blob_count;
     out->asset.path = NPH_STR("memory");
+}
+
+static inline void test_asset_from_writer(NphAllocator *alloc, NphAssetWriter *w, TestAsset *out)
+{
+    void *image = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_asset_writer_finish_alloc(w, alloc, &image, &size), NPH_RESULT_OK);
+    test_asset_from_image(alloc, image, size, out);
+}
+
+// The cooked asset in the file at `path`.
+static inline void test_asset_from_file(NphAllocator *alloc, const char *path, TestAsset *out)
+{
+    void *bytes = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(path, alloc, &bytes, &size), NPH_RESULT_OK);
+    NTEST_ASSERT_GT_UINT(size, 0U);
+    void *image = NPH_ALLOC(alloc, size, NPH_ASSET_BLOB_MAX_ALIGN);
+    NTEST_ASSERT_NOT_NULL(image);
+    memcpy(image, bytes, (size_t)size);
+    nph_file_free_all(alloc, bytes, size);
+    test_asset_from_image(alloc, image, size, out);
 }
 
 static inline void test_asset_free(TestAsset *a)

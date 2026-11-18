@@ -92,28 +92,42 @@ typedef enum CookerSourceKind {
     COOKER_SOURCE_IMAGE,    // .png, .jpg, .jpeg, .tga, .bmp, .hdr, and .dds
     COOKER_SOURCE_MESH,     // .nmesh (polymesh.h)
     COOKER_SOURCE_SOUND,    // .wav (sound.h)
+    COOKER_SOURCE_MATERIAL, // .nmat (material.h)
 } CookerSourceKind;
 
 CookerSourceKind cooker_source_kind(const char *path);
 
 // Cooks one source by its kind: a scene, an image as a texture with the
-// default usage (HDR for .hdr), an editable mesh, or a sound. A directory
-// is walked (cooker_cook_directory). NPH_RESULT_UNSUPPORTED for another
-// extension.
+// default usage (HDR for .hdr) or its settings file's, an editable mesh, a
+// sound, or a material. A directory is walked (cooker_cook_directory).
+// NPH_RESULT_UNSUPPORTED for another extension.
 NPH_MUST_USE NphResult cooker_cook_file(Cooker *cooker, const char *source_path);
 
-// Cooks every scene (.gltf, .glb), editable mesh (.nmesh), and sound (.wav)
-// under `dir`, recursively, in name order (images are cooked through the
-// scenes that use them, or one by one with cooker_cook_image). The first
-// error is returned after every file was tried.
+// Cooks every scene (.gltf, .glb), editable mesh (.nmesh), sound (.wav),
+// and material (.nmat) under `dir`, recursively, in name order (images are
+// cooked through the scenes and materials that use them, or one by one with
+// cooker_cook_image). The first error is returned after every file was
+// tried.
 NPH_MUST_USE NphResult cooker_cook_directory(Cooker *cooker, const char *dir);
 
 // Cooks a glTF scene with every asset it contains.
 NPH_MUST_USE NphResult cooker_cook_gltf(Cooker *cooker, const char *source_path);
 
-// Cooks an image as a texture of the given usage.
+// Cooks an image as a texture of the given usage, or of the usage its
+// settings file sets (<source>.import.json, texture_import.h), under the
+// sub-asset of the usage's name ("color", "linear", "normal", "mask", "hdr").
+// The settings file's other settings are over the cooker's, and its bytes
+// join the content hash. NPH_RESULT_PARSE_ERROR or
+// NPH_RESULT_VERSION_MISMATCH for a bad settings file.
 NPH_MUST_USE NphResult cooker_cook_image(Cooker *cooker, const char *source_path,
                                          CookTextureUsage usage);
+
+// Cooks a material source (material.h) as a material asset, sub-asset
+// "material", and each image it names as a texture of its slot's usage
+// under the image's own key (as cooker_cook_image keys it, with the image's
+// settings file). NPH_RESULT_NOT_FOUND for an image that is missing; the
+// reader's errors.
+NPH_MUST_USE NphResult cooker_cook_material(Cooker *cooker, const char *source_path);
 
 // Cooks an editable mesh (polymesh.h) as a mesh asset, sub-asset "mesh":
 // its faces triangulated, with normals by its smoothing angle, through the

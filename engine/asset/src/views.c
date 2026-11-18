@@ -9,6 +9,7 @@
 #include <nepheline/asset/sound.h>
 #include <nepheline/asset/texture.h>
 #include <nepheline/core/assert.h>
+#include <nepheline/math/scalar.h>
 
 #include <string.h>
 
@@ -594,8 +595,47 @@ NphResult nph_material_view(const NphAsset *asset, NphMaterialView *out)
             return NPH_RESULT_CORRUPT;
         }
     }
+    // The texture coordinates' transform, from version 3: finite, and not singular.
+    const NphMaterialUvTransform *uv = NULL;
+    const NphAssetBlob *uvb = nph_asset_blob(asset, NPH_MATERIAL_TAG_UV, 0U);
+    if (uvb != NULL) {
+        if (asset->header.type_version < 3U || uvb->size != sizeof(NphMaterialUvTransform)) {
+            return NPH_RESULT_CORRUPT;
+        }
+        uv = (const NphMaterialUvTransform *)uvb->data;
+        const f32 m[6] = {uv->m00, uv->m01, uv->m02, uv->m10, uv->m11, uv->m12};
+        for (u32 i = 0; i < 6U; ++i) {
+            if (!nph_f32_is_finite(m[i])) {
+                return NPH_RESULT_CORRUPT;
+            }
+        }
+        const f64 det = (f64)uv->m00 * (f64)uv->m11 - (f64)uv->m01 * (f64)uv->m10;
+        if (!(det != 0.0)) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
     out->header = h;
+    out->uv = uv;
     return NPH_RESULT_OK;
+}
+
+NphMaterialUvTransform nph_material_uv_identity(void)
+{
+    const NphMaterialUvTransform t = {1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F};
+    return t;
+}
+
+NphMaterialUvTransform nph_material_view_uv(const NphMaterialView *view)
+{
+    NPH_ASSERT(view != NULL);
+    return view->uv != NULL ? *view->uv : nph_material_uv_identity();
+}
+
+bool nph_material_uv_is_identity(const NphMaterialUvTransform *t)
+{
+    NPH_ASSERT(t != NULL);
+    return t->m00 == 1.0F && t->m01 == 0.0F && t->m02 == 0.0F && t->m10 == 0.0F && t->m11 == 1.0F &&
+           t->m12 == 0.0F;
 }
 
 void nph_material_header_default(NphMaterialHeader *out)

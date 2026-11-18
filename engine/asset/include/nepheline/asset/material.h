@@ -16,9 +16,12 @@
 extern "C" {
 #endif
 
-// 2: the alpha test's key (NphMaterialHeader.alpha_key). Version 1 still reads: it has none.
-#define NPH_MATERIAL_TYPE_VERSION 2U
+// 2: the alpha test's key (NphMaterialHeader.alpha_key). 3: the texture coordinates'
+// transform (UVTR, NphMaterialUvTransform; ADR-0105). Versions 1 and 2 still read: they have no
+// transform, and version 1 no key.
+#define NPH_MATERIAL_TYPE_VERSION 3U
 #define NPH_MATERIAL_TAG_HEADER   NPH_FOURCC('H', 'E', 'A', 'D')
+#define NPH_MATERIAL_TAG_UV       NPH_FOURCC('U', 'V', 'T', 'R')
 
 typedef enum NphMaterialAlphaMode {
     NPH_MATERIAL_ALPHA_OPAQUE = 0,
@@ -86,14 +89,35 @@ typedef struct NphMaterialHeader {
 
 NPH_STATIC_ASSERT(sizeof(NphMaterialHeader) == 224U, "the material header is 224 bytes");
 
+// Version 3, optional (UVTR): the transform every texture coordinate of the material goes through
+// before any of its textures is sampled, u' = m00 u + m01 v + m02 and v' = m10 u + m11 v + m12.
+// The cooker composes it as KHR_texture_transform does: scale, then rotation, then offset
+// (cook/material.h). Every value is finite and the linear part is not singular. A material
+// without it, and every version 1 and 2 material, has the identity.
+typedef struct NphMaterialUvTransform {
+    f32 m00, m01, m02;
+    f32 m10, m11, m12;
+} NphMaterialUvTransform;
+
+NPH_STATIC_ASSERT(sizeof(NphMaterialUvTransform) == 24U, "a UV transform is 24 bytes");
+
 typedef struct NphMaterialView {
     const NphMaterialHeader *header;
+    const NphMaterialUvTransform *uv; // NULL: the identity
 } NphMaterialView;
 
 NPH_MUST_USE NphResult nph_material_view(const NphAsset *asset, NphMaterialView *out);
 
-// A header with glTF's defaults: white, non-metallic, fully rough, opaque,
-// no textures.
+// The identity transform.
+NphMaterialUvTransform nph_material_uv_identity(void);
+// The view's transform: its UVTR blob, or the identity.
+NphMaterialUvTransform nph_material_view_uv(const NphMaterialView *view);
+// True when `t` is the identity, exactly.
+bool nph_material_uv_is_identity(const NphMaterialUvTransform *t);
+
+// A header with glTF's defaults: white, fully metallic and fully rough
+// (glTF's metallic and roughness factors default to 1), opaque, no
+// textures.
 void nph_material_header_default(NphMaterialHeader *out);
 
 #ifdef __cplusplus

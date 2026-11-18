@@ -658,6 +658,8 @@ static const char *kind_name(const EditorAssetEntry *e)
         return "image";
     case COOKER_SOURCE_SOUND:
         return "sound";
+    case COOKER_SOURCE_MATERIAL:
+        return "material";
     case COOKER_SOURCE_NONE:
         break;
     }
@@ -697,8 +699,8 @@ static BrowserAction context_menu(const EditorAssetEntry *e, bool playing)
     return action;
 }
 
-// What a double-click does: open a folder, place a scene, cook an image or
-// a sound.
+// What a double-click does: open a folder, place a scene, cook an image, a
+// sound, or a material.
 static BrowserAction double_click_action(const EditorAssetEntry *e, bool playing)
 {
     if (e->is_directory) {
@@ -710,6 +712,7 @@ static BrowserAction double_click_action(const EditorAssetEntry *e, bool playing
         return playing ? ACTION_NONE : ACTION_PLACE;
     case COOKER_SOURCE_IMAGE:
     case COOKER_SOURCE_SOUND:
+    case COOKER_SOURCE_MATERIAL:
         return ACTION_COOK;
     case COOKER_SOURCE_NONE:
         break;

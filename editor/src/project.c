@@ -243,9 +243,11 @@ static void dirname_of(const char *path, char *out, u64 cap)
 static NphResult copy_source(EditorProject *p, const char *from, const char *to)
 {
     NPH_TRY(nph_fs_copy_file(from, to));
-    if (cooker_source_kind(from) == COOKER_SOURCE_SOUND) {
-        // A sound's settings file comes with it (cook/sound.h); one already
-        // in the project stays when the sound comes without.
+    const CookerSourceKind kind = cooker_source_kind(from);
+    if (kind == COOKER_SOURCE_SOUND || kind == COOKER_SOURCE_IMAGE) {
+        // A sound's or an image's settings file comes with it (cook/sound.h,
+        // cook/texture_import.h); one already in the project stays when the
+        // file comes without.
         char settings_from[EDITOR_PROJECT_PATH_MAX + 16U];
         char settings_to[EDITOR_PROJECT_PATH_MAX + 16U];
         if ((u64)snprintf(settings_from, sizeof settings_from, "%s.import.json", from) >=
@@ -257,7 +259,7 @@ static NphResult copy_source(EditorProject *p, const char *from, const char *to)
         return nph_fs_exists(settings_from) ? nph_fs_copy_file(settings_from, settings_to)
                                             : NPH_RESULT_OK;
     }
-    if (cooker_source_kind(from) != COOKER_SOURCE_SCENE) {
+    if (kind != COOKER_SOURCE_SCENE) {
         return NPH_RESULT_OK;
     }
     DependencyCopy d;
@@ -321,6 +323,10 @@ static NphResult cook_source(EditorProject *p, Cooker *c, const char *source, bo
     case COOKER_SOURCE_SOUND:
         // No scene names a sound: it cooks whenever it comes in.
         return cooker_cook_sound(c, source);
+    case COOKER_SOURCE_MATERIAL:
+        // A material cooks whenever it comes in or changes, with its images;
+        // what it wrote is reloaded with the rest (`note_written`).
+        return cooker_cook_material(c, source);
     case COOKER_SOURCE_NONE:
         break;
     }

@@ -38,6 +38,7 @@ set(cook_sources
     src/dds.c
     src/gltf.c
     src/image.c
+    src/material.c
     src/mesh.c
     src/mesh_lod.c
     src/mesh_voxel.c
@@ -49,6 +50,7 @@ set(cook_sources
     src/sound.c
     src/specgloss.c
     src/texture.c
+    src/texture_import.c
 )
 file(GLOB_RECURSE cook_headers CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
@@ -105,12 +107,14 @@ nph_add_test(cook
         tests/test_dds.c
         tests/test_gltf.c
         tests/test_image.c
+        tests/test_material.c
         tests/test_mesh.c
         tests/test_polymesh.c
         tests/test_ray_trim.c
         tests/test_sound.c
         tests/test_specgloss.c
         tests/test_texture.c
+        tests/test_texture_import.c
         tests/test_voxel.c
     DEPS
         nph::cook

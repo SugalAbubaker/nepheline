@@ -341,7 +341,7 @@ Designed around the native-4K, 240 FPS frame architecture in §10. Built in stag
   - Phase 1: primitives (cube, sphere, plane, cylinder) and basic mesh editing (vertex/face transform, extrude), saved as cooked meshes.
   - Phase 2 (Phase 15, ADR-0102): level-design modeling: edges; delete, merge, split; bevel, inset, loop cut, mirror; materials per face; UV projection that tiles textures at real-world scale; grid and vertex snapping. Detailed props and hero assets come from Blender.
   - Complex models are imported from DCC tools (e.g. Blender) via glTF.
-- **Materials and textures** (Phase 15, ADR-0102): materials made and edited in the editor, procedural textures, and texture painting on models.
+- **Materials and textures** (Phase 15, ADR-0102, ADR-0105): materials made and edited in the editor, procedural textures, and texture painting on models.
 - **World building** (Phase 15, ADR-0102): prefabs and placement tools; city-sized worlds of cells and scene files, streamed in the editor as in the game; terrain sculpted and painted; roads and splines; scatter painting.
 - Autosave, with the work recovered after a crash (Phase 15, ADR-0102, ADR-0104).
 - Feature test scenes: built-in sample scenes for exercising renderer, physics, and audio features.

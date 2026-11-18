@@ -1279,6 +1279,70 @@ NTEST(views, material_view_and_defaults)
     image_asset_free(&ia);
 }
 
+// A material asset of the default header and, when `uv` is not NULL, a UVTR blob of `uv_size`
+// bytes from it.
+static void build_material(ImageAsset *ia, const NphMaterialUvTransform *uv, u64 uv_size)
+{
+    memset(ia, 0, sizeof *ia);
+    ia->alloc = nph_allocator_system();
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_MATERIAL, NPH_MATERIAL_TYPE_VERSION,
+                          nph_guid_from_cstr("mat"), 1U);
+    NphMaterialHeader h;
+    nph_material_header_default(&h);
+    add(&w, NPH_MATERIAL_TAG_HEADER, 0U, &h, sizeof h);
+    if (uv != NULL) {
+        add(&w, NPH_MATERIAL_TAG_UV, 0U, uv, uv_size);
+    }
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, material_uv_transform_from_version_3)
+{
+    // Without the blob: the identity.
+    ImageAsset ia;
+    build_material(&ia, NULL, 0U);
+    NphMaterialView v;
+    NTEST_ASSERT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(v.uv == NULL);
+    NphMaterialUvTransform t = nph_material_view_uv(&v);
+    NTEST_EXPECT_TRUE(nph_material_uv_is_identity(&t));
+    image_asset_free(&ia);
+
+    // With it: tiled twice by three, turned a quarter, moved.
+    const NphMaterialUvTransform tiled = {0.0F, -3.0F, 0.25F, 2.0F, 0.0F, 0.5F};
+    build_material(&ia, &tiled, sizeof tiled);
+    NTEST_ASSERT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_TRUE(v.uv != NULL);
+    t = nph_material_view_uv(&v);
+    NTEST_EXPECT_NEAR_F32(t.m01, -3.0F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(t.m02, 0.25F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(t.m10, 2.0F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(t.m12, 0.5F, 0.0F);
+    NTEST_EXPECT_FALSE(nph_material_uv_is_identity(&t));
+    // Not finite, or singular: refused.
+    NphMaterialUvTransform *p = (NphMaterialUvTransform *)blob_bytes(&ia, NPH_MATERIAL_TAG_UV, 0U);
+    p->m02 = nph_f32_from_bits(0x7F800000U); // infinite
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    p->m02 = 0.25F;
+    p->m11 = nph_f32_from_bits(0x7FC00000U); // not a number
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    p->m11 = 0.0F;
+    p->m10 = 0.0F; // no v' from u: the linear part is singular
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    p->m10 = 2.0F;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    // Not before version 3.
+    ia.asset.header.type_version = 2U;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+
+    // Of its size alone.
+    build_material(&ia, &tiled, sizeof tiled - 4U);
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+}
+
 // ---------------------------------------------------------------------------
 // Scene
 // ---------------------------------------------------------------------------
@@ -1822,6 +1886,7 @@ NTEST(views, fuzz_seeds_written_by_the_python_description_validate)
     check_seed_asset("nph/texture", NPH_ASSET_TYPE_TEXTURE);
     check_seed_asset("nph/material", NPH_ASSET_TYPE_MATERIAL);
     check_seed_asset("nph/material_keyed", NPH_ASSET_TYPE_MATERIAL);
+    check_seed_asset("nph/material_uv", NPH_ASSET_TYPE_MATERIAL);
     check_seed_asset("nph/scene", NPH_ASSET_TYPE_SCENE);
     check_seed_asset("nph/scene_cells", NPH_ASSET_TYPE_SCENE);
     check_seed_asset("nph/sound", NPH_ASSET_TYPE_SOUND);
