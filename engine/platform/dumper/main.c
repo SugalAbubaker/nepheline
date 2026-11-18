@@ -81,7 +81,7 @@ int main(int argc, char **argv)
         mei.ThreadId = shared->thread_id;
         // NOLINTNEXTLINE(performance-no-int-to-ptr): an address in the dumped process...
         mei.ExceptionPointers = (PEXCEPTION_POINTERS)(uptr)shared->pointers;
-        mei.ClientPointers = TRUE; // ...which dbghelp reads there
+        mei.ClientPointers = TRUE;                              // ...which dbghelp reads there
         const MINIDUMP_TYPE type = (MINIDUMP_TYPE)shared->type; // flags, as dbghelp takes them
         shared->error = crash_win32_dump_attempt(write_dump, process, pid, file, type,
                                                  shared->pointers != 0U ? &mei : NULL, &scope,
