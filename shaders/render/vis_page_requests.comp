@@ -67,11 +67,16 @@ void main()
     // Field by field, not a copy of the record (docs/build.md "Shaders").
     MaterialRef material = MaterialRef(view.v.materials)[cluster.material];
     // The material's coordinates, as the resolve samples them (ADR-0105).
-    const vec4 uv_u = material.m.uv_u;
-    const vec4 uv_v = material.m.uv_v;
-    const vec2 uv = nph_material_uv(uv_u, uv_v, uvs * bary.b);
-    const vec2 uv_dx = nph_material_uv_linear(uv_u, uv_v, uvs * bary.ddx);
-    const vec2 uv_dy = nph_material_uv_linear(uv_u, uv_v, uvs * bary.ddy);
+    vec2 uv = uvs * bary.b;
+    vec2 uv_dx = uvs * bary.ddx;
+    vec2 uv_dy = uvs * bary.ddy;
+    if (nph_material_has_uv(material.m.flags)) {
+        const vec4 uv_u = material.m.uv_u;
+        const vec4 uv_v = material.m.uv_v;
+        uv = nph_material_uv(uv_u, uv_v, uv);
+        uv_dx = nph_material_uv_linear(uv_u, uv_v, uv_dx);
+        uv_dy = nph_material_uv_linear(uv_u, uv_v, uv_dy);
+    }
     const uint wrap = material.m.wrap;
     for (uint slot = 0u; slot < uint(NPH_RENDER_TEX_COUNT); ++slot) {
         paging_request(paging, material.m.textures[slot], (wrap >> (4u * slot)) & 15u, uv, uv_dx,

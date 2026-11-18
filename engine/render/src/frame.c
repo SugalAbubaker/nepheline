@@ -381,6 +381,9 @@ static void write_materials(NphRenderer *r)
     const u32 fs = r->frame_slot;
     NphRenderMaterialData *table = render_frame_at(r, r->layout.materials_offset);
     bool keys = false;
+    // A table holding marks is always written again on its next frame, so a frame that writes
+    // none holds none.
+    r->materials_marked = false;
     if (r->material_uploaded[fs] != r->material_version) {
         // A material updated in place since the last frame is marked on this frame alone (its
         // pixels take no history; ADR-0105). A slot holding marks is written again when it next
@@ -407,6 +410,7 @@ static void write_materials(NphRenderer *r)
         fill_material(r, &def, 0U, &table[r->desc.max_materials], &def_slots, def_textures);
         // 0 is no version (they start at 1): the slot is written whole when it next comes round.
         r->material_uploaded[fs] = marked ? 0U : r->material_version;
+        r->materials_marked = marked;
         r->levels_uploaded[fs] = r->paging.level_count;
         ray_keys_changed(r, keys);
         return;

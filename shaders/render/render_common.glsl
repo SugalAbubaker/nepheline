@@ -35,6 +35,14 @@ vec2 nph_material_uv_linear(vec4 uv_u, vec4 uv_v, vec2 d)
 {
     return vec2(dot(uv_u.xy, d), dot(uv_v.xy, d));
 }
+
+// Whether a material's flags say its coordinates are transformed. Only then are its rows read:
+// a material without a transform (every glTF one) pays the flag's test, not the rows' loads and
+// their arithmetic, which cost the reference scenes 0.03 to 0.07 ms a frame (ADR-0105).
+bool nph_material_has_uv(uint flags)
+{
+    return (flags & uint(NPH_RENDER_MATERIAL_UV_TRANSFORM)) != 0u;
+}
 NPH_BUFFER_REF(LightsRef) { NphRenderLightData l[]; };
 // One light's record: LightRef(lights)[i] is the reference to lights[i]
 // (GL_EXT_buffer_reference2), whose fields then load at fixed offsets from

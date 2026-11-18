@@ -1408,11 +1408,14 @@ struct NphRenderer {
     NphHashMap ray_key_ids;
     u32 ray_key_count;
     u64 material_uploaded[NPH_GPU_FRAMES_IN_FLIGHT]; // the version each slot holds (0: none)
-    u64 levels_uploaded[NPH_GPU_FRAMES_IN_FLIGHT];   // and the paged levels' count (paging)
-    RenderDrawCmd *draw_cmds;                        // max_draws, rebuilt every frame
-    u32 hidden_count;                                // live instances with `hidden` set
-    u32 opaque_count;     // draw_cmds[0, opaque_count): opaque and masked
-    u32 blend_count;      // then the blended ones
+    // This frame's material table marks a material changed in place (ADR-0105): the temporal
+    // resolve then reads its clusters' marks (NphRenderTaaPush.fresh).
+    bool materials_marked;
+    u64 levels_uploaded[NPH_GPU_FRAMES_IN_FLIGHT]; // and the paged levels' count (paging)
+    RenderDrawCmd *draw_cmds;                      // max_draws, rebuilt every frame
+    u32 hidden_count;                              // live instances with `hidden` set
+    u32 opaque_count;                              // draw_cmds[0, opaque_count): opaque and masked
+    u32 blend_count;                               // then the blended ones
     u64 last_frame_index; // nph_render_frame's last frame (NPH_U64_MAX: none)
     b32 pending_uploads;
 

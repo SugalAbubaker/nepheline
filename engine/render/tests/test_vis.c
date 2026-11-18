@@ -1416,7 +1416,8 @@ static u32 skin_clusters(RenderFixture *f)
 // finest a checker, the next stripes, the next a checker of its own again, those
 // past it wholly solid. A pixel's alpha therefore says which level it sampled,
 // so the wrong coordinates or the wrong derivatives show. `side_log2` at most 8.
-static NphRenderMaterial levelled_mask(RenderFixture *f, u32 side_log2, bool nearest)
+static NphRenderMaterial levelled_mask(RenderFixture *f, u32 side_log2, bool nearest,
+                                       const NphRenderUvTransform *uv)
 {
     enum {
         MAX_LEVELS = 9
@@ -1458,6 +1459,9 @@ static NphRenderMaterial levelled_mask(RenderFixture *f, u32 side_log2, bool nea
     md.double_sided = 1;
     md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex;
     md.textures[NPH_RENDER_SLOT_BASE_COLOR].nearest = nearest ? 1 : 0;
+    if (uv != NULL) {
+        md.uv = *uv;
+    }
     NphRenderMaterial m;
     NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &m), NPH_RESULT_OK);
     return m;
@@ -1496,12 +1500,12 @@ static u32 covered_pixels(const u8 *image)
 // enough that a hidden cluster may be culled after one and not the other
 // (lavapipe: one of 336); without the test both draw the same clusters, and
 // each draws the image it draws with it.
-NTEST_F(Vis, the_software_raster_draws_small_masked_clusters_as_the_hardware_raster_does)
+static void expect_software_raster_matches_hardware(RenderFixture *f,
+                                                    const NphRenderUvTransform *uv)
 {
-    REQUIRE_PRODUCTION(f);
     const NphRenderMesh sphere = mesh_of(f, make_sphere);
-    const NphRenderMaterial leaves = levelled_mask(f, 3U, false);
-    const NphRenderMaterial crisp = levelled_mask(f, 3U, true);
+    const NphRenderMaterial leaves = levelled_mask(f, 3U, false, uv);
+    const NphRenderMaterial crisp = levelled_mask(f, 3U, true, uv);
     for (u32 i = 0; i < 48U; ++i) {
         const f64 x = -3.5 + (f64)(i % 8U);
         const f64 z = -5.0 - 2.0 * (f64)(i >> 3U);
@@ -1541,7 +1545,35 @@ NTEST_F(Vis, the_software_raster_draws_small_masked_clusters_as_the_hardware_ras
               sw.vis_clusters_sw, sw.vis_clusters, hw.vis_clusters, hw_unculled.vis_clusters, skins,
               covered, (f64)d.within * 100.0, (f64)d.mean, d.max);
     NTEST_EXPECT_GT_UINT(covered, TEST_TARGET_SIZE * TEST_TARGET_SIZE / 16U);
-    NTEST_EXPECT_TRUE(d.within >= 0.998F);
+    if (uv == NULL) {
+        NTEST_EXPECT_TRUE(d.within >= 0.998F);
+    } else {
+        // Moved by a transform, the holes' edges cross the spheres elsewhere, where the software
+        // raster's coordinates (linear across a triangle on the screen, the hardware's with
+        // perspective) leave more pixels on the other side of an edge: over six transforms, 6 to
+        // 22 of some 500 covered pixels apart (8 for a shift, which moves the edges and nothing
+        // else), against 1 for the coordinates as cooked. Left out of the software raster, the
+        // transform leaves 297 apart.
+        const u32 apart =
+            (u32)((1.0F - d.within) * (f32)(TEST_TARGET_SIZE * TEST_TARGET_SIZE) + 0.5F);
+        NTEST_EXPECT_LE_UINT(apart, covered / 16U);
+    }
+}
+
+NTEST_F(Vis, the_software_raster_draws_small_masked_clusters_as_the_hardware_raster_does)
+{
+    REQUIRE_PRODUCTION(f);
+    expect_software_raster_matches_hardware(f, NULL);
+}
+
+// The same with the masks' coordinates turned and shifted by their materials' transform
+// (ADR-0105): the software raster's coordinates, and the levels they pick, are the hardware
+// raster's.
+NTEST_F(Vis, the_software_raster_transforms_a_masks_coordinates_as_the_hardware_raster_does)
+{
+    REQUIRE_PRODUCTION(f);
+    const NphRenderUvTransform turned = {0.8F, -0.6F, 0.25F, 0.6F, 0.8F, 0.5F};
+    expect_software_raster_matches_hardware(f, &turned);
 }
 
 // Too few small masked clusters to pay for their dispatch draw in hardware: the
@@ -1562,7 +1594,7 @@ NTEST(vis, few_small_masked_clusters_stay_in_hardware)
         NTEST_SKIP("no production path on this device");
     }
     const NphRenderMesh sphere = mesh_of(&fx, make_sphere);
-    const NphRenderMaterial leaves = levelled_mask(&fx, 3U, false);
+    const NphRenderMaterial leaves = levelled_mask(&fx, 3U, false, NULL);
     for (u32 i = 0; i < 48U; ++i) {
         const f64 x = -3.5 + (f64)(i % 8U);
         const f64 z = -5.0 - 2.0 * (f64)(i >> 3U);
@@ -1619,7 +1651,7 @@ NTEST(vis, the_software_raster_samples_a_masked_material_as_the_hardware_raster_
                         NPH_RESULT_OK);
     const NphRenderMesh plane = test_upload_mesh(fx.renderer, &data);
     nph_render_mesh_data_free(&data);
-    const NphRenderMaterial sheet = levelled_mask(&fx, 8U, false);
+    const NphRenderMaterial sheet = levelled_mask(&fx, 8U, false, NULL);
     NphRenderTransform t = at(0.0, 0.0, 0.0, 40.0F);
     t.linear = nph_mat3_mul(nph_mat3_from_quat(nph_quat_from_axis_angle(nph_vec3_unit_y(), 0.37F)),
                             t.linear);
@@ -1806,6 +1838,125 @@ NTEST_F(Vis, alpha_modes_and_sides_match_the_reference)
               (f64)d.within * 100.0, (f64)d.mean, d.max);
     NTEST_EXPECT_TRUE(d.within >= 0.97F);
     NTEST_EXPECT_TRUE(d.mean <= 1.5F);
+}
+
+// A fixture on a device with mesh shaders (where it has them) or with them switched off (the
+// indexed draws lavapipe-class devices take), and a production path: false, nothing left, where
+// it has none.
+static bool raster_fixture(RenderFixture *fx, bool mesh_shaders)
+{
+    memset(fx, 0, sizeof *fx);
+    NphGpuDeviceDesc dd;
+    memset(&dd, 0, sizeof dd);
+    dd.alloc = nph_allocator_system();
+    dd.headless = 1;
+    dd.disable_features = mesh_shaders ? 0U : (u32)NPH_GPU_OPTIONAL_MESH_SHADER;
+    fx->dev = test_gpu_create(&dd);
+    if (fx->dev == NULL) {
+        return false;
+    }
+    NphRendererDesc rd;
+    test_renderer_desc(&rd, fx->dev);
+    NTEST_ASSERT_EQ_INT(nph_renderer_create(&rd, &fx->renderer), NPH_RESULT_OK);
+    NphGpuRenderGraphDesc gd;
+    memset(&gd, 0, sizeof gd);
+    gd.alloc = nph_allocator_system();
+    NTEST_ASSERT_EQ_INT(nph_gpu_render_graph_create(fx->dev, &gd, &fx->graph), NPH_RESULT_OK);
+    fx->target = test_make_target(fx->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, TEST_TARGET_SIZE);
+    fx->pixels = NPH_ALLOC_ARRAY_ZEROED(nph_allocator_system(), u8, PIXELS);
+    if (!nph_renderer_production_supported(fx->renderer)) {
+        test_render_teardown(fx);
+        return false;
+    }
+    return true;
+}
+
+// A masked checker whose coordinates its material's transform tiles twice across, shifts and
+// flips top to bottom (ADR-0105): the production path's raster runs the alpha test on them, on
+// mesh shaders and on indexed draws, and its resolve shades them, as the reference does. The
+// transform shows: the untransformed checker is another image.
+NTEST(vis, a_tiled_masked_material_matches_the_reference_on_both_rasters)
+{
+    static u8 plain[PIXELS];
+    static u8 ref[PIXELS];
+    static u8 vis[PIXELS];
+    static RenderFixture fx;
+    u32 compared = 0U;
+    for (u32 pass = 0; pass < 2U; ++pass) {
+        RenderFixture *f = &fx;
+        if (!raster_fixture(f, pass == 0U)) {
+            continue;
+        }
+        NTEST_LOG("pass %u: %s", pass,
+                  f->renderer->vis.mesh_shaders ? "mesh shaders" : "indexed draws");
+        const NphRenderMesh plane = mesh_of(f, make_plane);
+        u8 checker[4U * 4U * 4U];
+        for (u32 i = 0; i < 16U; ++i) {
+            const bool on = ((i % 4U) + (i / 4U)) % 2U == 0U;
+            checker[i * 4U + 0U] = (u8)(80U + 40U * (i % 4U));
+            checker[i * 4U + 1U] = on ? 255U : 64U;
+            checker[i * 4U + 2U] = (u8)(80U + 40U * (i / 4U));
+            checker[i * 4U + 3U] = on ? 255U : 0U;
+        }
+        const void *mips[1] = {checker};
+        const u64 sizes[1] = {sizeof checker};
+        NphRenderTextureDesc td;
+        memset(&td, 0, sizeof td);
+        td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+        td.width = 4U;
+        td.height = 4U;
+        td.mip_count = 1U;
+        td.mips = mips;
+        td.mip_sizes = sizes;
+        NphRenderTexture tex;
+        NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex), NPH_RESULT_OK);
+        NphRenderMaterialDesc md;
+        nph_render_material_desc_default(&md);
+        md.alpha_mode = NPH_RENDER_ALPHA_MASK;
+        md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex;
+        md.textures[NPH_RENDER_SLOT_BASE_COLOR].nearest = 1;
+        NphRenderMaterial masked;
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &masked), NPH_RESULT_OK);
+        // Planes face +Y; a quarter turn about X faces the camera on +Z.
+        (void)instance(f, plane, masked,
+                       nph_render_transform_from_trs(nph_dvec3(0.0, 0.0, 0.0),
+                                                     nph_quat_from_rotation_x(0.5F * NPH_PI),
+                                                     nph_vec3(1.6F, 1.0F, 1.6F)));
+        NphRenderLightDesc ld;
+        memset(&ld, 0, sizeof ld);
+        ld.type = NPH_RENDER_LIGHT_TYPE_POINT;
+        ld.color = nph_vec3_one();
+        ld.intensity = 50.0F;
+        ld.position = nph_dvec3(0.0, 0.5, 2.0);
+        NphRenderLight light;
+        NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+        NphRenderView v;
+        nph_render_view_default(&v, test_camera());
+        v.ev100 = 4.0F;
+        v.background = NPH_RENDER_BACKGROUND_SOLID;
+        v.background_color = nph_vec3(30.0F, 30.0F, 30.0F);
+        render_into(f, &v, 1U, plain);
+        // u' = 2 u + 1/4 (repeated), v' = 1 - v.
+        const NphRenderUvTransform tiled = {2.0F, 0.0F, 0.25F, 0.0F, -1.0F, 1.0F};
+        md.uv = tiled;
+        NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, masked, &md), NPH_RESULT_OK);
+        render_into(f, &v, 1U, ref);
+        v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+        render_into(f, &v, 3U, vis);
+        const ImageDiff d = image_diff(ref, vis, 3U);
+        const ImageDiff shown = image_diff(plain, ref, 3U);
+        NTEST_LOG("tiled mask, reference vs production: %.2f %% within 3 levels, mean %.3f, max "
+                  "%u; the untransformed checker: %.2f %% within",
+                  (f64)d.within * 100.0, (f64)d.mean, d.max, (f64)shown.within * 100.0);
+        NTEST_EXPECT_TRUE(d.within >= 0.97F);
+        NTEST_EXPECT_TRUE(d.mean <= 1.5F);
+        NTEST_EXPECT_TRUE(shown.within <= 0.9F);
+        test_render_teardown(f);
+        ++compared;
+    }
+    if (compared == 0U) {
+        NTEST_SKIP("no production path on this device");
+    }
 }
 
 // A level of an sRGB target as linear light.

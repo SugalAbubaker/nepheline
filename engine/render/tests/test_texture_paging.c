@@ -552,6 +552,60 @@ NTEST_F(Paging, pixels_ask_for_the_pages_they_sample)
     levels_free(&l);
 }
 
+// The same through the material's coordinates' transform (ADR-0105), half the texture across:
+// the pixels at the plane's centre sample the texture's seam, so they ask for the level-0 pages
+// 7 and 0 across, and for none of those the centre's pixels ask for without it, in either
+// pipeline.
+NTEST_F(Paging, pixels_ask_for_the_pages_their_materials_transform_samples)
+{
+    REQUIRE_PAGING(f);
+    Levels l;
+    levels_make(&l, false);
+    const NphRenderTexture paged = make_texture(f, &l, true);
+    Scene s;
+    scene_make(f, &s, paged);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.roughness = 0.6F;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = paged;
+    const NphRenderUvTransform half_across = {1.0F, 0.0F, 0.5F, 0.0F, 1.0F, 0.0F};
+    md.uv = half_across;
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, s.material, &md), NPH_RESULT_OK);
+    for (u32 pl = 0; pl < 2U; ++pl) {
+        const NphRenderPipeline pipeline =
+            pl == 0U ? NPH_RENDER_PIPELINE_PRODUCTION : NPH_RENDER_PIPELINE_REFERENCE;
+        if (pipeline == NPH_RENDER_PIPELINE_PRODUCTION &&
+            !nph_renderer_production_supported(f->renderer)) {
+            continue;
+        }
+        const NphRenderView v = view_of(0U, pipeline, false);
+        for (u32 i = 0; i < 64U + NPH_GPU_FRAMES_IN_FLIGHT + 2U; ++i) {
+            (void)test_render_read(f, &v);
+        }
+        u32 seam = 0U;
+        u32 centre = 0U;
+        for (u32 y = 3U; y <= 4U; ++y) {
+            for (u32 k = 0; k < 2U; ++k) {
+                seam += nph_render_texture_page_requested(f->renderer, paged, 0U, k == 0U ? 7U : 0U,
+                                                          y) != NPH_U64_MAX
+                            ? 1U
+                            : 0U;
+                centre += nph_render_texture_page_requested(f->renderer, paged, 0U, 3U + k, y) !=
+                                  NPH_U64_MAX
+                              ? 1U
+                              : 0U;
+            }
+        }
+        NTEST_LOG("%s: %u of the 4 level-0 pages at the seam asked for, %u of the 4 central",
+                  pl == 0U ? "production" : "reference", seam, centre);
+        NTEST_EXPECT_GE_UINT(seam, 1U);
+        NTEST_EXPECT_EQ_UINT(centre, 0U);
+    }
+    scene_free(f, &s);
+    nph_render_texture_destroy(f->renderer, paged);
+    levels_free(&l);
+}
+
 // An evicted page stops being sampled at once, and its memory returns once
 // the frames that could read it are done.
 NTEST_F(Paging, an_evicted_page_returns_its_memory_after_the_frames_in_flight)

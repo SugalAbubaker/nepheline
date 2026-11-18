@@ -48,10 +48,11 @@ bool nph_ray_candidate_covers(VisViewRef view, rayQueryEXT q)
                       b);
     const uint tex = materials.m[mi].textures[NPH_RENDER_TEX_BASE_COLOR];
     if (tex != NPH_RENDER_NO_TEXTURE) {
-        // The material's coordinates (ADR-0105).
-        const vec2 uv = nph_material_uv(
-            materials.m[mi].uv_u, materials.m[mi].uv_v,
-            mat3x2(unpackHalf2x16(a0.z), unpackHalf2x16(a1.z), unpackHalf2x16(a2.z)) * b);
+        // The material's coordinates, where it has a transform (ADR-0105).
+        vec2 uv = mat3x2(unpackHalf2x16(a0.z), unpackHalf2x16(a1.z), unpackHalf2x16(a2.z)) * b;
+        if (nph_material_has_uv(materials.m[mi].flags)) {
+            uv = nph_material_uv(materials.m[mi].uv_u, materials.m[mi].uv_v, uv);
+        }
         alpha *=
             nph_sample_2d_lod(tex, materials.m[mi].samplers[NPH_RENDER_TEX_BASE_COLOR], uv, 0.0).a;
     }

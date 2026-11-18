@@ -481,9 +481,12 @@ static inline void checker_scene_build(RenderFixture *f, CheckerScene *s)
 }
 
 // Renders `v` without shadows, then with them and the card alpha tested,
-// opaque, and alpha tested again, and expects of the shadow's quarters,
-// `margin` metres inside each: alpha tested, one diagonal's black and the
-// other's lit as without shadows; opaque, all four black.
+// opaque, alpha tested again, and alpha tested with its texture mirrored
+// across by its material's transform (ADR-0105), and expects of the
+// shadow's quarters, `margin` metres inside each: alpha tested, one
+// diagonal's black and the other's lit as without shadows, mirrored the
+// other diagonal's black; opaque, all four black. The mirrored pass changes
+// what a material still alpha tested casts, as an edit in the editor does.
 static inline void checker_expect(RenderFixture *f, CheckerScene *s, const NphRenderView *v,
                                   f32 margin, const char *what)
 {
@@ -494,9 +497,13 @@ static inline void checker_expect(RenderFixture *f, CheckerScene *s, const NphRe
     set_shadows(f, s->sun, &s->ld, true);
     const f32 xs[3] = {-2.5F, -0.5F, 1.5F};
     const f32 zs[3] = {-2.0F, 0.0F, 2.0F};
-    for (u32 pass = 0; pass < 3U; ++pass) {
+    const NphRenderUvTransform mirror = {-1.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F}; // u' = 1 - u
+    bool first_was_dark = false;                                               // the first pass's
+    for (u32 pass = 0; pass < 4U; ++pass) {
         const bool opaque = pass == 1U;
+        const bool mirrored = pass == 3U;
         s->md.alpha_mode = opaque ? NPH_RENDER_ALPHA_OPAQUE : NPH_RENDER_ALPHA_MASK;
+        s->md.uv = mirrored ? mirror : nph_render_uv_identity();
         NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, s->mask, &s->md),
                             NPH_RESULT_OK);
         render_into(f, v, on);
@@ -506,8 +513,10 @@ static inline void checker_expect(RenderFixture *f, CheckerScene *s, const NphRe
                 q[i][j] = quarter_of(on, off, xs[i] + margin, xs[i + 1U] - margin, zs[j] + margin,
                                      zs[j + 1U] - margin);
                 NTEST_LOG("%s, %s card, quarter %u %u: %u black, %u lit, %u neither", what,
-                          opaque ? "opaque" : "alpha-tested", i, j, q[i][j].dark, q[i][j].lit,
-                          q[i][j].other);
+                          opaque     ? "opaque"
+                          : mirrored ? "mirrored alpha-tested"
+                                     : "alpha-tested",
+                          i, j, q[i][j].dark, q[i][j].lit, q[i][j].other);
                 NTEST_EXPECT_GT_UINT(q[i][j].dark + q[i][j].lit, 100U);
                 NTEST_EXPECT_EQ_UINT(q[i][j].other, 0U);
             }
@@ -521,6 +530,12 @@ static inline void checker_expect(RenderFixture *f, CheckerScene *s, const NphRe
                 first_dark ? q[0][0].lit + q[1][1].lit : q[0][0].dark + q[1][1].dark, 0U);
             NTEST_EXPECT_EQ_UINT(
                 first_dark ? q[0][1].dark + q[1][0].dark : q[0][1].lit + q[1][0].lit, 0U);
+            if (pass == 0U) {
+                first_was_dark = first_dark;
+            } else {
+                NTEST_EXPECT_TRUE(first_dark == (mirrored ? !first_was_dark : first_was_dark));
+            }
         }
     }
+    s->md.uv = nph_render_uv_identity();
 }

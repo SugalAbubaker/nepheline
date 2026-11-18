@@ -39,8 +39,11 @@ void main()
     const uvec4 a = AttribsRef(mesh.attribs).a[vertex];
     // The material's coordinates (ADR-0105), field by field (docs/build.md "Shaders").
     MaterialsRef materials = MaterialsRef(view.v.materials);
-    out_uv_alpha = vec3(nph_material_uv(materials.m[cluster.material].uv_u,
-                                        materials.m[cluster.material].uv_v, unpackHalf2x16(a.z)),
-                        unpackUnorm4x8(a.w).a);
+    vec2 uv = unpackHalf2x16(a.z);
+    if (nph_material_has_uv(materials.m[cluster.material].flags)) {
+        uv = nph_material_uv(materials.m[cluster.material].uv_u, materials.m[cluster.material].uv_v,
+                             uv);
+    }
+    out_uv_alpha = vec3(uv, unpackUnorm4x8(a.w).a);
 #endif
 }

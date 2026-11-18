@@ -110,6 +110,13 @@ coordinates' derivatives, not its mesh's tangents: a turned or mirrored
 transform turns its normal map with it. The CPU voxel and proxy bakes
 sample their own way and do not apply it yet (ADR-0105).
 
+Only a material with that flag reads its rows (`nph_material_has_uv`):
+every glTF material and every one of the reference scenes' has none, and
+pays the flag's test alone. Read and applied at every site, the rows cost
+the reference views 0.03 to 0.07 ms a frame on the RTX 3060 Ti, most in
+the passes that sample a material where they decode a surface or test an
+alpha (the resolve, the ReSTIR turns, the rays' hits and alpha tests).
+
 `render` sits left of `asset` in the module order (CLAUDE.md §4), so it
 cannot read cooked assets itself. `samples/common/cooked_scene.c` is the
 bridge: it loads a cooked scene and its dependencies through the asset
@@ -745,7 +752,12 @@ of the map spans. On the indirect path each raster has commands of its own
 over the list, the other's with no indices, the second's after the first
 `max_vsm_draws`. The second raster is drawn only while the renderer holds
 an alpha-tested material (`masked_materials`); a material that becomes
-alpha tested or stops being drops every page (`nph_render_material_update`).
+alpha tested or stops being drops every page (`nph_render_material_update`),
+and so does one still alpha tested whose test changes: its base colour's
+alpha, texture or sampling, its cutoff, its sides, or its coordinates'
+transform (the editor's material panel changes them as the user works,
+ADR-0105). The card's checker mirrored by its transform casts the other
+diagonal on both rasters.
 A voxel cluster's coverage is in its voxels, made from the same test
 (`covers`), so the levels that draw voxels were right already. A checker of
 alpha on a card casts a checker, on both rasters, and opaque a square
@@ -2442,9 +2454,14 @@ temporally at native resolution, for anti-aliasing only (CLAUDE.md
   meshlet cull carries the mark into its clusters' flags
   (`NPH_VIS_CLUSTER_FRESH`), the word it already reads. Where the 3 x 3's
   nearest surface is such a cluster, the resolve takes the current frame
-  alone, as after a cut, and the history resumes the frame after. Nothing
-  more is read or written. Blended surfaces are not in the visibility
-  buffer: a blended material changed in place still fades.
+  alone, as after a cut, and the history resumes the frame after. The
+  frame's push says whether its table holds a mark
+  (`NphRenderTaaPush.fresh`): on every other frame the resolve reads no
+  cluster's flags, and on a marked one it reads the nearest's, the word
+  `vis_previous_point` reads next. Blended surfaces are not in the
+  visibility buffer: a blended material changed in place still fades. The
+  radiance cache's cells take some 100 to 200 frames to follow a material
+  changed in place (`test_reflections.c`).
 
 Against the reference renderer at 4 × 4 the resolution, a still view
 converges to 0.39 levels of mean error (one sample per pixel: 1.22), a

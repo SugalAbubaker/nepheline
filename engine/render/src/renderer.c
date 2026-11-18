@@ -1682,6 +1682,23 @@ NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc
     return NPH_RESULT_OK;
 }
 
+// Whether what an alpha test reads differs between `a` and `b`: its base colour's alpha, texture
+// and sampling, its cutoff, its sides, its coordinates' transform. Their values are finite
+// (validate_material), so the comparisons are exact.
+static bool alpha_test_differs(const NphRenderMaterialDesc *a, const NphRenderMaterialDesc *b)
+{
+    const NphRenderTextureBinding *ta = &a->textures[NPH_RENDER_SLOT_BASE_COLOR];
+    const NphRenderTextureBinding *tb = &b->textures[NPH_RENDER_SLOT_BASE_COLOR];
+    const NphRenderUvTransform *ua = &a->uv;
+    const NphRenderUvTransform *ub = &b->uv;
+    return a->base_color.w != b->base_color.w || a->alpha_cutoff != b->alpha_cutoff ||
+           ua->m00 != ub->m00 || ua->m01 != ub->m01 || ua->m02 != ub->m02 || ua->m10 != ub->m10 ||
+           ua->m11 != ub->m11 || ua->m12 != ub->m12 ||
+           (a->double_sided != 0) != (b->double_sided != 0) ||
+           ta->texture.value != tb->texture.value || ta->wrap_u != tb->wrap_u ||
+           ta->wrap_v != tb->wrap_v || (ta->nearest != 0) != (tb->nearest != 0);
+}
+
 NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
                                      const NphRenderMaterialDesc *desc)
 {
@@ -1710,6 +1727,12 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
         } else {
             r->masked_materials -= 1U;
         }
+    } else if (desc->alpha_mode == NPH_RENDER_ALPHA_MASK &&
+               alpha_test_differs(&r->materials[slot].desc, desc)) {
+        // Still alpha tested, by another test (the editor's material panel changes its texture,
+        // cutoff or transform as the user works, ADR-0105): its casters cast otherwise, so the
+        // pages are drawn again. The rays test against the material's record as it is.
+        r->vsm.continuous = 0;
     }
     // Its instances' submeshes are the blended surfaces' items while it blends, their index
     // lists wound for its sides (ADR-0097).

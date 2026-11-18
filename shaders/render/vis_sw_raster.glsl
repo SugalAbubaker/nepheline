@@ -97,8 +97,15 @@ void main()
                                       materials.m[cluster.material].samplers[NPH_RENDER_TEX_BASE_COLOR]);
     const vec2 alpha_test =
         vec2(materials.m[cluster.material].base_color.a, materials.m[cluster.material].alpha_cutoff);
-    const vec4 uv_u = materials.m[cluster.material].uv_u; // its coordinates' transform (ADR-0105)
-    const vec4 uv_v = materials.m[cluster.material].uv_v;
+    // Its coordinates' transform, where it has one (ADR-0105); the cluster's, so the same in
+    // every invocation.
+    const bool transformed = nph_material_has_uv(materials.m[cluster.material].flags);
+    vec4 uv_u = vec4(1.0, 0.0, 0.0, 0.0);
+    vec4 uv_v = vec4(0.0, 1.0, 0.0, 0.0);
+    if (transformed) {
+        uv_u = materials.m[cluster.material].uv_u;
+        uv_v = materials.m[cluster.material].uv_v;
+    }
 #endif
 
     const vec3 t =
@@ -114,8 +121,11 @@ void main()
         s_z[i] = clip.z / clip.w;
 #if VIS_SW_MASKED
         const uvec4 attrib = AttribsRef(mesh.attribs).a[vertex];
-        s_uv_alpha[i] =
-            vec3(nph_material_uv(uv_u, uv_v, unpackHalf2x16(attrib.z)), unpackUnorm4x8(attrib.w).a);
+        vec2 uv = unpackHalf2x16(attrib.z);
+        if (transformed) {
+            uv = nph_material_uv(uv_u, uv_v, uv);
+        }
+        s_uv_alpha[i] = vec3(uv, unpackUnorm4x8(attrib.w).a);
 #endif
     }
     barrier();

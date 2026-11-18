@@ -281,6 +281,7 @@ NphResult render_taa_declare(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuRgI
     push->tonemapper = r->tonemap_push.tonemapper;
     push->encode_srgb = r->tonemap_push.encode_srgb;
     push->noise = (u32)(t->sequence % 64U);
+    push->fresh = r->materials_marked ? 1U : 0U;
 
     // The next frame continues from this one.
     t->exposure = exposure;

@@ -125,10 +125,11 @@ void main()
     vec2 then;
     float depth_then;
     // A material changed in place this frame (ADR-0105): where the nearest surface draws it, no
-    // history, as after a cut. The cluster's flags are the word vis_previous_point reads.
+    // history, as after a cut. Its clusters' flags are read only on a frame that marked some.
     const bool fresh =
-        nearest != 0ul && (VisClustersRef(view.v.clusters).c[vis_cluster(nearest)].flags &
-                           uint(NPH_VIS_CLUSTER_FRESH)) != 0u;
+        pc.fresh != 0u && nearest != 0ul &&
+        (VisClustersRef(view.v.clusters).c[vis_cluster(nearest)].flags &
+         uint(NPH_VIS_CLUSTER_FRESH)) != 0u;
     if (pc.history_scale > 0.0 && !fresh &&
         vis_previous_point(view, nearest_at, nearest, then, depth_then)) {
         // The nearest surface's motion without jitter (its sample lies the

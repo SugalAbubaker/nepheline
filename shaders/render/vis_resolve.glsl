@@ -355,10 +355,15 @@ void main()
             const NphRenderMaterialData material =
                 MaterialRef(view.v.materials)[cluster.material].m;
             // The material's coordinates, and their derivatives through its linear part
-            // (ADR-0105).
-            s.uv = nph_material_uv(material.uv_u, material.uv_v, s.uv);
-            s.uv_dx = nph_material_uv_linear(material.uv_u, material.uv_v, s.uv_dx);
-            s.uv_dy = nph_material_uv_linear(material.uv_u, material.uv_v, s.uv_dy);
+            // (ADR-0105), where it has a transform.
+            if (nph_material_has_uv(material.flags)) {
+                MaterialRef rows = MaterialRef(view.v.materials)[cluster.material];
+                const vec4 uv_u = rows.m.uv_u;
+                const vec4 uv_v = rows.m.uv_v;
+                s.uv = nph_material_uv(uv_u, uv_v, s.uv);
+                s.uv_dx = nph_material_uv_linear(uv_u, uv_v, s.uv_dx);
+                s.uv_dy = nph_material_uv_linear(uv_u, uv_v, s.uv_dy);
+            }
             color = nph_surface_shade(rview, material, s, nph_surface_base_color(material, s));
         }
     }

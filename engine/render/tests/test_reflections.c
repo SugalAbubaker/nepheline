@@ -85,6 +85,58 @@ static f64 mean_of(const u8 *image, const bool *mask)
     return count != 0U ? sum / (f64)count : 0.0;
 }
 
+// What a mirror's pixels show (a_mirror_shows_what_its_rays_meet's scene): of those whose rays
+// along their mirror directions meet the wall (`seen`) and of those whose rays leave for the
+// sky (`open`), neither near the wall's outline, how many are red, with reflections (`with`) and
+// without.
+typedef struct MirrorCounts {
+    u32 seen;
+    u32 seen_red;
+    u32 off_red;
+    u32 open;
+    u32 open_red;
+} MirrorCounts;
+
+static MirrorCounts mirror_counts(const TestBoxScene *scene, const u8 *with, const u8 *without)
+{
+    MirrorCounts c;
+    memset(&c, 0, sizeof c);
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        const NphVec3 d = test_box_pixel_ray(scene, i);
+        f32 t = 0.0F;
+        NphVec3 n;
+        if (test_box_hit(scene, scene->eye, d, 0.0F, &t, &n) != 0) {
+            continue; // the mirror alone
+        }
+        const NphVec3 x = nph_vec3_add(scene->eye, nph_vec3_scale(d, t));
+        const NphVec3 o = nph_vec3_add(x, nph_vec3_scale(n, 1e-4F));
+        const NphVec3 r = nph_vec3_sub(d, nph_vec3_scale(n, 2.0F * nph_vec3_dot(d, n)));
+        // Of the rays around it, all to the wall or none: not near its outline.
+        u32 met = 0U;
+        for (i32 a = -1; a <= 1; ++a) {
+            for (i32 b = -1; b <= 1; ++b) {
+                const NphVec3 w = nph_vec3_normalize(
+                    nph_vec3_add(r, nph_vec3((f32)a * 0.05F, (f32)b * 0.05F, 0.0F)));
+                f32 hit = 0.0F;
+                NphVec3 hn;
+                met += test_box_hit(scene, o, w, 0.0F, &hit, &hn) == 1 ? 1U : 0U;
+            }
+        }
+        const u8 *px = with + (u64)i * 4U;
+        const bool red_here = px[0] > (u32)px[1] + 24U;
+        const bool red_off = without[(u64)i * 4U] > (u32)without[(u64)i * 4U + 1U] + 24U;
+        if (met == 9U) {
+            ++c.seen;
+            c.seen_red += red_here ? 1U : 0U;
+            c.off_red += red_off ? 1U : 0U;
+        } else if (met == 0U) {
+            ++c.open;
+            c.open_red += red_here ? 1U : 0U;
+        }
+    }
+    return c;
+}
+
 // A mirror on the ground, a red wall standing on it, and a black sky: a pixel of the mirror shows
 // the wall exactly where a ray the test casts along its mirror direction meets the wall, off by
 // about a cell (a dozen pixels' width at most): those next to the edge are not asked about.
@@ -119,54 +171,111 @@ NTEST_F(Reflect, a_mirror_shows_what_its_rays_meet)
     v.reflections = NPH_RENDER_REFLECTIONS_OFF;
     (void)settled(f, &v, target, without, 4U);
 
-    u32 seen = 0U;
-    u32 seen_red = 0U;
-    u32 open = 0U;
-    u32 open_red = 0U;
-    u32 off_red = 0U;
-    for (u32 i = 0; i < SIZE * SIZE; ++i) {
-        const NphVec3 d = test_box_pixel_ray(&scene, i);
-        f32 t = 0.0F;
-        NphVec3 n;
-        if (test_box_hit(&scene, scene.eye, d, 0.0F, &t, &n) != 0) {
-            continue; // the mirror alone
-        }
-        const NphVec3 x = nph_vec3_add(scene.eye, nph_vec3_scale(d, t));
-        const NphVec3 o = nph_vec3_add(x, nph_vec3_scale(n, 1e-4F));
-        const NphVec3 r = nph_vec3_sub(d, nph_vec3_scale(n, 2.0F * nph_vec3_dot(d, n)));
-        // Of the rays around it, all to the wall or none: not near its outline.
-        u32 met = 0U;
-        for (i32 a = -1; a <= 1; ++a) {
-            for (i32 b = -1; b <= 1; ++b) {
-                const NphVec3 w = nph_vec3_normalize(
-                    nph_vec3_add(r, nph_vec3((f32)a * 0.05F, (f32)b * 0.05F, 0.0F)));
-                f32 hit = 0.0F;
-                NphVec3 hn;
-                met += test_box_hit(&scene, o, w, 0.0F, &hit, &hn) == 1 ? 1U : 0U;
-            }
-        }
-        const u8 *px = with + (u64)i * 4U;
-        const bool red_here = px[0] > (u32)px[1] + 24U;
-        const bool red_off = without[(u64)i * 4U] > (u32)without[(u64)i * 4U + 1U] + 24U;
-        if (met == 9U) {
-            ++seen;
-            seen_red += red_here ? 1U : 0U;
-            off_red += red_off ? 1U : 0U;
-        } else if (met == 0U) {
-            ++open;
-            open_red += red_here ? 1U : 0U;
-        }
-    }
+    const MirrorCounts c = mirror_counts(&scene, with, without);
     NTEST_LOG(
         "rays to the wall: %u pixels, %u red (%u without reflections); to the sky: %u, %u red",
-        seen, seen_red, off_red, open, open_red);
-    NTEST_ASSERT_GT_UINT(seen, 300U);
-    NTEST_ASSERT_GT_UINT(open, 300U);
-    NTEST_EXPECT_TRUE(seen_red * 20U >= seen * 19U);
-    NTEST_EXPECT_EQ_UINT(off_red, 0U);
-    NTEST_EXPECT_TRUE(open_red * 20U <= open);
+        c.seen, c.seen_red, c.off_red, c.open, c.open_red);
+    NTEST_ASSERT_GT_UINT(c.seen, 300U);
+    NTEST_ASSERT_GT_UINT(c.open, 300U);
+    NTEST_EXPECT_TRUE(c.seen_red * 20U >= c.seen * 19U);
+    NTEST_EXPECT_EQ_UINT(c.off_red, 0U);
+    NTEST_EXPECT_TRUE(c.open_red * 20U <= c.open);
     test_box_release(f, target);
     nph_render_light_destroy(f->renderer, sun);
+}
+
+// The mirror's scene with a wall whose colour comes from a 2 x 2 texture, red at its top left and
+// green elsewhere, sampled nearest, through the coordinates' transform `uv`: what the mirror shows
+// of it from an empty cache.
+static MirrorCounts textured_wall(RenderFixture *f, const NphRenderUvTransform *uv)
+{
+    const NphRenderMesh mesh = test_cube_mesh(f);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    const NphRenderMaterial mirror = surface(f, nph_vec3(0.95F, 0.95F, 0.95F), 1.0F, 0.05F);
+    // sRGB 63 is linear 0.05: the red texel is the plain wall's red.
+    static const u8 texels[16] = {255U, 63U,  63U, 255U, 63U, 255U, 63U, 255U,
+                                  63U,  255U, 63U, 255U, 63U, 255U, 63U, 255U};
+    const void *mips[1] = {texels};
+    const u64 sizes[1] = {sizeof texels};
+    NphRenderTextureDesc td;
+    memset(&td, 0, sizeof td);
+    td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+    td.width = 2U;
+    td.height = 2U;
+    td.mip_count = 1U;
+    td.mips = mips;
+    td.mip_sizes = sizes;
+    NphRenderTexture tex = NPH_RENDER_TEXTURE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex), NPH_RESULT_OK);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.metallic = 0.0F;
+    md.roughness = 1.0F;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].nearest = 1;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].wrap_u = NPH_RENDER_WRAP_CLAMP;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].wrap_v = NPH_RENDER_WRAP_CLAMP;
+    md.uv = *uv;
+    NphRenderMaterial wall = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &wall), NPH_RESULT_OK);
+    test_box_ground(f, &scene, mesh, mirror);
+    test_box_add(f, &scene, mesh, wall, nph_vec3(-3.0F, 0.0F, -2.0F), nph_vec3(3.0F, 3.0F, -1.5F));
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.0F, 1.5F, 4.0F), nph_vec3(0.0F, 0.0F, 0.0F), 0.8F);
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_DIRECTIONAL;
+    ld.color = nph_vec3_one();
+    ld.intensity = 6.0F;
+    ld.direction = nph_vec3_normalize(nph_vec3(0.3F, -1.0F, -0.6F)); // onto the wall's face
+    NphRenderLight sun = NPH_RENDER_LIGHT_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &sun), NPH_RESULT_OK);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    static u8 with[PIXELS];
+    static u8 without[PIXELS];
+    NphRenderView v;
+    reflect_view(&v, camera, NPH_RENDER_REFLECTIONS_CACHE);
+    (void)settled(f, &v, target, with, SETTLE);
+    v.reflections = NPH_RENDER_REFLECTIONS_OFF;
+    (void)settled(f, &v, target, without, 4U);
+    const MirrorCounts c = mirror_counts(&scene, with, without);
+    NTEST_LOG("rays to the wall: %u pixels, %u red (%u without reflections); to the sky: %u, %u "
+              "red",
+              c.seen, c.seen_red, c.off_red, c.open, c.open_red);
+    test_box_release(f, target);
+    nph_render_light_destroy(f->renderer, sun);
+    nph_render_texture_destroy(f->renderer, tex);
+    return c;
+}
+
+// The wall's red from its texture through its material's transform (ADR-0105): the cache's rays
+// shade their hits (gi_hit.glsl, which the rays a pixel share) at the coordinates the transform
+// makes. It takes every coordinate of the wall's faces (each a [0, 1] square) into the red
+// texel, so the mirror shows the wall red.
+NTEST_F(Reflect, a_mirror_shows_its_walls_texture_through_the_walls_transform)
+{
+    REQUIRE_REFLECTIONS(f);
+    // (u, v) to (u / 4 + 1/8, v / 4 + 1/8): every face's coordinates in the top left texel.
+    const NphRenderUvTransform into_red = {0.25F, 0.0F, 0.125F, 0.0F, 0.25F, 0.125F};
+    const MirrorCounts c = textured_wall(f, &into_red);
+    NTEST_ASSERT_GT_UINT(c.seen, 300U);
+    NTEST_EXPECT_EQ_UINT(c.off_red, 0U);
+    NTEST_EXPECT_TRUE(c.seen_red * 20U >= c.seen * 19U);
+}
+
+// The same wall without the transform: three quarters of each face are green, and so is most of
+// the wall in the mirror, so the test above's red is the transform's. Each test draws from an
+// empty cache: one that drew the wall otherwise holds that for some 100 to 200 frames here before
+// it follows a material changed in place.
+NTEST_F(Reflect, a_mirror_shows_its_walls_texture_as_its_coordinates_lay_it)
+{
+    REQUIRE_REFLECTIONS(f);
+    const NphRenderUvTransform identity = nph_render_uv_identity();
+    const MirrorCounts c = textured_wall(f, &identity);
+    NTEST_ASSERT_GT_UINT(c.seen, 300U);
+    NTEST_EXPECT_EQ_UINT(c.off_red, 0U);
+    NTEST_EXPECT_TRUE(c.seen_red * 2U < c.seen);
 }
 
 // ---------------------------------------------------------------------------
