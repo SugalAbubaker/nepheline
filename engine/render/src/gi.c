@@ -497,6 +497,7 @@ static void resolve_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user
     if (gi->frame_reflect) {
         p.arg0 = gi->reflect_capacity;
         p.arg1 = 1U;
+        p.arg2 = gi->frame_reflect_reset ? 1U : 0U; // render_gi_declare's restart
         nph_gpu_cmd_push_constants(cmd, &p, sizeof p);
         nph_gpu_cmd_dispatch(cmd, (gi->reflect_capacity + GI_RESOLVE_GROUP - 1U) / GI_RESOLVE_GROUP,
                              1U, 1U);
@@ -534,6 +535,23 @@ NphResult render_gi_declare(NphRenderer *r, NphGpuRenderGraph *graph, const Rend
 {
     RenderGi *gi = &r->gi;
     gi->frame_visbuffer = in->visbuffer;
+    // A frame that marks a material changed in place (frame.c write_materials, which runs after
+    // render_gi_frame_begin) starts the reflection cells again in their mode: their histories
+    // hold what the material was for their 128 samples, some 250 frames at a turn every 32
+    // (ADR-0105). Every tile takes its turn this frame, and the resolve that next takes the
+    // cells' samples (the next frame's: it runs before the rays) drops their histories first, as
+    // a cut would. The cells are kept meanwhile, so this frame shows them as they were, and the
+    // next the change, a few frames noisier. By a ray a pixel (the default) the frame after shows
+    // it without.
+    gi->frame_reflect_restart = gi->frame_reflect && !gi->frame_rays && r->materials_marked;
+    if (gi->frame_reflect_restart) {
+        NphRenderGiView *view_data = render_frame_at(r, r->layout.gi_view_offset);
+        view_data->reflect_turn_bits = 0U;
+    }
+    gi->frame_reflect_reset = gi->frame_reflect && gi->reflect_reset_pending;
+    if (gi->frame_reflect) {
+        gi->reflect_reset_pending = gi->frame_reflect_restart;
+    }
     gi->frame_keys = nph_gpu_rg_import_buffer(graph, gi->keys);
     gi->frame_sums = nph_gpu_rg_import_buffer(graph, gi->sums);
     gi->frame_far_sums = nph_gpu_rg_import_buffer(graph, gi->far_sums);

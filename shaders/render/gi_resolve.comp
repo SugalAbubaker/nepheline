@@ -29,7 +29,9 @@
 // (ADR-0077) holds NPH_RENDER_REFLECT_HISTORY.
 //
 // arg0: the slot count. arg1: nonzero for the reflection cells' table (ADR-0077), which keeps a
-// cell for fewer frames.
+// cell for fewer frames. arg2, for that table: nonzero where a material changed in place two
+// frames ago (ADR-0105), whose frame gave every tile its turn: a cell with samples drops its
+// history first, so it holds those rays alone.
 #version 460
 #include "vis_common.glsl"
 #include "gi_common.glsl"
@@ -78,6 +80,10 @@ void main()
                        min(s.w * uint(NPH_RENDER_GI_HISTORY_FRAMES), GI_HISTORY_MOST));
         }
         uint history = min(count, most);
+        if (reflections && pc.arg2 != 0u) {
+            history = 0u;
+            count = 0u;
+        }
         // Whether the cell's light changed (the test below).
         bool changed = false;
         float variance = uintBitsToFloat(m.x);

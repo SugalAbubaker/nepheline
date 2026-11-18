@@ -2473,9 +2473,22 @@ temporally at native resolution, for anti-aliasing only (CLAUDE.md
   `k_fresh` (`RenderTaa.frame_fresh`), which reads the nearest cluster's
   flags, the word `vis_previous_point` reads next; every other frame binds
   the one without, which reads none. Blended surfaces are not in the
-  visibility buffer: a blended material changed in place still fades. The
-  radiance cache's cells take some 100 to 200 frames to follow a material
-  changed in place (`test_reflections.c`).
+  visibility buffer: a blended material changed in place still fades.
+- **What reflects a material changed in place** shows it as soon. By a ray
+  a pixel (the default, every quality tier's), each pixel's ray meets the
+  material as it now is, and its history follows a change that large at
+  once: the frame after. In the reflection cells' mode their histories
+  held what the material was for their 128 samples, some 250 frames at a
+  tile's turn every 32; now the frame that marks the change gives every
+  tile its turn (`RenderGi.frame_reflect_restart`, its rays as many as a
+  ray a pixel's that frame), and the resolve that next takes the cells'
+  samples, the next frame's, drops their histories first
+  (`frame_reflect_reset`, `gi_resolve.comp` arg2), as a cut would. The
+  cells are kept meanwhile: the frame of the change shows them as they
+  were, not empty, and the next the change, a few frames noisier. The
+  mirror's own pixels then take some 16 frames to follow them, as the
+  temporal resolve follows any light that changes on a still pixel
+  (`test_reflections.c`).
 
 Against the reference renderer at 4 × 4 the resolution, a still view
 converges to 0.39 levels of mean error (one sample per pixel: 1.22), a
