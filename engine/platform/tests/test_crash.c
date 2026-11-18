@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The crash handler's in-process tests: its arithmetic and text, install and
-// uninstall, the assert hook, and a whole report written without a crash.
-// The handler on real faults is tested by crash_helper in child processes
-// (run_crash.cmake).
+// uninstall, the assert hook, a whole report written without a crash, and on
+// Windows its dumper's life and what happens without it. The handler on real
+// faults is tested by crash_helper in child processes (run_crash.cmake).
 #include <nepheline/core/assert.h>
 #include <nepheline/platform/crash.h>
 #include <nepheline/platform/file.h>
@@ -12,10 +12,12 @@
 #include "test_platform_support.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if NPH_PLATFORM_WINDOWS
 // (windows.h comes with crash_internal.h)
+#include <wchar.h>
 #else
 #include <signal.h>
 #include <ucontext.h>
@@ -430,6 +432,27 @@ NTEST(crash, the_dumps_callback_leaves_out_what_it_cannot_read_and_other_modules
     NTEST_EXPECT_TRUE(crash_win32_dump_callback(NULL, &in, &out) == TRUE);
     NTEST_EXPECT_EQ_UINT((u64)out.ModuleWriteFlags, (u64)ModuleWriteModule);
 
+    // Beside the executable, its data too; in a directory below it, not; in a full dump, every
+    // module's.
+    wchar_t exe_dir[] = L"C:\\game\\";
+    CrashDumpScope scope = {exe_dir, (u32)(NPH_ARRAY_COUNT(exe_dir) - 1U), 0};
+    wchar_t beside[] = L"C:\\Game\\engine.dll"; // as the system compares paths: case aside
+    wchar_t below[] = L"C:\\game\\plugins\\tool.dll";
+    in.Module.FullPath = beside;
+    out.ModuleWriteFlags = (ULONG)ModuleWriteModule | (ULONG)ModuleWriteDataSeg;
+    NTEST_EXPECT_TRUE(crash_win32_dump_callback(&scope, &in, &out) == TRUE);
+    NTEST_EXPECT_EQ_UINT((u64)out.ModuleWriteFlags,
+                         (u64)((ULONG)ModuleWriteModule | (ULONG)ModuleWriteDataSeg));
+    in.Module.FullPath = below;
+    NTEST_EXPECT_TRUE(crash_win32_dump_callback(&scope, &in, &out) == TRUE);
+    NTEST_EXPECT_EQ_UINT((u64)out.ModuleWriteFlags, (u64)ModuleWriteModule);
+    scope.full = 1;
+    in.Module.FullPath = other;
+    out.ModuleWriteFlags = (ULONG)ModuleWriteModule | (ULONG)ModuleWriteDataSeg;
+    NTEST_EXPECT_TRUE(crash_win32_dump_callback(&scope, &in, &out) == TRUE);
+    NTEST_EXPECT_EQ_UINT((u64)out.ModuleWriteFlags,
+                         (u64)((ULONG)ModuleWriteModule | (ULONG)ModuleWriteDataSeg));
+
     // Nothing more is asked for: no memory added, no cancel.
     memset(&in, 0, sizeof in);
     memset(&out, 0, sizeof out);
@@ -439,7 +462,8 @@ NTEST(crash, the_dumps_callback_leaves_out_what_it_cannot_read_and_other_modules
     NTEST_EXPECT_TRUE(crash_win32_dump_callback(NULL, &in, &out) == FALSE);
 }
 
-// A report and a dump written in-process for an access violation at 0x10, its path in `report`.
+// A report and its dump written without a crash, for an access violation at 0x10, the report's
+// path in `report`.
 static void write_test_report(char *report, u32 cap)
 {
     CONTEXT ctx;
@@ -476,6 +500,13 @@ static bool report_says(const char *report, const char *needle)
            (read_text(dump, sig, sizeof sig) >= 4 && memcmp(sig, "MDMP", 4U) == 0);
 }
 
+// True when the report at `report` holds `needle`, the dump aside.
+static bool report_holds(const char *report, const char *needle)
+{
+    static char text[65536];
+    return read_text(report, text, sizeof text) > 0 && contains(text, needle);
+}
+
 NTEST_F(CrashDir, a_dump_that_fails_is_written_again_then_reduced)
 {
     const char *skip = install_or_skip(f->dir, "crash_test");
@@ -485,20 +516,144 @@ NTEST_F(CrashDir, a_dump_that_fails_is_written_again_then_reduced)
     }
     // The attempts after the failures are stand-ins, not dbghelp's: what is tested is what the
     // handler does when attempts fail, not how dbghelp's go on this machine (on one CI runner
-    // they all failed for a quarter second, and with them this test).
+    // they all failed for a quarter second, and with them this test). The dumper makes each
+    // attempt as the test says.
     char report[CRASH_PATH_MAX];
     crash_win32_fail_dumps(1U, true);
     write_test_report(report, sizeof report);
     NTEST_EXPECT_TRUE(report_says(report, "dump:      crash_test-"));
-    NTEST_EXPECT_TRUE(report_says(report, ".dmp (written again after error 1784)"));
+    NTEST_EXPECT_TRUE(report_says(report, ".dmp (written again after error 1784)\n"));
     crash_win32_fail_dumps(2U, true);
     write_test_report(report, sizeof report);
     NTEST_EXPECT_TRUE(
-        report_says(report, ".dmp (reduced to threads, stacks and modules after error 1784)"));
+        report_says(report, ".dmp (reduced to threads, stacks and modules after error 1784)\n"));
     crash_win32_fail_dumps(3U, true);
     write_test_report(report, sizeof report);
-    NTEST_EXPECT_TRUE(report_says(report, "dump:      not written (error 1784)"));
+    NTEST_EXPECT_TRUE(report_says(report, "dump:      not written (error 1784)\n"));
+    NTEST_EXPECT_FALSE(report_holds(report, "by the failing process"));
+    NTEST_EXPECT_NE_UINT(crash_win32_dumper_pid(), 0U); // still asked
     crash_win32_fail_dumps(0U, false);
+}
+
+NTEST_F(CrashDir, the_dumper_runs_beside_the_executable_until_uninstall)
+{
+    const char *skip = install_or_skip(f->dir, "crash_test");
+    if (skip != NULL) {
+        NTEST_SKIP("%s", skip);
+        return;
+    }
+    const u32 pid = crash_win32_dumper_pid();
+    NTEST_ASSERT_NE_UINT(pid, 0U);
+    HANDLE dumper = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    NTEST_ASSERT_NOT_NULL(dumper);
+    wchar_t image[NPH_WIN32_PATH_MAX];
+    DWORD image_len = (DWORD)NPH_ARRAY_COUNT(image);
+    wchar_t self[NPH_WIN32_PATH_MAX];
+    const DWORD self_len = GetModuleFileNameW(NULL, self, (DWORD)NPH_ARRAY_COUNT(self));
+    NTEST_ASSERT_TRUE(QueryFullProcessImageNameW(dumper, 0U, image, &image_len) != FALSE);
+    // In the executable's directory, by its name.
+    DWORD dir_len = 0U;
+    for (DWORD i = 0U; i < self_len; ++i) {
+        if (self[i] == L'\\' || self[i] == L'/') {
+            dir_len = i + 1U;
+        }
+    }
+    NTEST_ASSERT_GT_UINT((u64)dir_len, 0U);
+    NTEST_EXPECT_TRUE(_wcsnicmp(image, self, dir_len) == 0);
+    NTEST_EXPECT_TRUE(_wcsicmp(image + dir_len, CRASH_DUMPER_NAME) == 0);
+    NTEST_EXPECT_EQ_UINT((u64)WaitForSingleObject(dumper, 0U), (u64)WAIT_TIMEOUT);
+
+    // Uninstall lets it go: it ends by itself.
+    nph_crash_uninstall();
+    NTEST_EXPECT_EQ_UINT((u64)WaitForSingleObject(dumper, 10000U), (u64)WAIT_OBJECT_0);
+    DWORD code = 1U;
+    NTEST_EXPECT_TRUE(GetExitCodeProcess(dumper, &code) != FALSE);
+    NTEST_EXPECT_EQ_UINT((u64)code, 0U);
+    NTEST_EXPECT_EQ_UINT(crash_win32_dumper_pid(), 0U);
+    CloseHandle(dumper);
+}
+
+NTEST_F(CrashDir, the_dumper_ends_with_the_process_that_started_it)
+{
+    // crash_helper installs the handler and ends without uninstalling it.
+    char cmd[2600];
+    snprintf(cmd, sizeof cmd, "\"%s\" dumper \"%s\"", NPH_TEST_CRASH_HELPER_PATH, f->dir);
+    STARTUPINFOA si;
+    memset(&si, 0, sizeof si);
+    si.cb = (DWORD)sizeof si;
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof pi);
+    NTEST_ASSERT_TRUE(CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL,
+                                     &si, &pi) != FALSE);
+    CloseHandle(pi.hThread);
+    const DWORD waited = WaitForSingleObject(pi.hProcess, 60000U);
+    DWORD code = 1U;
+    (void)GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    NTEST_ASSERT_EQ_UINT((u64)waited, (u64)WAIT_OBJECT_0);
+    NTEST_ASSERT_EQ_UINT((u64)code, 0U);
+    char pid_path[1200];
+    snprintf(pid_path, sizeof pid_path, "%s/dumper.pid", f->dir);
+    char text[32];
+    if (read_text(pid_path, text, sizeof text) <= 0) {
+        NTEST_SKIP("the sanitizers own the signals in this build"); // no handler, no dumper
+        return;
+    }
+    const unsigned long pid = strtoul(text, NULL, 10);
+    NTEST_ASSERT_NE_UINT((u64)pid, 0U);
+    // Gone already, or going: its process's end ends it.
+    HANDLE dumper = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (dumper != NULL) {
+        NTEST_EXPECT_EQ_UINT((u64)WaitForSingleObject(dumper, 10000U), (u64)WAIT_OBJECT_0);
+        CloseHandle(dumper);
+    }
+}
+
+NTEST_F(CrashDir, without_its_dumper_the_failing_process_writes_the_dump)
+{
+    crash_win32_set_dumper(L"nph_no_such_dumper.exe");
+    const char *skip = install_or_skip(f->dir, "crash_test");
+    crash_win32_set_dumper(NULL);
+    if (skip != NULL) {
+        NTEST_SKIP("%s", skip);
+        return;
+    }
+    NTEST_EXPECT_EQ_UINT(crash_win32_dumper_pid(), 0U);
+    // A stand-in: what is tested is who writes the dump, not dbghelp.
+    crash_win32_fail_dumps(0U, true);
+    char report[CRASH_PATH_MAX];
+    write_test_report(report, sizeof report);
+    crash_win32_fail_dumps(0U, false);
+    NTEST_EXPECT_TRUE(report_says(
+        report, ".dmp, by the failing process (nph_no_such_dumper.exe is not beside the "
+                "executable)\n"));
+}
+
+NTEST_F(CrashDir, a_dumper_that_ended_leaves_the_dump_to_the_failing_process)
+{
+    const char *skip = install_or_skip(f->dir, "crash_test");
+    if (skip != NULL) {
+        NTEST_SKIP("%s", skip);
+        return;
+    }
+    const u32 pid = crash_win32_dumper_pid();
+    NTEST_ASSERT_NE_UINT(pid, 0U);
+    HANDLE dumper = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+    NTEST_ASSERT_NOT_NULL(dumper);
+    NTEST_ASSERT_TRUE(TerminateProcess(dumper, 7U) != FALSE);
+    NTEST_ASSERT_EQ_UINT((u64)WaitForSingleObject(dumper, 10000U), (u64)WAIT_OBJECT_0);
+    CloseHandle(dumper);
+    crash_win32_fail_dumps(0U, true); // a stand-in, as above
+    char report[CRASH_PATH_MAX];
+    write_test_report(report, sizeof report);
+    NTEST_EXPECT_TRUE(
+        report_says(report, ".dmp, by the failing process (the dumper had ended, exit 7)\n"));
+    // And the next dump too, without asking it again.
+    write_test_report(report, sizeof report);
+    crash_win32_fail_dumps(0U, false);
+    NTEST_EXPECT_TRUE(
+        report_says(report, ".dmp, by the failing process (the dumper had ended, exit 7)\n"));
+    NTEST_EXPECT_EQ_UINT(crash_win32_dumper_pid(), 0U);
 }
 
 NTEST_F(CrashDir, a_report_and_its_dump_are_written_for_an_exception)
@@ -538,6 +693,9 @@ NTEST_F(CrashDir, a_report_and_its_dump_are_written_for_an_exception)
     NTEST_EXPECT_TRUE(contains(text, "  #1  0x")); // the walk went past the first frame
     NTEST_EXPECT_TRUE(contains(text, "dump:      crash_test-"));
     NTEST_EXPECT_FALSE(contains(text, "not written"));
+    // Written by the dumper, from outside this process (ADR-0106).
+    NTEST_EXPECT_NE_UINT(crash_win32_dumper_pid(), 0U);
+    NTEST_EXPECT_FALSE(contains(text, "by the failing process"));
     // What it says of the machine (ADR-0103): known, here, but the process's shadow stacks,
     // which older systems do not report.
     NTEST_EXPECT_TRUE(contains(text, "system:    Windows 10."));

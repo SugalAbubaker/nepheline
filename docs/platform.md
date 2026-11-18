@@ -296,8 +296,9 @@ layer reports.
 
 ## The crash handler (`crash.h`)
 
-`nph_crash_install` (CLAUDE.md §8.11; ADR-0103) hooks the faults that end a
-process. When one happens, it writes into the directory it was given:
+`nph_crash_install` (CLAUDE.md §8.11; ADR-0103, ADR-0106) hooks the faults
+that end a process. When one happens, it writes into the directory it was
+given:
 
 - **`<app>-<yyyymmdd>-<hhmmss>-<pid>.txt`, the report.** It holds:
   - the program, its version and build, the UTC time, the process, and the
@@ -308,10 +309,10 @@ process. When one happens, it writes into the directory it was given:
     the handler installs, so writing it takes no lock, and the install's
     log line says it too. Then the memory (`memory:`): the machine's
     physical memory and commit charge free, and the process's working set
-    and commit, as the fault found them. On some of CI's
-    runners dbghelp fails every dump of a process where on others none
-    fails, and this is what tells them apart; the crash tests keep each
-    report's `system:` and `dump:` lines after they pass
+    and commit, as the fault found them. On some of CI's runners dbghelp
+    failed every dump a process wrote of itself, where on others none
+    failed, and this is what told them apart (ADR-0106); the crash tests
+    keep each report's `system:` and `dump:` lines after they pass
     (`<mode>.lines.txt`), and the Windows jobs print them;
   - the fault (the exception or the signal, and what it was about: a write,
     no mapping there, and the address) and the instruction;
@@ -337,7 +338,32 @@ process. When one happens, it writes into the directory it was given:
   whole dump on it. A dump dbghelp fails anyway is written once more, then
   reduced to the threads, their stacks, and the modules with their data;
   the report's `dump:` line says so, with the first attempt's error.
+
+  The dump is written from outside the failing process, by the dumper
+  (below). Its comment stream says which process wrote it.
 - **A line on standard error** naming the report.
+
+**The dumper (Windows, ADR-0106).** Install starts `nph_crash_dumper.exe`
+from beside the executable: every executable the build makes is in
+`bin/<config>`, and whatever links the module builds the dumper. It shares
+a block of memory with the handler, and it inherits four handles alone: the
+process, with the rights dbghelp needs, the block, and two events. It gets
+no console and no standard handles, so a reader of the process's pipes does
+not wait for it too. Install waits up to 10 s for it to be ready, and its
+log line says which process writes the dumps.
+- For each attempt at a dump, the handler's thread hands the dumper the
+  file, the failing thread, and the address of the exception, and waits.
+  dbghelp in the dumper reads the failing process's memory into buffers of
+  its own, so nothing the failure left of that process can fail the dump.
+- The dumper ends with its process, crashed or not, since it waits on the
+  process's handle too. Uninstall asks it to end, and after 5 s makes it.
+- Without it, the failing process writes the dump, and the `dump:` line
+  ends with `, by the failing process (<why>)`. That is the case when the
+  dumper is not beside the executable, does not start or is not ready in
+  10 s, ended before the fault, ends while it writes, or does not answer in
+  100 s (840 s for a full dump; it is then made to end, so that it writes no
+  more into the file).
+- A game ships the dumper beside its executable.
 
 The process then ends as the fault would have ended it. On Windows that is
 the exception's code as the exit code, with no error-reporting dialog. On
@@ -347,7 +373,7 @@ a core file where the system writes them.
 | | Windows | Linux |
 |---|---|---|
 | Hooks | the unhandled-exception filter, and the frame at the base of every fiber (above); the C runtime's SIGABRT (`abort()`), invalid-parameter, and pure-call handlers | `sigaction` on SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP, SIGSYS |
-| Who writes | a thread made at install: the failing thread hands it the exception and waits | the signal handler, with async-signal-safe calls (`backtrace()` is warmed at install, so it loads nothing then) |
+| Who writes | the report, a thread made at install: the failing thread hands it the exception and waits; the dump, the dumper process the thread asks | the signal handler, with async-signal-safe calls (`backtrace()` is warmed at install, so it loads nothing then) |
 | Stack overflows | `EXCEPTION_STACK_OVERFLOW`, on threads and fibers; the writing thread has a stack of its own | the guard page's SIGSEGV, on the thread's alternate signal stack: 64 KiB with a guard page, for the installing thread and every thread `nph_thread_create` makes while installed (`nph_crash_thread_attach` for others) |
 
 **Once is enough.** A second fault while one is reported waits for the
@@ -398,6 +424,7 @@ MSVC 14.44, 2026-10-12, median of 5
 | `async_read_4k_depth_1` | 6 640 | IOCP, one request in flight |
 | `async_read_4k_depth_32` | 6 330 | IOCP, 32 in flight, per request |
 | `async_read_4k_threads_32` | 3 030 | thread pool (4 workers), 32 in flight, per request |
+| `crash_install_uninstall` | 5 693 000 | the crash handler installed and uninstalled, its dumper started, ready, and ended (2026-11-18); 884 000 with the dumper moved aside |
 
 Reading: the fiber switch is where the job system's budget goes, and 11 ns
 means a job can yield and resume a few hundred times per frame at 240 FPS
@@ -411,6 +438,13 @@ completes it inline on the submitting thread, while the thread pool
 parallelises cached reads across its workers. The native backend earns its
 place on real device reads, where requests overlap the device latency
 instead of the CPU; Phase 6 measures the streamer against both.
+
+The crash handler's dumper costs a process about 4.8 ms once, at install:
+its start, until it says it is ready, and its end at uninstall. While it
+waits it holds 0.75 MB of private memory, in a 3.1 MB working set that is
+mostly the system's and dbghelp's shared pages, with 4 threads (one of them
+its own) and 39 handles (measured with a host that stays installed,
+Profile). It is never on a frame's path.
 
 ## Testing
 
@@ -482,14 +516,20 @@ instead of the CPU; Phase 6 measures the streamer against both.
   - the report's name, the notes, and the log's ring (wrapping, oldest first);
   - install's checks, and the assert hook wrapped and given back;
   - a whole report written for a captured context: on Windows with its
-    minidump, on Linux with its registers, stack, and map;
+    minidump, written by the dumper, on Linux with its registers, stack, and
+    map;
+  - on Windows, the retries and the reduced dump, made by the dumper as the
+    test fails its attempts; the dumper beside the executable, running until
+    uninstall and ended by it, and ended with the process that started it
+    (`crash_helper dumper`); without it, and after it ended, the dump written
+    by the failing process, and the report saying why;
   - on Linux, the alternate signal stack of a created thread.
 - `platform.crash.<mode>` (`crash_helper.c`, `run_crash.cmake`), the crash
   handler on real faults in a child process. Each test checks that the
   process ended by the fault, the report's text, the log line delivered
   after it, and on Windows the minidump, read back with dbghelp
-  (`crash_dump_check.c`: its exception, its thread, the executable's data).
-  The modes:
+  (`crash_dump_check.c`: its exception, its thread, the executable's data,
+  and its comment, which must say the dumper wrote it). The modes:
   - an access violation, abort, a failed assertion;
   - a division by zero, an illegal instruction;
   - a stack overflow, a fault on a thread, two threads at once;

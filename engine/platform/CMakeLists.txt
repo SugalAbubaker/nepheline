@@ -20,6 +20,7 @@ if(WIN32)
     list(APPEND platform_sources
         src/async_io_iocp.c
         src/cpu_win32.c
+        src/crash_dump_win32.c
         src/crash_win32.c
         src/dylib_win32.c
         src/file_win32.c
@@ -73,6 +74,20 @@ target_link_libraries(nph_platform PRIVATE glfw)
 if(WIN32)
     # fopen and friends are portable C; the "secure" CRT variants are not.
     target_compile_definitions(nph_platform PRIVATE _CRT_SECURE_NO_WARNINGS)
+
+    # The crash handler's dumper (docs/adr/0106-crash-dumps-from-a-separate-process.md): a
+    # process the handler starts at install, which writes a failing process's minidump from
+    # outside it. The handler finds it beside the executable, and every executable the build
+    # makes shares bin/<config>. It links no engine library, core's headers alone:
+    # crash_dump_win32.c, compiled into the module as well, is what it shares with the handler.
+    # Whatever links the module builds it.
+    add_executable(nph_crash_dumper dumper/main.c src/crash_dump_win32.c)
+    target_include_directories(nph_crash_dumper PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/engine/core/include")
+    target_link_libraries(nph_crash_dumper PRIVATE nph::options)
+    set_target_properties(nph_crash_dumper PROPERTIES FOLDER "engine")
+    add_dependencies(nph_platform nph_crash_dumper)
 else()
     # pthread_setaffinity_np, pthread_setname_np, sem_clockwait, MADV_HUGEPAGE.
     target_compile_definitions(nph_platform PRIVATE _GNU_SOURCE)
@@ -141,6 +156,11 @@ if(NPH_BUILD_TESTS)
     set(crash_dump_check "")
     if(WIN32)
         target_compile_definitions(crash_helper PRIVATE _CRT_SECURE_NO_WARNINGS)
+        # Its "dumper" mode names the dumper it started (crash_internal.h), for test_crash.c.
+        target_include_directories(crash_helper PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_compile_definitions(platform_tests PRIVATE
+            "NPH_TEST_CRASH_HELPER_PATH=\"$<TARGET_FILE:crash_helper>\"")
+        add_dependencies(platform_tests crash_helper)
         add_executable(crash_dump_check tests/crash_dump_check.c)
         target_link_libraries(crash_dump_check PRIVATE nph::options nph::core dbghelp)
         target_compile_definitions(crash_dump_check PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -151,6 +171,10 @@ if(NPH_BUILD_TESTS)
     # nph_crash_test(<mode> [REPORTS <n>] [LOG <substring>] [EXPECT <substring>...]
     #                [ON_WINDOWS <substring>...] [ON_LINUX <substring>...]
     #                [DUMP <substring>...] [AFTER <mode> AFTER_EXPECT <substring>])
+    #
+    # On Windows every report's minidump is read back, and each must say the dumper wrote it
+    # (its comment stream, docs/adr/0106-crash-dumps-from-a-separate-process.md); DUMP adds
+    # what else it must say.
     function(nph_crash_test mode)
         cmake_parse_arguments(PARSE_ARGV 1 ARG "" "REPORTS;LOG;AFTER;AFTER_EXPECT"
                               "EXPECT;ON_WINDOWS;ON_LINUX;DUMP")
@@ -159,10 +183,8 @@ if(NPH_BUILD_TESTS)
         set(dump_expect "")
         if(WIN32)
             list(APPEND expect ${ARG_ON_WINDOWS})
-            if(ARG_DUMP)
-                set(dump_check "${crash_dump_check}")
-                set(dump_expect ${ARG_DUMP})
-            endif()
+            set(dump_check "${crash_dump_check}")
+            set(dump_expect ${ARG_DUMP} "comment: written by nph_crash_dumper")
         else()
             list(APPEND expect ${ARG_ON_LINUX})
         endif()

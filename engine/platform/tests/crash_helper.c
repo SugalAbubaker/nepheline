@@ -8,7 +8,9 @@
 // handler does not install (the sanitizers' builds) it prints "skipped: ..."
 // and exits 0. Its own failures exit 90 (usage), 91 (no handler), 92 (no
 // thread, fiber, or log), and 93 (the mode did not end the process): codes
-// that no fault ends with.
+// that no fault ends with. On Windows the mode "dumper" does not fail: it
+// writes the id of the dumper the handler started into <dir>/dumper.pid and
+// exits 0 still installed, for test_crash.c to see the dumper end with it.
 #include <nepheline/core/alloc.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/atomic.h>
@@ -23,10 +25,7 @@
 #include <string.h>
 
 #if NPH_PLATFORM_WINDOWS
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
+#include "crash_internal.h" // crash_win32_dumper_pid, and windows.h
 #if NPH_COMPILER_MSVC
 #include <intrin.h>
 #endif
@@ -162,6 +161,19 @@ int main(int argc, char **argv)
         fprintf(stderr, "crash_helper: install: %s\n", nph_result_string(r));
         return 91;
     }
+#if NPH_PLATFORM_WINDOWS
+    if (strcmp(mode, "dumper") == 0) {
+        char pid_path[1200];
+        snprintf(pid_path, sizeof pid_path, "%s/dumper.pid", argv[2]);
+        FILE *pid_file = fopen(pid_path, "w");
+        if (pid_file == NULL) {
+            return 92;
+        }
+        fprintf(pid_file, "%u\n", (unsigned)crash_win32_dumper_pid());
+        fclose(pid_file);
+        return 0; // still installed: the dumper ends with this process
+    }
+#endif
 
     // A record still in its ring when the process fails: the handler
     // delivers it to the file after the report.

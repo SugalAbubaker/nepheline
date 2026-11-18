@@ -1,27 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
-// The crash handler on Windows (docs/adr/0103-crash-handler.md).
+// The crash handler on Windows (docs/adr/0103-crash-handler.md,
+// docs/adr/0106-crash-dumps-from-a-separate-process.md).
 //
 // The unhandled-exception filter and the C runtime's hooks (abort through
 // SIGABRT, invalid parameters, pure calls) hand the failure to a thread made
-// at install, and wait. That thread writes the report and the minidump: it
-// has a stack of its own, so a thread whose stack overflowed is reported
-// too, and the dump shows the failing thread as it stopped. The failing
-// thread then ends the process itself, with the exception's code, so that
-// no other handler and no error-reporting dialog runs.
+// at install, and wait. That thread writes the report: it has a stack of its
+// own, so a thread whose stack overflowed is reported too. The minidump is
+// written from outside the process, by the dumper the handler started at
+// install (nph_crash_dumper.exe, dumper/main.c), which the thread asks and
+// waits for; the dump shows the failing thread as it stopped. Without the
+// dumper, the thread writes the dump itself, as it did before ADR-0106. The
+// failing thread then ends the process itself, with the exception's code, so
+// that no other handler and no error-reporting dialog runs.
 #include <nepheline/core/log.h>
 #include <nepheline/platform/cpu.h>
 #include <nepheline/platform/crash.h>
 #include <nepheline/platform/thread.h>
 
+#include "crash_dump_win32.h"
 #include "crash_internal.h"
 
-#include <dbghelp.h>
 #include <intrin.h> // __cpuid, __cpuidex: the system line's processor
 #include <psapi.h>  // K32GetProcessMemoryInfo, in kernel32: the memory line
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 // The codes a report gives the failures that are not exceptions: those the
 // C runtime's own reporting gives them.
@@ -37,11 +42,16 @@
 
 #define CRASH_THREAD_STACK ((SIZE_T)256U * 1024U)
 
-typedef BOOL(WINAPI *CrashMiniDumpWriteDumpFn)(HANDLE process, DWORD pid, HANDLE file,
-                                               MINIDUMP_TYPE type,
-                                               PMINIDUMP_EXCEPTION_INFORMATION exception,
-                                               PMINIDUMP_USER_STREAM_INFORMATION user,
-                                               PMINIDUMP_CALLBACK_INFORMATION callback);
+// How long install waits for the dumper to say it is ready (a process's start, which a virus
+// scanner may slow), a dump waits for it (inside the failing thread's wait above, with time
+// left for the rest of the report), and uninstall waits for it to end.
+#define CRASH_DUMPER_START_TIMEOUT_MS 10000U
+#define CRASH_DUMPER_TIMEOUT_MS       100000U
+#define CRASH_DUMPER_FULL_TIMEOUT_MS  840000U
+#define CRASH_DUMPER_STOP_TIMEOUT_MS  5000U
+
+NPH_STATIC_ASSERT(CRASH_DUMPER_DIR_MAX == NPH_WIN32_PATH_MAX,
+                  "the dumper's block holds the executable's directory as the handler does");
 
 static HMODULE g_dbghelp;
 static CrashMiniDumpWriteDumpFn g_write_dump;
@@ -63,6 +73,18 @@ static char g_req_thread_name[NPH_THREAD_NAME_MAX];
 // engine's, the game's) keep their global data in a small dump.
 static wchar_t g_exe_dir[NPH_WIN32_PATH_MAX];
 static u32 g_exe_dir_len;
+
+// The dumper (ADR-0106): its process, the block the two share, and the events a request and its
+// answer set. While `g_dumper_ok` holds, dumps are asked of it; else this process writes them,
+// and `g_in_process_why` says why, for the report and the install's log line.
+static const wchar_t *g_dumper_name; // tests: crash_win32_set_dumper; NULL for CRASH_DUMPER_NAME
+static HANDLE g_dumper;
+static DWORD g_dumper_pid;
+static HANDLE g_dumper_request;
+static HANDLE g_dumper_done;
+static CrashDumperShared *g_shared;
+static b32 g_dumper_ok;
+static char g_in_process_why[192];
 
 // What install replaced, given back at uninstall.
 static LPTOP_LEVEL_EXCEPTION_FILTER g_prev_filter;
@@ -220,61 +242,17 @@ static u32 walk_stack(const CONTEXT *start, u64 *frames, u32 cap)
 
 #endif
 
-// The global data (MiniDumpWithDataSegs) is kept for the modules beside the
-// executable only: the driver's alone are tens of megabytes (the player's
-// dump, with NVIDIA's, came to 40 MB) and say nothing the engine's do not.
-// NOLINTNEXTLINE(misc-misplaced-const): MINIDUMP_CALLBACK_ROUTINE's own signature
-BOOL CALLBACK crash_win32_dump_callback(PVOID param, const PMINIDUMP_CALLBACK_INPUT input,
-                                        PMINIDUMP_CALLBACK_OUTPUT output)
+// Appends `s` to the text in `buf` (`cap` bytes) at `*at`, within its size; with no lock and no
+// allocation, so a failing process may build a line with it.
+static void text_add(char *buf, u32 cap, u32 *at, const char *s)
 {
-    NPH_UNUSED(param);
-    if (input == NULL || output == NULL) {
-        return FALSE;
+    while (*s != '\0' && *at + 1U < cap) {
+        buf[(*at)++] = *s++;
     }
-    switch (input->CallbackType) {
-    case ModuleCallback: {
-        const wchar_t *path = input->Module.FullPath;
-        const bool ours = path != NULL && g_exe_dir_len != 0U &&
-                          _wcsnicmp(path, g_exe_dir, (size_t)g_exe_dir_len) == 0 &&
-                          wcschr(path + g_exe_dir_len, L'\\') == NULL;
-        if (!ours && !g_crash.full_dump) {
-            output->ModuleWriteFlags &= ~(ULONG)ModuleWriteDataSeg;
-        }
-        return TRUE;
-    }
-    case IncludeModuleCallback:
-    case IncludeThreadCallback:
-    case ThreadCallback:
-    case ThreadExCallback:
-        return TRUE;
-    case ReadMemoryFailureCallback:
-        // Memory that cannot be read when the dump gets to it (freed by a
-        // thread still running, or never readable) is left out. Otherwise
-        // the one failed read fails the whole dump (MINIDUMP_CALLBACK_TYPE).
-        output->Status = S_OK;
-        return TRUE;
-    default:
-        return FALSE;
-    }
+    buf[*at] = '\0';
 }
 
-// What a report says of its machine (the "system:" line, ADR-0103): the system's version, the
-// processor and whether it has shadow stacks (CET), dbghelp's version, and whether the process
-// runs with user shadow stacks. Made at install, so the handler takes no lock for it. On some of
-// CI's runners every dump of a process fails (ERROR_INVALID_USER_BUFFER) where on others none
-// does: this is what tells the runners apart.
-static char g_system[256];
-
-// Appends `s` to the system line at `*at`, within its size.
-static void system_add(u32 *at, const char *s)
-{
-    while (*s != '\0' && *at + 1U < (u32)sizeof g_system) {
-        g_system[(*at)++] = *s++;
-    }
-    g_system[*at] = '\0';
-}
-
-static void system_add_dec(u32 *at, u32 v)
+static void text_add_dec(char *buf, u32 cap, u32 *at, u32 v)
 {
     char digits[12];
     u32 n = 0U;
@@ -287,7 +265,24 @@ static void system_add_dec(u32 *at, u32 v)
         out[i] = digits[n - 1U - i];
     }
     out[n] = '\0';
-    system_add(at, out);
+    text_add(buf, cap, at, out);
+}
+
+// What a report says of its machine (the "system:" line, ADR-0103): the system's version, the
+// processor and whether it has shadow stacks (CET), dbghelp's version, and whether the process
+// runs with user shadow stacks. Made at install, so the handler takes no lock for it. On some of
+// CI's runners every dump a process wrote of itself failed (ERROR_INVALID_USER_BUFFER) where on
+// others none did: this is what tells the runners apart.
+static char g_system[256];
+
+static void system_add(u32 *at, const char *s)
+{
+    text_add(g_system, (u32)sizeof g_system, at, s);
+}
+
+static void system_add_dec(u32 *at, u32 v)
+{
+    text_add_dec(g_system, (u32)sizeof g_system, at, v);
 }
 
 // The file version of the loaded module `m`, from its version resource's fixed part (the
@@ -445,35 +440,98 @@ static bool dumps_staged(void)
            InterlockedCompareExchange(&g_dump_stand_in, 0, 0) != 0;
 }
 
-// One attempt at the dump, into `file` from its start: ERROR_SUCCESS, or why not.
-static DWORD write_dump(HANDLE file, MINIDUMP_TYPE type, MINIDUMP_EXCEPTION_INFORMATION *mei,
-                        MINIDUMP_CALLBACK_INFORMATION *callback)
+// How the next attempt at a dump goes: as the tests decide (crash_win32_fail_dumps), else
+// dbghelp's.
+static CrashDumpStage next_stage(void)
 {
-    LARGE_INTEGER start;
-    start.QuadPart = 0;
-    if (!SetFilePointerEx(file, start, NULL, FILE_BEGIN) || !SetEndOfFile(file)) {
-        return GetLastError();
-    }
     if (InterlockedCompareExchange(&g_dump_failures, 0, 0) > 0) {
         (void)InterlockedDecrement(&g_dump_failures);
-        return ERROR_INVALID_USER_BUFFER;
+        return CRASH_DUMP_STAGE_FAIL;
     }
-    if (InterlockedCompareExchange(&g_dump_stand_in, 0, 0) != 0) {
-        static const char signature[4] = {'M', 'D', 'M', 'P'};
-        DWORD written = 0U;
-        return WriteFile(file, signature, (DWORD)sizeof signature, &written, NULL) &&
-                       written == (DWORD)sizeof signature
-                   ? ERROR_SUCCESS
-                   : GetLastError();
+    return InterlockedCompareExchange(&g_dump_stand_in, 0, 0) != 0 ? CRASH_DUMP_STAGE_STAND_IN
+                                                                   : CRASH_DUMP_STAGE_DBGHELP;
+}
+
+// The dumper can no longer be asked: `what`, `code`, and `after` say why, in the reports from
+// now on.
+static void dumper_lost(const char *what, DWORD code, const char *after)
+{
+    u32 at = 0U;
+    g_in_process_why[0] = '\0';
+    text_add(g_in_process_why, (u32)sizeof g_in_process_why, &at, what);
+    text_add_dec(g_in_process_why, (u32)sizeof g_in_process_why, &at, (u32)code);
+    text_add(g_in_process_why, (u32)sizeof g_in_process_why, &at, after);
+    g_dumper_ok = 0;
+}
+
+// One attempt at the dump, asked of the dumper: what it answered, or, with `*lost`, nothing,
+// since the dumper could not be asked or did not answer (and then never is asked again).
+static DWORD dumper_attempt(HANDLE file, MINIDUMP_TYPE type,
+                            const MINIDUMP_EXCEPTION_INFORMATION *mei, CrashDumpStage stage,
+                            bool *lost)
+{
+    *lost = true;
+    DWORD code = 0U;
+    if (WaitForSingleObject(g_dumper, 0U) != WAIT_TIMEOUT) {
+        (void)GetExitCodeProcess(g_dumper, &code);
+        dumper_lost("the dumper had ended, exit ", code, "");
+        return ERROR_SUCCESS;
     }
-    if (g_write_dump == NULL) {
-        return ERROR_PROC_NOT_FOUND;
+    // The file, as a handle of the dumper's own: the two share the file's position, which the
+    // attempt sets to its start.
+    HANDLE remote = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), file, g_dumper, &remote, 0U, FALSE,
+                         DUPLICATE_SAME_ACCESS)) {
+        dumper_lost("the file could not be handed to the dumper, error ", GetLastError(), "");
+        return ERROR_SUCCESS;
     }
-    if (!g_write_dump(GetCurrentProcess(), GetCurrentProcessId(), file, type, mei, NULL,
-                      callback)) {
-        return GetLastError();
+    g_shared->thread_id = mei->ThreadId;
+    g_shared->type = (u32)type;
+    g_shared->stage = (u32)stage;
+    g_shared->pointers = (u64)(uptr)mei->ExceptionPointers;
+    g_shared->file = (u64)(uptr)remote;
+    (void)SetEvent(g_dumper_request);
+    const HANDLE waits[2] = {g_dumper_done, g_dumper};
+    const DWORD w = WaitForMultipleObjects(2U, waits, FALSE,
+                                           g_crash.full_dump ? CRASH_DUMPER_FULL_TIMEOUT_MS
+                                                             : CRASH_DUMPER_TIMEOUT_MS);
+    if (w == WAIT_OBJECT_0) {
+        *lost = false;
+        return (DWORD)g_shared->error;
     }
+    if (w == WAIT_OBJECT_0 + 1U) {
+        (void)GetExitCodeProcess(g_dumper, &code);
+        dumper_lost("the dumper ended as it wrote, exit ", code, "");
+        return ERROR_SUCCESS;
+    }
+    // No answer in time: ended, so that it writes no more into the file, which this process
+    // writes instead.
+    (void)TerminateProcess(g_dumper, ERROR_TIMEOUT);
+    (void)WaitForSingleObject(g_dumper, CRASH_DUMPER_STOP_TIMEOUT_MS);
+    dumper_lost(
+        "the dumper did not answer in ",
+        (g_crash.full_dump ? CRASH_DUMPER_FULL_TIMEOUT_MS : CRASH_DUMPER_TIMEOUT_MS) / 1000U, " s");
     return ERROR_SUCCESS;
+}
+
+// One attempt at the dump into `file`, from its start: ERROR_SUCCESS, or why not. The dumper
+// makes it while it can be asked; else this process does, and `*in_process` says so.
+static DWORD attempt(HANDLE file, MINIDUMP_TYPE type, MINIDUMP_EXCEPTION_INFORMATION *mei,
+                     bool *in_process)
+{
+    const CrashDumpStage stage = next_stage();
+    if (g_dumper_ok) {
+        bool lost = false;
+        const DWORD error = dumper_attempt(file, type, mei, stage, &lost);
+        if (!lost) {
+            *in_process = false;
+            return error;
+        }
+    }
+    *in_process = true;
+    const CrashDumpScope scope = {g_exe_dir, g_exe_dir_len, g_crash.full_dump};
+    return crash_win32_dump_attempt(g_write_dump, GetCurrentProcess(), GetCurrentProcessId(), file,
+                                    type, mei, &scope, stage, CRASH_DUMP_BY_PROCESS);
 }
 
 // Opens `<stem><ext>` for writing, creating it; INVALID_HANDLE_VALUE when it
@@ -570,44 +628,33 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
     DWORD dump_error = ERROR_SUCCESS;
     DWORD first_error = ERROR_SUCCESS; // the first attempt's, when it failed
     bool reduced = false;
+    bool in_process = false; // the last attempt was this process's, not the dumper's
     if (dump == INVALID_HANDLE_VALUE) {
         dump_error = GetLastError();
     } else {
+        // The exception as this process sees it; the dumper reads the same pointers from here.
         MINIDUMP_EXCEPTION_INFORMATION mei;
         mei.ThreadId = thread_id;
         mei.ExceptionPointers = pointers;
         mei.ClientPointers = FALSE;
-        // The flags combined, as dbghelp takes them, are no one enumerator.
-        // NOLINTBEGIN(clang-analyzer-optin.core.EnumCastOutOfRange)
-        const MINIDUMP_TYPE type =
-            g_crash.full_dump
-                ? (MINIDUMP_TYPE)(MiniDumpWithFullMemory | MiniDumpWithFullMemoryInfo |
-                                  MiniDumpWithHandleData | MiniDumpWithThreadInfo |
-                                  MiniDumpWithUnloadedModules | MiniDumpWithProcessThreadData)
-                : (MINIDUMP_TYPE)(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs |
-                                  MiniDumpWithFullMemoryInfo | MiniDumpWithHandleData |
-                                  MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules |
-                                  MiniDumpWithProcessThreadData);
-        // NOLINTEND(clang-analyzer-optin.core.EnumCastOutOfRange)
-        MINIDUMP_CALLBACK_INFORMATION callback;
-        callback.CallbackRoutine = crash_win32_dump_callback;
-        callback.CallbackParam = NULL;
-        // dbghelp fails a dump now and then where the same process's next one goes well
-        // (ERROR_INVALID_USER_BUFFER, a dump in three on one of the CI's runners), and its
-        // failures come in spells (on one runner every attempt for a quarter second failed): once
-        // more as it was a tenth of a second later, then reduced to the threads, their stacks, and
-        // the modules with their data a quarter second after that (ADR-0103).
+        const MINIDUMP_TYPE type = crash_win32_dump_type(g_crash.full_dump);
+        // A dump that fails is written once more as it was a tenth of a second later, then
+        // reduced to the threads, their stacks, and the modules with their data a quarter second
+        // after that. dbghelp failed so when processes dumped themselves
+        // (ERROR_INVALID_USER_BUFFER, in spells: on one of CI's runners every attempt for a quarter
+        // second failed), which the dumper is for (ADR-0103, ADR-0106); the attempts stay for
+        // whatever fails it.
         const bool staged = dumps_staged();
-        dump_error = write_dump(dump, type, &mei, &callback);
+        dump_error = attempt(dump, type, &mei, &in_process);
         first_error = dump_error;
         if (dump_error != ERROR_SUCCESS) {
             Sleep(staged ? 0U : 100U);
-            dump_error = write_dump(dump, type, &mei, &callback);
+            dump_error = attempt(dump, type, &mei, &in_process);
         }
         if (dump_error != ERROR_SUCCESS) {
             reduced = true;
             Sleep(staged ? 0U : 250U);
-            dump_error = write_dump(dump, MiniDumpWithDataSegs, &mei, &callback);
+            dump_error = attempt(dump, MiniDumpWithDataSegs, &mei, &in_process);
         }
         CloseHandle(dump);
     }
@@ -646,6 +693,11 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
     } else {
         crash_out_str(&o, "not written (error ");
         crash_out_dec(&o, dump_error);
+        crash_out_str(&o, ")");
+    }
+    if (in_process) {
+        crash_out_str(&o, ", by the failing process (");
+        crash_out_str(&o, g_in_process_why[0] != '\0' ? g_in_process_why : "no dumper");
         crash_out_str(&o, ")");
     }
     crash_out_str(&o, "\n");
@@ -813,6 +865,223 @@ static void __cdecl crash_purecall(void)
 }
 
 // ---------------------------------------------------------------------------
+// The dumper
+// ---------------------------------------------------------------------------
+
+void crash_win32_set_dumper(const wchar_t *name)
+{
+    g_dumper_name = name;
+}
+
+u32 crash_win32_dumper_pid(void)
+{
+    return g_dumper_ok ? (u32)g_dumper_pid : 0U;
+}
+
+// The dumper's name, for the install's log line and the reasons.
+static char g_dumper_name_utf8[96];
+
+// Appends `s` to the wide text in `buf` (`cap` units) at `*at`, within its size.
+static void wide_add(wchar_t *buf, u32 cap, u32 *at, const wchar_t *s)
+{
+    while (*s != L'\0' && *at + 1U < cap) {
+        buf[(*at)++] = *s++;
+    }
+    buf[*at] = L'\0';
+}
+
+// Appends `v` in hexadecimal digits, as the dumper reads a handle's value.
+static void wide_add_hex(wchar_t *buf, u32 cap, u32 *at, u64 v)
+{
+    wchar_t digits[17];
+    u32 n = 0U;
+    do {
+        const u32 d = (u32)(v & 0xFU);
+        digits[n++] = (wchar_t)(d < 10U ? L'0' + d : L'A' + (d - 10U));
+        v >>= 4U;
+    } while (v != 0U && n < 16U);
+    wchar_t out[17];
+    for (u32 i = 0U; i < n; ++i) {
+        out[i] = digits[n - 1U - i];
+    }
+    out[n] = L'\0';
+    wide_add(buf, cap, at, out);
+}
+
+// Ends the dumper, asked to and else made to, and gives back the block and the events. The
+// reason dumps are written in process is left as it was.
+static void dumper_stop(void)
+{
+    if (g_dumper != NULL) {
+        if (g_shared != NULL) {
+            g_shared->quit = 1U;
+        }
+        if (g_dumper_request != NULL) {
+            (void)SetEvent(g_dumper_request);
+        }
+        if (WaitForSingleObject(g_dumper, CRASH_DUMPER_STOP_TIMEOUT_MS) != WAIT_OBJECT_0) {
+            (void)TerminateProcess(g_dumper, 0U);
+            (void)WaitForSingleObject(g_dumper, CRASH_DUMPER_STOP_TIMEOUT_MS);
+        }
+        CloseHandle(g_dumper);
+    }
+    if (g_dumper_request != NULL) {
+        CloseHandle(g_dumper_request);
+    }
+    if (g_dumper_done != NULL) {
+        CloseHandle(g_dumper_done);
+    }
+    if (g_shared != NULL) {
+        (void)UnmapViewOfFile(g_shared);
+    }
+    g_dumper = NULL;
+    g_dumper_pid = 0U;
+    g_dumper_request = NULL;
+    g_dumper_done = NULL;
+    g_shared = NULL;
+    g_dumper_ok = 0;
+}
+
+// Starts the dumper beside the executable, handing it the block and the events, and waits for
+// it to say it is ready: true then. Else false, with g_in_process_why saying why, and the dumps
+// are written in process.
+static bool dumper_start(void)
+{
+    g_dumper_ok = 0;
+    g_in_process_why[0] = '\0';
+    const wchar_t *name = g_dumper_name != NULL ? g_dumper_name : CRASH_DUMPER_NAME;
+    if (nph_win32_wide_to_utf8(name, g_dumper_name_utf8, sizeof g_dumper_name_utf8, NULL) !=
+        NPH_RESULT_OK) {
+        memcpy(g_dumper_name_utf8, "the dumper", sizeof "the dumper");
+    }
+    u32 at = 0U;
+    wchar_t path[NPH_WIN32_PATH_MAX];
+    const u64 name_len = (u64)wcslen(name);
+    if (g_exe_dir_len == 0U || (u64)g_exe_dir_len + name_len + 1U > NPH_ARRAY_COUNT(path)) {
+        text_add(g_in_process_why, (u32)sizeof g_in_process_why, &at,
+                 "the executable's directory is unknown");
+        return false;
+    }
+    memcpy(path, g_exe_dir, (size_t)g_exe_dir_len * sizeof(wchar_t));
+    memcpy(path + g_exe_dir_len, name, ((size_t)name_len + 1U) * sizeof(wchar_t));
+    // Its working directory: the executable's (g_exe_dir holds the executable's whole path).
+    wchar_t dir[NPH_WIN32_PATH_MAX];
+    memcpy(dir, g_exe_dir, (size_t)g_exe_dir_len * sizeof(wchar_t));
+    dir[g_exe_dir_len] = L'\0';
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+        text_add(g_in_process_why, (u32)sizeof g_in_process_why, &at, g_dumper_name_utf8);
+        text_add(g_in_process_why, (u32)sizeof g_in_process_why, &at,
+                 " is not beside the executable");
+        return false;
+    }
+
+    // The block, the events, and a handle to this process with what dbghelp needs of it: all
+    // inheritable, for the dumper to inherit, and only it (below).
+    SECURITY_ATTRIBUTES inherit;
+    memset(&inherit, 0, sizeof inherit);
+    inherit.nLength = (DWORD)sizeof inherit;
+    inherit.bInheritHandle = TRUE;
+    HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &inherit, PAGE_READWRITE, 0U,
+                                        (DWORD)sizeof(CrashDumperShared), NULL);
+    if (mapping != NULL) {
+        g_shared = (CrashDumperShared *)MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0U,
+                                                      0U, sizeof(CrashDumperShared));
+    }
+    g_dumper_request = CreateEventW(&inherit, FALSE, FALSE, NULL);
+    g_dumper_done = CreateEventW(&inherit, FALSE, FALSE, NULL);
+    HANDLE self = NULL;
+    const DWORD rights =
+        PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE | SYNCHRONIZE;
+    if (mapping == NULL || g_shared == NULL || g_dumper_request == NULL || g_dumper_done == NULL ||
+        !DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), &self,
+                         rights, TRUE, 0U)) {
+        const DWORD error = GetLastError();
+        if (mapping != NULL) {
+            CloseHandle(mapping);
+        }
+        dumper_stop();
+        dumper_lost("the dumper's handles were not made, error ", error, "");
+        return false;
+    }
+    memset(g_shared, 0, sizeof *g_shared);
+    g_shared->magic = CRASH_DUMPER_MAGIC;
+    g_shared->version = CRASH_DUMPER_VERSION;
+    g_shared->full_dump = g_crash.full_dump ? 1U : 0U;
+    g_shared->exe_dir_len = g_exe_dir_len;
+    memcpy(g_shared->exe_dir, g_exe_dir, (size_t)g_exe_dir_len * sizeof(wchar_t));
+
+    // Its command line: its path, and the four handles' values.
+    HANDLE inherited[4] = {self, mapping, g_dumper_request, g_dumper_done};
+    wchar_t cmd[NPH_WIN32_PATH_MAX + 96U];
+    u32 cmd_at = 0U;
+    wide_add(cmd, (u32)NPH_ARRAY_COUNT(cmd), &cmd_at, L"\"");
+    wide_add(cmd, (u32)NPH_ARRAY_COUNT(cmd), &cmd_at, path);
+    wide_add(cmd, (u32)NPH_ARRAY_COUNT(cmd), &cmd_at, L"\"");
+    for (u32 i = 0U; i < (u32)NPH_ARRAY_COUNT(inherited); ++i) {
+        wide_add(cmd, (u32)NPH_ARRAY_COUNT(cmd), &cmd_at, L" ");
+        wide_add_hex(cmd, (u32)NPH_ARRAY_COUNT(cmd), &cmd_at, (u64)(uptr)inherited[i]);
+    }
+
+    // It inherits these four handles alone (PROC_THREAD_ATTRIBUTE_HANDLE_LIST): not this
+    // process's standard handles or other inheritable ones, such as a test runner's pipes, whose
+    // reader would otherwise wait for the dumper's end as well. No console, no busy cursor.
+    u64 list_storage[16]; // the list's opaque storage: 48 bytes for one attribute on x64
+    SIZE_T list_size = 0U;
+    (void)InitializeProcThreadAttributeList(NULL, 1U, 0U, &list_size);
+    LPPROC_THREAD_ATTRIBUTE_LIST list = (LPPROC_THREAD_ATTRIBUTE_LIST)list_storage;
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof pi);
+    DWORD error = ERROR_INSUFFICIENT_BUFFER;
+    bool started = false;
+    if (list_size <= sizeof list_storage &&
+        InitializeProcThreadAttributeList(list, 1U, 0U, &list_size)) {
+        if (UpdateProcThreadAttribute(list, 0U, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, (PVOID)inherited,
+                                      sizeof inherited, NULL, NULL)) {
+            STARTUPINFOEXW si;
+            memset(&si, 0, sizeof si);
+            si.StartupInfo.cb = (DWORD)sizeof si;
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_FORCEOFFFEEDBACK;
+            si.lpAttributeList = list;
+            started = CreateProcessW(path, cmd, NULL, NULL, TRUE,
+                                     EXTENDED_STARTUPINFO_PRESENT | DETACHED_PROCESS, NULL, dir,
+                                     &si.StartupInfo, &pi) != FALSE;
+        }
+        error = started ? ERROR_SUCCESS : GetLastError();
+        DeleteProcThreadAttributeList(list);
+    }
+    // What this process starts later inherits none of them: the dumper has its own.
+    (void)SetHandleInformation(g_dumper_request, HANDLE_FLAG_INHERIT, 0U);
+    (void)SetHandleInformation(g_dumper_done, HANDLE_FLAG_INHERIT, 0U);
+    CloseHandle(self);
+    CloseHandle(mapping); // the view keeps the block
+    if (!started) {
+        dumper_stop();
+        dumper_lost("the dumper did not start, error ", error, "");
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    g_dumper = pi.hProcess;
+    g_dumper_pid = pi.dwProcessId;
+
+    const HANDLE waits[2] = {g_dumper_done, g_dumper};
+    const DWORD w = WaitForMultipleObjects(2U, waits, FALSE, CRASH_DUMPER_START_TIMEOUT_MS);
+    if (w == WAIT_OBJECT_0) {
+        g_dumper_ok = 1;
+        return true;
+    }
+    DWORD code = 0U;
+    if (w == WAIT_OBJECT_0 + 1U) {
+        (void)GetExitCodeProcess(g_dumper, &code);
+        dumper_stop();
+        dumper_lost("the dumper ended as it started, exit ", code, "");
+    } else {
+        dumper_stop(); // which ends it
+        dumper_lost("the dumper was not ready in ", CRASH_DUMPER_START_TIMEOUT_MS / 1000U, " s");
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // Install
 // ---------------------------------------------------------------------------
 
@@ -839,22 +1108,11 @@ static void close_handles(void)
 
 NphResult crash_os_install(void)
 {
-    // Loaded now, from the system's directory: loading a library while the
-    // process fails could take the loader's lock a failing thread holds.
-    g_dbghelp = LoadLibraryExW(L"dbghelp.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (g_dbghelp == NULL) {
-        return nph_win32_fail("LoadLibraryExW(dbghelp.dll)", GetLastError());
-    }
-    union {
-        FARPROC proc;
-        CrashMiniDumpWriteDumpFn fn;
-    } u;
-    u.proc = GetProcAddress(g_dbghelp, "MiniDumpWriteDump");
-    g_write_dump = u.fn;
-    if (g_write_dump == NULL) {
-        const DWORD error = GetLastError();
-        close_handles();
-        return nph_win32_fail("GetProcAddress(MiniDumpWriteDump)", error);
+    // dbghelp for the dumps this process writes itself, when there is no dumper, and for the
+    // system line's version: loaded now, from the system's directory.
+    const DWORD loaded = crash_win32_dbghelp_load(&g_dbghelp, &g_write_dump);
+    if (loaded != ERROR_SUCCESS) {
+        return nph_win32_fail("loading dbghelp.dll's MiniDumpWriteDump", loaded);
     }
     describe_system();
     // The executable's directory, for the dump's callback.
@@ -886,6 +1144,17 @@ NphResult crash_os_install(void)
     }
     (void)SetThreadDescription(g_thread, L"nph-crash");
 
+    // The dumps' writer, ready before the hooks are set (ADR-0106). Without it the handler still
+    // installs, and this process writes them.
+    if (dumper_start()) {
+        NPH_LOG_INFO(&NPH_LOG_PLATFORM, "crash handler: dumps are written by %s, process %lu",
+                     g_dumper_name_utf8, (unsigned long)g_dumper_pid);
+    } else {
+        NPH_LOG_WARN(&NPH_LOG_PLATFORM,
+                     "crash handler: dumps are written by the failing process: %s",
+                     g_in_process_why);
+    }
+
     g_prev_filter = SetUnhandledExceptionFilter(crash_filter);
     g_prev_invalid = _set_invalid_parameter_handler(crash_invalid_parameter);
     g_prev_purecall = _set_purecall_handler(crash_purecall);
@@ -915,6 +1184,7 @@ void crash_os_uninstall(void)
     CloseHandle(g_thread);
     g_thread = NULL;
     g_thread_id = 0U;
+    dumper_stop();
     close_handles();
 }
 

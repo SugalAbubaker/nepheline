@@ -125,7 +125,10 @@ blue_noise_32x32               4000000
 # (0.91 to 4.32: glibc's costs 4 units on an AMD EPYC 7763, 1 on an Intel
 # Xeon). The round trip waits on the interconnect between two cores the OS
 # picks, for which a run has no unit (on one Xeon 6973P-C, 109 ns under
-# Windows and 335 under Linux): its budget follows the slowest runner.
+# Windows and 335 under Linux): its budget follows the slowest runner. The
+# crash handler's install starts a process on Windows (its dumper, ADR-0106):
+# 5.7 ms on the reference machine, where a process's start is the most a
+# runner's own setup (its virus scanner) can vary, so it gets 10x.
 fiber_switch                   40
 mutex_lock_unlock              7x nbench.locked_add
 spin_lock_acquire_release      2.5x nbench.locked_add
@@ -140,6 +143,7 @@ file_write_at_4k               40000
 async_read_4k_depth_1          40000
 async_read_4k_depth_32         40000
 async_read_4k_threads_32       20000
+crash_install_uninstall        60000000
 
 # jobs_bench (docs/jobs.md). Entries that wake a sleeping thread
 # (run_wait_1_main, io_run_wait_1) get 5x. counter_signal is two locked

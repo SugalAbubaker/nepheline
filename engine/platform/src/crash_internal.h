@@ -132,17 +132,29 @@ void crash_os_thread_detach(void);
 
 #if NPH_PLATFORM_WINDOWS
 
-#include <dbghelp.h> // after windows.h, which platform_internal.h brings
+// dbghelp's types and the dump's callback, shared with the dumper; after windows.h, which
+// platform_internal.h brings.
+#include "crash_dump_win32.h"
 
 // Writes the report and the dump for `pointers` (a fault on thread
 // `thread_id`; `what` names one that is not an exception, NULL otherwise),
-// and the report's path to `out_path` when it is not NULL. Once the report
-// and the dump are written it calls `between` (when not NULL), and then ends
-// the report with the log's last records: the handler's thread tells the
-// failing thread there that the report is written, and drains the log. The
-// handler's thread calls it; tests call it with a captured context.
+// and the report's path to `out_path` when it is not NULL. The dump is asked
+// of the dumper while it runs, else written by this process, and the report's
+// dump line says why then. Once the report and the dump are written it calls
+// `between` (when not NULL), and then ends the report with the log's last
+// records: the handler's thread tells the failing thread there that the
+// report is written, and drains the log. The handler's thread calls it; tests
+// call it with a captured context.
 void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *thread_name,
                        const char *what, void (*between)(void), char *out_path, u32 cap);
+
+// Tests: the file name, beside the executable, of the dumper that the next
+// install starts (NULL: CRASH_DUMPER_NAME). A name no file has leaves the
+// dumps to the failing process.
+void crash_win32_set_dumper(const wchar_t *name);
+
+// Tests: the dumper's process id while dumps are asked of it, else 0.
+u32 crash_win32_dumper_pid(void);
 
 // The filter of the frame at the base of every fiber's stack (fiber.c,
 // fiber_win32.c): what reaches it no handler took, so it is reported and the
@@ -151,21 +163,14 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
 // debugger is attached, which then sees it as unhandled.
 LONG crash_win32_fiber_filter(EXCEPTION_POINTERS *pointers);
 
-// Tests: the next `count` attempts at a dump fail as dbghelp's sometimes do
+// Tests: the next `count` attempts at a dump fail as dbghelp's sometimes did
 // (ERROR_INVALID_USER_BUFFER), without writing; 0 ends it. With `stand_in`,
 // the attempts after them write a stand-in (a minidump's signature alone)
 // instead of calling dbghelp, so a test of the retries does not depend on
-// how dbghelp's own attempts go on the machine (on CI's runners they fail
-// in spells: ADR-0103). The retries' pauses are skipped while either holds.
+// how dbghelp's own attempts go on the machine (on CI's runners they failed
+// in spells: ADR-0103). The dumper makes the attempts as they say, while it
+// runs. The retries' pauses are skipped while either holds.
 void crash_win32_fail_dumps(u32 count, bool stand_in);
-
-// The dump's callback (MINIDUMP_CALLBACK_ROUTINE): the global data of the
-// modules beside the executable only (all of it in a full dump), and memory
-// that cannot be read when the dump gets to it left out, which would
-// otherwise fail the whole dump. Tests call it.
-// NOLINTNEXTLINE(misc-misplaced-const): MINIDUMP_CALLBACK_ROUTINE's own signature
-BOOL CALLBACK crash_win32_dump_callback(PVOID param, const PMINIDUMP_CALLBACK_INPUT input,
-                                        PMINIDUMP_CALLBACK_OUTPUT output);
 
 #else
 

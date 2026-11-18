@@ -108,9 +108,10 @@ supersedes it and both link to each other.
 | [0100](0100-top-level-updated-in-place.md) | The top level updated in place where only what its records hold changes | Accepted |
 | [0101](0101-phase-14-exit.md) | Phase 14's exit: the phase's light kept at its cost, the landscape faster, its memory over | Accepted (the user's decision); decision 3 moved to Phase 16 by [0102](0102-in-house-tools-then-the-game.md) |
 | [0102](0102-in-house-tools-then-the-game.md) | Phase 15 builds the tools to make the game's world in-house; Phase 16 is the game | Accepted (the user's decision) |
-| [0103](0103-crash-handler.md) | The crash handler: a report and a minidump from the failing process, fibers included | Accepted |
+| [0103](0103-crash-handler.md) | The crash handler: a report and a minidump from the failing process, fibers included | Accepted; the dump's writer amended by [0106](0106-crash-dumps-from-a-separate-process.md) |
 | [0104](0104-autosave.md) | Autosave: a session directory under a lock the system lets go of, and the work offered back | Accepted |
 | [0105](0105-materials-made-in-the-editor.md) | Materials made in the editor: a `.nmat` source, tiled by the material, edited live | Accepted |
+| [0106](0106-crash-dumps-from-a-separate-process.md) | Crash dumps from a separate process: the dumper beside the executable | Proposed (the user's decision to dump from a separate process) |
 
 ## Template
 

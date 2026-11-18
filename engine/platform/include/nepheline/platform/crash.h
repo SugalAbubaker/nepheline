@@ -2,7 +2,8 @@
 #pragma once
 
 // The crash handler (CLAUDE.md §8.11 "Crash handler with minidumps (Windows)
-// and backtraces (Linux)"; docs/adr/0103-crash-handler.md).
+// and backtraces (Linux)"; docs/adr/0103-crash-handler.md,
+// docs/adr/0106-crash-dumps-from-a-separate-process.md).
 //
 // nph_crash_install hooks the faults that end a process: access violations
 // and the other processor exceptions, abort() (where a failed NPH_ASSERT
@@ -26,9 +27,12 @@
 // A failing process may have broken what a report would use, so writing it
 // takes no locks the process shares and allocates nothing. On Windows a
 // thread made at install writes it, so a thread whose stack overflowed is
-// reported too. On Linux the signal handler writes it with
-// async-signal-safe calls, on an alternate signal stack that the installing
-// thread and every thread nph_thread_create makes have
+// reported too, and the dump is written from outside the process: install
+// starts nph_crash_dumper.exe, from beside the executable, which runs until
+// the process or the handler ends. Without it the failing process writes the
+// dump itself, and the report says why. On Linux the signal handler writes
+// the report with async-signal-safe calls, on an alternate signal stack that
+// the installing thread and every thread nph_thread_create makes have
 // (nph_crash_thread_attach for threads made elsewhere). After the report,
 // and its dump, are written, the log's pending records are delivered
 // (nph_log_drain), best effort: a watchdog ends the process if that hangs.
@@ -84,14 +88,19 @@ typedef struct NphCrashDesc {
 // NPH_RESULT_INVALID_ARGUMENT for a missing or over-long directory or a
 // prefix with other characters, NPH_RESULT_UNSUPPORTED under the sanitizers,
 // and the file system's and the OS's errors (the directory not made, the
-// hooks not set). On Linux the calling thread gets its alternate signal
-// stack. It wraps the installed assert handler (core/assert.h), so that a
-// failed assertion's text is in the report, and calls it on.
+// hooks not set). On Windows it starts the dumper and waits, up to 10 s, for
+// it to be ready (a process's start: platform_bench's crash_install_uninstall);
+// a dumper that does not start leaves the dumps to the failing process, with
+// a warning in the log, and is no error. On Linux the calling thread gets its
+// alternate signal stack. It wraps the installed assert handler
+// (core/assert.h), so that a failed assertion's text is in the report, and
+// calls it on.
 // Thread-safety: NPH_MAIN_THREAD_ONLY, before other threads that assert.
 NPH_MUST_USE NphResult nph_crash_install(const NphCrashDesc *desc);
 
-// Removes the handler: the hooks it set are given back, and the assert
-// handler it wrapped is installed again. Nothing when none is installed.
+// Removes the handler: the hooks it set are given back, the assert handler it
+// wrapped is installed again, and on Windows the dumper ends (asked to, and
+// after 5 s made to). Nothing when none is installed.
 // Thread-safety: NPH_MAIN_THREAD_ONLY, when no other thread can fault.
 void nph_crash_uninstall(void);
 

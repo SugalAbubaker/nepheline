@@ -764,6 +764,12 @@ the engine comes up is reported too. They call
 no handler installs (the sanitizers' builds) the host runs without one, and
 says so in the log.
 
+On Windows the dump is written by the crash handler's dumper,
+`nph_crash_dumper.exe`, a process the install starts from beside the
+executable (ADR-0106). The build puts it beside the player and the editor.
+A game ships it beside its own executable; without it, the dumps are written
+by the failing process, and the log and the reports say so.
+
 The engine keeps three of the report's notes current, whether a handler is
 installed or not:
 

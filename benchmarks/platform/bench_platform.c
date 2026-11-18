@@ -15,8 +15,12 @@
 //   async_read_4k_depth_1     submit one 4 KiB read, poll it
 //   async_read_4k_depth_32    32 reads in flight, per read
 //   async_read_4k_threads_32  the same on the thread-pool backend
+//   crash_install_uninstall   the crash handler installed and uninstalled: on
+//                             Windows its dumper started, ready, and ended
 
+#include <nepheline/core/log.h>
 #include <nepheline/platform/async_io.h>
+#include <nepheline/platform/crash.h>
 #include <nepheline/platform/fiber.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/path.h>
@@ -359,4 +363,38 @@ NBENCH(async_read_4k_depth_32)
 NBENCH(async_read_4k_threads_32)
 {
     async_read_depth(state, NPH_ASYNC_IO_BACKEND_THREADS, 32U);
+}
+
+// ---------------------------------------------------------------------------
+// The crash handler: what install costs a process, once (on Windows the dumper's start, until it
+// says it is ready, and its end; docs/adr/0106-crash-dumps-from-a-separate-process.md). Under the
+// sanitizers install refuses at once, and this measures the refusal.
+// ---------------------------------------------------------------------------
+
+NBENCH(crash_install_uninstall)
+{
+    char tmp[800];
+    char dir[1024];
+    if (nph_fs_temp_directory(tmp, sizeof tmp, NULL) != NPH_RESULT_OK) {
+        return;
+    }
+    snprintf(dir, sizeof dir, "%s/nph_platform_bench_crash_%llu", tmp,
+             (unsigned long long)nph_platform_process_id());
+    NphCrashDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.dir = dir;
+    desc.app_name = "bench";
+    desc.no_log_drain = 1;
+    // Install's log lines, one or two a time, are not what is measured.
+    const NphLogLevel level = nph_log_get_level(&NPH_LOG_PLATFORM);
+    nph_log_set_level(&NPH_LOG_PLATFORM, NPH_LOG_LEVEL_ERROR);
+    u64 failures = 0U;
+    while (nbench_keep_running(state)) {
+        const NphResult r = nph_crash_install(&desc);
+        failures += r != NPH_RESULT_OK && r != NPH_RESULT_UNSUPPORTED;
+        nph_crash_uninstall();
+    }
+    nph_log_set_level(&NPH_LOG_PLATFORM, level);
+    (void)nph_fs_remove_tree(dir);
+    nbench_do_not_optimize_u64(failures);
 }
