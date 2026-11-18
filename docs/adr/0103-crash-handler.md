@@ -49,7 +49,10 @@ fault had no room left on the stack to be delivered from.
      beside the executable only, which are the engine's and the game's: with every module's, the player's dump
      came to 40 MB, nearly all of it NVIDIA's driver, and without the driver's it is 1.7 MB. `crash.full_dump=1`
      writes the whole process instead. Memory that cannot be read when the dump gets to it is left out (the
-     callback answers `ReadMemoryFailureCallback`), where by default dbghelp fails the whole dump on it.
+     callback answers `ReadMemoryFailureCallback`), where by default dbghelp fails the whole dump on it. A dump
+     dbghelp fails anyway (`ERROR_INVALID_USER_BUFFER`, a dump in three on one CI runner, never here) is written
+     again, then reduced to the threads, their stacks, and the modules with their data, and the report says
+     which, with the first error.
    - **A line on standard error** naming the report.
 
    The process then ends as the fault would have ended it. On Windows that is the exception's code as the exit

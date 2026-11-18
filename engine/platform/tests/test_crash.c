@@ -439,6 +439,65 @@ NTEST(crash, the_dumps_callback_leaves_out_what_it_cannot_read_and_other_modules
     NTEST_EXPECT_TRUE(crash_win32_dump_callback(NULL, &in, &out) == FALSE);
 }
 
+// A report and a dump written in-process for an access violation at 0x10, its path in `report`.
+static void write_test_report(char *report, u32 cap)
+{
+    CONTEXT ctx;
+    memset(&ctx, 0, sizeof ctx);
+    RtlCaptureContext(&ctx);
+    EXCEPTION_RECORD rec;
+    memset(&rec, 0, sizeof rec);
+    rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+    rec.NumberParameters = 2U;
+    rec.ExceptionInformation[0] = 1U; // a write
+    rec.ExceptionInformation[1] = 0x10U;
+    // NOLINTNEXTLINE(performance-no-int-to-ptr): the record holds the address as a pointer
+    rec.ExceptionAddress = (PVOID)(uptr)ctx.Rip;
+    EXCEPTION_POINTERS pointers = {&rec, &ctx};
+    crash_win32_write(&pointers, (u32)GetCurrentThreadId(), "tester", NULL, NULL, report, cap);
+}
+
+// True when the file at `report` holds `needle`, and the dump beside it is a minidump.
+static bool report_says(const char *report, const char *needle)
+{
+    static char text[65536];
+    if (read_text(report, text, sizeof text) <= 0 || !contains(text, needle)) {
+        return false;
+    }
+    char dump[CRASH_PATH_MAX];
+    const u64 n = (u64)strlen(report);
+    if (n <= 4U || n >= sizeof dump) {
+        return false;
+    }
+    memcpy(dump, report, (size_t)n - 4U);
+    memcpy(dump + n - 4U, ".dmp", 5U);
+    char sig[8];
+    return contains(text, "not written") ||
+           (read_text(dump, sig, sizeof sig) >= 4 && memcmp(sig, "MDMP", 4U) == 0);
+}
+
+NTEST_F(CrashDir, a_dump_that_fails_is_written_again_then_reduced)
+{
+    const char *skip = install_or_skip(f->dir, "crash_test");
+    if (skip != NULL) {
+        NTEST_SKIP("%s", skip);
+        return;
+    }
+    char report[CRASH_PATH_MAX];
+    crash_win32_fail_dumps(1U);
+    write_test_report(report, sizeof report);
+    NTEST_EXPECT_TRUE(report_says(report, "dump:      crash_test-"));
+    NTEST_EXPECT_TRUE(report_says(report, ".dmp (written again after error 1784)"));
+    crash_win32_fail_dumps(2U);
+    write_test_report(report, sizeof report);
+    NTEST_EXPECT_TRUE(
+        report_says(report, ".dmp (reduced to threads, stacks and modules after error 1784)"));
+    crash_win32_fail_dumps(3U);
+    write_test_report(report, sizeof report);
+    NTEST_EXPECT_TRUE(report_says(report, "dump:      not written (error 1784)"));
+    crash_win32_fail_dumps(0U);
+}
+
 NTEST_F(CrashDir, a_report_and_its_dump_are_written_for_an_exception)
 {
     const char *skip = install_or_skip(f->dir, "crash_test");

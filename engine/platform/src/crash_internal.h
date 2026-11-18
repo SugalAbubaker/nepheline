@@ -148,6 +148,10 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
 // debugger is attached, which then sees it as unhandled.
 LONG crash_win32_fiber_filter(EXCEPTION_POINTERS *pointers);
 
+// Tests: the next `count` attempts at a dump fail as dbghelp's sometimes do
+// (ERROR_INVALID_USER_BUFFER), without writing; 0 ends it.
+void crash_win32_fail_dumps(u32 count);
+
 // The dump's callback (MINIDUMP_CALLBACK_ROUTINE): the global data of the
 // modules beside the executable only (all of it in a full dump), and memory
 // that cannot be read when the dump gets to it left out, which would
