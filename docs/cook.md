@@ -82,6 +82,8 @@ produces has a *sub-asset* name, and its GUID is `nph_guid_from_cstr` of
 | mesh *i* | `mesh/i` |
 | material *i* | `material/i`; the default material of primitives without one: `material/default` |
 | image *i* encoded for a usage | `image/i/<usage>` (`color`, `linear`, `normal`, `mask`, `hdr`) |
+| mesh *i*'s collision of a kind | `collision/mesh/i/<kind>` (`mesh`, `hull`): every node that draws the mesh that way shares it |
+| node *i*'s proxies' collision | `collision/node/i` (*i* the node's index in the cooked scene) |
 | a standalone image | `<usage>` |
 
 The identity is therefore independent of the working directory, the
@@ -189,6 +191,47 @@ fallback of DDS sources is left out). It reads only the document. A URI
 with a scheme, an absolute path, or one above the document's directory is
 refused, since a copy could not keep it beside the document. The editor's
 import copies a dropped `.gltf` with these files.
+
+### Collision (`collision.h`)
+
+A glTF's nodes may collide (ADR-0107). The cooker writes what each node collides with as a
+collision asset (asset/collision.h: the physics module's hull and triangle-mesh blocks, used where
+they lie), and the scene names it for the node (scene version 3, `COLS`). A node collides as, the
+first that applies:
+
+1. **Its proxies.** Nodes named after it with `UCX_`, `UBX_`, `USP_` or `UCP_` before the name
+   (Unreal's convention), each one convex hull of the proxy's points moved into the node's frame.
+   - A proxy finds its node by the whole rest of its name, then without a Blender duplicate's
+     `.NNN`, then without a `_NN` count. For example, `UCX_Crate_01.001` looks for `Crate_01.001`,
+     then `Crate_01`, then `Crate`. Prefixes are matched case-sensitively.
+   - Proxies leave the scene. A proxy with no child, camera or light is taken out of the node
+     list; one with any of those stays as a node that draws nothing. A mesh that only proxies drew
+     is not cooked.
+   - A proxy that finds no node, or whose node has a scale of zero, stays as it was, drawn, with a
+     warning.
+2. **Its node's extra `collision`**: `"mesh"`, `"hull"` or `"none"`. This is an object's custom
+   property in Blender, which its exporter writes into the node's `extras`. A value that names no
+   kind is warned about and ignored.
+3. **The scene's import settings' `collision`** (below). The default is `"none"`.
+
+`"mesh"` and `"hull"` apply only where the node draws a mesh. A node that asks for collision but
+draws nothing gets a warning.
+
+- **`"mesh"`** collides as the mesh's triangles, every submesh's, as one physics triangle mesh. A
+  triangle mesh is for static and kinematic bodies. It collides from both sides where a material
+  of the mesh's is double-sided, and from the triangles' fronts otherwise.
+- **`"hull"`** collides as Quickhull of the mesh's positions, with at most `hull_vertices` points
+  (by default 32).
+- **A flat hull.** A mesh or proxy asked for a hull whose points span no volume, such as a plane,
+  collides as its triangles from both sides instead, with a warning.
+- **No shape.** A shape that cannot be made at all is left out with a warning. That happens with no
+  triangle that has an area, or a coordinate beyond the physics module's 100 km.
+
+Shapes are in the frame of the node or mesh, and carry no pose and no scale. A runtime scales them
+by the node's scale where it makes them (ADR-0107; the physics geometry has no scale, ADR-0042).
+The assets are cooked before the meshes' pipeline reorders their vertices. They depend on the
+document's content hash, and on `COOK_COLLISION_VERSION`, which is raised when the physics
+module's builders change their output.
 
 ### Scene import settings (`scene_import.h`)
 
@@ -825,6 +868,11 @@ input must never crash"):
 - `tests/fuzz/fuzz_scene_import.c`: scenes' import settings, read, written
   back to the same settings, and applied within what the mesh and texture
   pipelines take.
+- The glTF target also plans each document's collision (`collision.h`), as
+  settings asking every mesh for a hull or its triangles would (the input's
+  first byte picks), its proxies taken out, and writes the first few
+  nodes' shapes: the written asset must pass the collision view and every
+  block the physics module's validator (`fuzz_collision_check.h`).
 - `tests/fuzz/fuzz_preview.c`: material previews' cache files, read for the
   key their header names; one that reads must not read for another key,
   nor from memory off its alignment.

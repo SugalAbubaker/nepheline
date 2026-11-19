@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#include <nepheline/asset/collision.h>
 #include <nepheline/asset/material.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/asset/pack.h>
@@ -1639,6 +1640,198 @@ NTEST(views, scene_view_resolves_and_checks_cells)
     image_asset_free(&ia);
 }
 
+// The cells' scene at `type_version` with `records` collision records over its two nodes (the
+// header's word `word`), as version 3 writes them.
+static void build_scene_collision(ImageAsset *ia, u32 type_version, u32 records, u32 word)
+{
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_SCENE, type_version,
+                          nph_guid_from_cstr("collides"), 1U);
+    static const char strings[] = "root\0child";
+    NphSceneHeader h;
+    memset(&h, 0, sizeof h);
+    h.node_count = 2U;
+    h.string_bytes = sizeof strings;
+    h.collision_count = word;
+    add(&w, NPH_SCENE_TAG_HEADER, 0U, &h, sizeof h);
+    NphSceneNode nodes[2];
+    memset(nodes, 0, sizeof nodes);
+    for (u32 i = 0; i < 2U; ++i) {
+        nodes[i].rotation = nph_quat_identity();
+        nodes[i].scale = nph_vec3_one();
+        nodes[i].first_child = NPH_SCENE_NO_NODE;
+        nodes[i].next_sibling = NPH_SCENE_NO_NODE;
+    }
+    nodes[0].parent = NPH_SCENE_NO_NODE;
+    nodes[0].first_child = 1U;
+    nodes[1].parent = 0U;
+    nodes[1].name = 5U;
+    add(&w, NPH_SCENE_TAG_NODES, 0U, nodes, sizeof nodes);
+    add(&w, NPH_SCENE_TAG_STRINGS, 0U, strings, sizeof strings);
+    if (records != 0U) {
+        NphSceneCollision rec[2];
+        memset(rec, 0, sizeof rec);
+        rec[0].collision = nph_guid_from_cstr("crate");
+        rec[1].node = 1U;
+        rec[1].collision = nph_guid_from_cstr("lid");
+        add(&w, NPH_SCENE_TAG_COLLISION, 0U, rec, (u64)records * sizeof rec[0]);
+    }
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, scene_view_resolves_and_checks_collision)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    build_scene_collision(&ia, NPH_SCENE_TYPE_VERSION, 2U, 2U);
+    NphSceneView v;
+    NTEST_ASSERT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(v.collision_count, 2U);
+    NTEST_ASSERT_NOT_NULL(v.collisions);
+    NTEST_EXPECT_EQ_UINT(v.collisions[1].node, 1U);
+    NTEST_EXPECT_TRUE(nph_guid_equals(v.collisions[0].collision, nph_guid_from_cstr("crate")));
+    NphSceneCollision *rec = (NphSceneCollision *)blob_bytes(&ia, NPH_SCENE_TAG_COLLISION, 0U);
+    // A node out of range or twice, an asset unnamed, a reserved word.
+    rec[1].node = 2U;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    rec[1].node = 0U;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    rec[1].node = 1U;
+    rec[0].collision = NPH_GUID_NULL;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    rec[0].collision = nph_guid_from_cstr("crate");
+    rec[0].reserved0 = 1U;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    rec[0].reserved0 = 0U;
+    rec[1].reserved[1] = 1U;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    rec[1].reserved[1] = 0U;
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+    // A count the blob does not hold; none at all.
+    build_scene_collision(&ia, NPH_SCENE_TYPE_VERSION, 2U, 3U);
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    build_scene_collision(&ia, NPH_SCENE_TYPE_VERSION, 0U, 0U);
+    NTEST_ASSERT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(v.collision_count, 0U);
+    image_asset_free(&ia);
+    // Version 2: no collision, whatever its reserved word holds; a blob of it is refused.
+    build_scene_collision(&ia, 2U, 0U, 5U);
+    NTEST_ASSERT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(v.collision_count, 0U);
+    NTEST_EXPECT_NULL(v.collisions);
+    image_asset_free(&ia);
+    build_scene_collision(&ia, 2U, 1U, 0U);
+    NTEST_EXPECT_EQ_INT(nph_scene_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+}
+
+// ---------------------------------------------------------------------------
+// Collision
+// ---------------------------------------------------------------------------
+
+// A collision asset of a hull and a triangle mesh, their blocks of `hull_bytes` and
+// `mesh_bytes` (the view checks their sizes, not what they hold), and a hull block no shape
+// takes where `extra`.
+static void build_collision(ImageAsset *ia, u32 hull_bytes, u32 mesh_bytes, bool extra)
+{
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_COLLISION, NPH_COLLISION_TYPE_VERSION,
+                          nph_guid_from_cstr("collision"), 1U);
+    NphCollisionHeader h;
+    memset(&h, 0, sizeof h);
+    h.shape_count = 2U;
+    h.bounds.min = nph_vec3(-1.0F, -1.0F, -1.0F);
+    h.bounds.max = nph_vec3_one();
+    add(&w, NPH_COLLISION_TAG_HEADER, 0U, &h, sizeof h);
+    NphCollisionShape shapes[2];
+    memset(shapes, 0, sizeof shapes);
+    shapes[0].kind = (u32)NPH_COLLISION_SHAPE_HULL;
+    shapes[1].kind = (u32)NPH_COLLISION_SHAPE_MESH;
+    add(&w, NPH_COLLISION_TAG_SHAPES, 0U, shapes, sizeof shapes);
+    u8 block[256];
+    memset(block, 0x5A, sizeof block);
+    add(&w, NPH_COLLISION_TAG_HULL, 0U, block, hull_bytes);
+    add(&w, NPH_COLLISION_TAG_MESH, 0U, block, mesh_bytes);
+    if (extra) {
+        add(&w, NPH_COLLISION_TAG_HULL, 4U, block, hull_bytes);
+    }
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, collision_view_resolves_and_checks_its_shapes)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    build_collision(&ia, 200U, 64U, false);
+    NphCollisionView v;
+    NTEST_ASSERT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(v.header->shape_count, 2U);
+    const NphCollisionBlock hull = nph_collision_shape_block(&ia.asset, &v, 0U);
+    const NphCollisionBlock mesh = nph_collision_shape_block(&ia.asset, &v, 1U);
+    NTEST_EXPECT_EQ_UINT(hull.size, 200U);
+    NTEST_EXPECT_EQ_UINT(mesh.size, 64U);
+    NTEST_EXPECT_EQ_UINT(((const u8 *)hull.data)[199], 0x5AU);
+    NTEST_EXPECT_EQ_UINT((u64)(uintptr_t)hull.data % 16U, 0U);
+    // The header: a count of none or too many, flags, a reserved word, bounds not finite or
+    // out of order.
+    NphCollisionHeader *h = (NphCollisionHeader *)blob_bytes(&ia, NPH_COLLISION_TAG_HEADER, 0U);
+    h->shape_count = 0U;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->shape_count = NPH_COLLISION_MAX_SHAPES + 1U;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->shape_count = 2U;
+    h->flags = 1U;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->flags = 0U;
+    h->reserved[7] = 1U;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->reserved[7] = 0U;
+    h->bounds.max.y = NPH_F32_INFINITY;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->bounds.max.y = -2.0F;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->bounds.max.y = 1.0F;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_OK);
+    // The shapes: a kind of none, a second hull whose block is not there, a block out of its
+    // kind's order, a reserved word.
+    NphCollisionShape *s = (NphCollisionShape *)blob_bytes(&ia, NPH_COLLISION_TAG_SHAPES, 0U);
+    s[1].kind = 3U;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    s[1].kind = (u32)NPH_COLLISION_SHAPE_HULL;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    s[1].kind = (u32)NPH_COLLISION_SHAPE_MESH;
+    s[1].block = 1U;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    s[1].block = 0U;
+    s[0].reserved[0] = 1U;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    s[0].reserved[0] = 0U;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+    // Blocks smaller than their kind's header; one no shape takes.
+    build_collision(&ia, NPH_COLLISION_HULL_MIN_BYTES - 1U, 64U, false);
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    build_collision(&ia, 128U, NPH_COLLISION_MESH_MIN_BYTES - 1U, false);
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    build_collision(&ia, 128U, 64U, true);
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    // Another type, another version.
+    build_scene_collision(&ia, NPH_SCENE_TYPE_VERSION, 0U, 0U);
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_TYPE_MISMATCH);
+    image_asset_free(&ia);
+    build_collision(&ia, 128U, 64U, false);
+    ia.asset.header.type_version = NPH_COLLISION_TYPE_VERSION + 1U;
+    NTEST_EXPECT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_VERSION_MISMATCH);
+    image_asset_free(&ia);
+}
+
 // ---------------------------------------------------------------------------
 // Sound
 // ---------------------------------------------------------------------------
@@ -1920,6 +2113,15 @@ static void check_seed_asset(const char *name, u32 type)
         for (u32 k = 0; k < v.cell_count; ++k) {
             NTEST_ASSERT_NEAR_F32(v.cells[k].proxy_cell, 0.25F, 0.0F);
         }
+        // The script's GUIDs are its own (any non-null one does for a seed).
+        for (u32 k = 0; k < v.collision_count; ++k) {
+            NTEST_ASSERT_EQ_UINT(v.collisions[k].node, 0U);
+            NTEST_ASSERT_FALSE(nph_guid_is_null(v.collisions[k].collision));
+        }
+    } else if (type == NPH_ASSET_TYPE_COLLISION) {
+        NphCollisionView v;
+        NTEST_ASSERT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(v.header->shape_count, 2U);
     } else if (type == NPH_ASSET_TYPE_SOUND) {
         NphSoundView v;
         NTEST_ASSERT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
@@ -1949,6 +2151,8 @@ NTEST(views, fuzz_seeds_written_by_the_python_description_validate)
     check_seed_asset("nph/material_uv", NPH_ASSET_TYPE_MATERIAL);
     check_seed_asset("nph/scene", NPH_ASSET_TYPE_SCENE);
     check_seed_asset("nph/scene_cells", NPH_ASSET_TYPE_SCENE);
+    check_seed_asset("nph/scene_collision", NPH_ASSET_TYPE_SCENE);
+    check_seed_asset("nph/collision", NPH_ASSET_TYPE_COLLISION);
     check_seed_asset("nph/sound", NPH_ASSET_TYPE_SOUND);
     check_seed_asset("nph/sound_streamed", NPH_ASSET_TYPE_SOUND);
 

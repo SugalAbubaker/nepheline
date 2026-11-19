@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Typed views over loaded assets (mesh.h, texture.h, material.h, scene.h,
-// sound.h): each resolves the blobs an asset type defines and checks every
+// sound.h, collision.h): each resolves the blobs an asset type defines and checks every
 // count and range, so the renderer, the scene code, and the audio runtime
 // can use the pointers without further validation.
+#include <nepheline/asset/collision.h>
 #include <nepheline/asset/material.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/asset/scene.h>
@@ -783,6 +784,23 @@ NphResult nph_scene_view(const NphAsset *asset, NphSceneView *out)
     } else if (nph_asset_blob(asset, NPH_SCENE_TAG_CELLS, 0U) != NULL) {
         return NPH_RESULT_CORRUPT;
     }
+    // What the nodes collide with, from version 3.
+    const NphSceneCollision *collisions = NULL;
+    if (asset->header.type_version >= 3U) {
+        NPH_TRY(typed_blob(asset, NPH_SCENE_TAG_COLLISION, 0U, sizeof(NphSceneCollision),
+                           h->collision_count, &p));
+        collisions = (const NphSceneCollision *)p;
+        for (u32 i = 0; i < h->collision_count; ++i) {
+            const NphSceneCollision *e = &collisions[i];
+            if (e->node >= n || (i != 0U && e->node <= collisions[i - 1U].node) ||
+                e->reserved0 != 0U || e->reserved[0] != 0U || e->reserved[1] != 0U ||
+                nph_guid_is_null(e->collision)) {
+                return NPH_RESULT_CORRUPT;
+            }
+        }
+    } else if (nph_asset_blob(asset, NPH_SCENE_TAG_COLLISION, 0U) != NULL) {
+        return NPH_RESULT_CORRUPT;
+    }
     out->header = h;
     out->nodes = nodes;
     out->instances = instances;
@@ -792,6 +810,8 @@ NphResult nph_scene_view(const NphAsset *asset, NphSceneView *out)
     out->strings = strings;
     out->cells = cells;
     out->cell_count = cells != NULL ? h->cell_count : 0U;
+    out->collisions = collisions;
+    out->collision_count = collisions != NULL ? h->collision_count : 0U;
     return NPH_RESULT_OK;
 }
 
@@ -905,4 +925,96 @@ NphResult nph_sound_view(const NphAsset *asset, NphSoundView *out)
     out->offset = data->offset;
     out->block_offsets = offsets;
     return NPH_RESULT_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Collision
+// ---------------------------------------------------------------------------
+
+static u32 collision_tag(u32 kind)
+{
+    return kind == (u32)NPH_COLLISION_SHAPE_HULL ? NPH_COLLISION_TAG_HULL : NPH_COLLISION_TAG_MESH;
+}
+
+// The header's numbers: a count in range, no flags, nothing reserved, and
+// bounds finite and ordered.
+static bool collision_header_ok(const NphCollisionHeader *h)
+{
+    if (h->shape_count == 0U || h->shape_count > NPH_COLLISION_MAX_SHAPES || h->flags != 0U) {
+        return false;
+    }
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(h->reserved); ++i) {
+        if (h->reserved[i] != 0U) {
+            return false;
+        }
+    }
+    const f32 lo[3] = {h->bounds.min.x, h->bounds.min.y, h->bounds.min.z};
+    const f32 hi[3] = {h->bounds.max.x, h->bounds.max.y, h->bounds.max.z};
+    for (u32 k = 0; k < 3U; ++k) {
+        if (!finite_f32(lo[k]) || !finite_f32(hi[k]) || lo[k] > hi[k]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+NphResult nph_collision_view(const NphAsset *asset, NphCollisionView *out)
+{
+    NPH_ASSERT(out != NULL);
+    memset(out, 0, sizeof *out);
+    NPH_TRY(check_type(asset, NPH_ASSET_TYPE_COLLISION, NPH_COLLISION_TYPE_VERSION));
+    const void *p = NULL;
+    NPH_TRY(typed_blob(asset, NPH_COLLISION_TAG_HEADER, 0U, sizeof(NphCollisionHeader), 1U, &p));
+    const NphCollisionHeader *h = (const NphCollisionHeader *)p;
+    if (!collision_header_ok(h)) {
+        return NPH_RESULT_CORRUPT;
+    }
+    NPH_TRY(typed_blob(asset, NPH_COLLISION_TAG_SHAPES, 0U, sizeof(NphCollisionShape),
+                       h->shape_count, &p));
+    const NphCollisionShape *shapes = (const NphCollisionShape *)p;
+    // Each shape takes the next block of its kind.
+    u32 next[2] = {0U, 0U}; // hulls, meshes
+    for (u32 i = 0; i < h->shape_count; ++i) {
+        const NphCollisionShape *s = &shapes[i];
+        if ((s->kind != (u32)NPH_COLLISION_SHAPE_HULL &&
+             s->kind != (u32)NPH_COLLISION_SHAPE_MESH) ||
+            s->reserved[0] != 0U || s->reserved[1] != 0U) {
+            return NPH_RESULT_CORRUPT;
+        }
+        const u32 k = s->kind == (u32)NPH_COLLISION_SHAPE_HULL ? 0U : 1U;
+        if (s->block != next[k]) {
+            return NPH_RESULT_CORRUPT;
+        }
+        next[k] += 1U;
+        const NphAssetBlob *b = nph_asset_blob(asset, collision_tag(s->kind), s->block);
+        const u64 smallest = k == 0U ? NPH_COLLISION_HULL_MIN_BYTES : NPH_COLLISION_MESH_MIN_BYTES;
+        if (b == NULL || b->size < smallest || b->size > (u64)NPH_U32_MAX) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
+    // No block that no shape takes.
+    for (u32 i = 0; i < asset->blob_count; ++i) {
+        const NphAssetBlob *b = &asset->blobs[i];
+        if ((b->tag == NPH_COLLISION_TAG_HULL && b->index >= next[0]) ||
+            (b->tag == NPH_COLLISION_TAG_MESH && b->index >= next[1])) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
+    out->header = h;
+    out->shapes = shapes;
+    return NPH_RESULT_OK;
+}
+
+NphCollisionBlock nph_collision_shape_block(const NphAsset *asset, const NphCollisionView *view,
+                                            u32 index)
+{
+    NPH_ASSERT(asset != NULL && view != NULL && view->header != NULL &&
+               index < view->header->shape_count);
+    const NphCollisionShape *s = &view->shapes[index];
+    const NphAssetBlob *b = nph_asset_blob(asset, collision_tag(s->kind), s->block);
+    NPH_ASSERT(b != NULL); // the view found it
+    NphCollisionBlock out;
+    out.data = b->data;
+    out.size = (u32)b->size;
+    return out;
 }

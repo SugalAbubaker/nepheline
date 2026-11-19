@@ -95,6 +95,10 @@ typedef struct CookGltfNode {
     i32 mesh;   // index into meshes, -1 none
     i32 camera; // index into cameras, -1 none
     i32 light;  // index into lights, -1 none
+    // What its extras ask it to collide as, {"collision": "mesh" | "hull" | "none"} (an object's
+    // custom property in Blender; cook/collision.h): a CookCollisionKind, -1 when they say
+    // nothing.
+    i32 collision;
 } CookGltfNode;
 
 // A block the scene owns: decoded data URIs and image files read from

@@ -23,7 +23,7 @@ pinned numbers that the renderer and the audio runtime map.
 | `pack.h` | pack archives: reader (mapped, binary search) and streaming writer |
 | `vfs.h` | mounts, path normalisation, reads as copies, mappings, or handles |
 | `loader.h` | shared handles, synchronous and asynchronous loads, blob access |
-| `mesh.h`, `texture.h`, `material.h`, `scene.h`, `sound.h` | the typed headers and the views that validate them |
+| `mesh.h`, `texture.h`, `material.h`, `scene.h`, `sound.h`, `collision.h` | the typed headers and the views that validate them |
 
 ## The container (`format.h`)
 
@@ -328,7 +328,7 @@ can be handed to the renderer without further checks:
   composed as `KHR_texture_transform`'s; a material without it has the
   identity. The view refuses one before version 3, of another size, not
   finite, or whose linear part is singular.
-- **Scene** (`scene.h`, type version 2; version 1 still reads): `HEAD`,
+- **Scene** (`scene.h`, type version 3; versions 1 and 2 still read): `HEAD`,
   `NODE` (parent-before-child hierarchy with local TRS, child and sibling
   links, names), `INST` (a mesh GUID at a node with a range of material
   GUIDs in `MTRL`), `CAMS`, `LGHT`, and `STRS` (NUL-terminated names).
@@ -342,7 +342,24 @@ can be handed to the renderer without further checks:
   view checks the ranges (in range, in order, apart), the bounds and
   origins (finite), a proxy's cell (a positive normal power of two) and
   distance (positive, finite), and the reserved words (zero). A version-1
-  scene has no cells, whatever its header's reserved word holds.
+  scene has no cells, whatever its header's reserved word holds. From
+  version 3, a scene whose nodes collide (docs/cook.md "Collision") adds
+  `COLS`: a node and the collision asset it collides with, by ascending
+  node, a node once at most (32 bytes; ADR-0107). The view checks the nodes
+  (in range, ascending), the assets (named), and the reserved words; a scene
+  before version 3 has none, whatever its header's word holds.
+- **Collision** (`collision.h`, type version 1; ADR-0107): `HEAD` (the
+  shape count, at most 1024, and the bounds of every shape), `SHAP` (each
+  shape's kind, a convex hull or a triangle mesh, and its block), and the
+  blocks: `HULL` and `TMSH`, one blob a block, the physics module's
+  pointer-free hulls and meshes (physics/hull.h, physics/mesh.h) used where
+  they lie. A shape's block is the next of its kind's blobs. The view checks
+  the container: the count, the flags and reserved words, the bounds
+  (finite, ordered), each kind, each block (there, in order, at least its
+  kind's header and below 4 GiB), and that no block is left over. The
+  blocks themselves are checked by the physics module's validators where a
+  runtime makes shapes of them, since the asset module does not depend on
+  physics.
 - **Sound** (`sound.h`): `HEAD` (codec, PCM format, channels, rate,
   frames, the loop, depth, the lossless block size and count, flags:
   `NPH_SOUND_FLAG_STREAM` for one played from storage), `DATA` (the

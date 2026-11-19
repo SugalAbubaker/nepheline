@@ -436,6 +436,40 @@ def scene_cell_blobs():
     return blobs + [("CELL", 0, 0, 16, cell, cell)]
 
 
+def scene_collision_blobs():
+    """The scene with cells and what its first node collides with (scene.h version 3): a record
+    naming a collision asset."""
+    blobs = []
+    for b in scene_cell_blobs():
+        if b[0] == "HEAD":
+            header = bytearray(b[4])
+            struct.pack_into("<I", header, 32, 1)  # collision_count
+            header = bytes(header)
+            blobs.append(("HEAD", 0, 0, 16, header, header))
+        else:
+            blobs.append(b)
+    record = struct.pack("<2I", 0, 0) + guid_from_str("collision") + struct.pack("<2I", 0, 0)
+    assert len(record) == 32
+    return blobs + [("COLS", 0, 0, 16, record, record)]
+
+
+def collision_blobs():
+    """A collision asset (asset/collision.h; ADR-0107): a hull and a triangle mesh. Their blocks
+    are zeros of the smallest sizes the view takes: what is in them is the physics module's
+    validators' to check, and their own fuzz targets'."""
+    header = struct.pack("<2I6f8I", 2, 0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, *([0] * 8))
+    assert len(header) == 64
+    shapes = struct.pack("<4I", 1, 0, 0, 0) + struct.pack("<4I", 2, 0, 0, 0)
+    hull = bytes(128)
+    mesh = bytes(64)
+    return [
+        ("HEAD", 0, 0, 16, header, header),
+        ("SHAP", 0, 0, 16, shapes, shapes),
+        ("HULL", 0, 0, 16, hull, hull),
+        ("TMSH", 0, 0, 16, mesh, mesh),
+    ]
+
+
 def pack_file(entries, entry_align=16):
     """A .npk image. `entries` is a list of (path, guid_bytes, type, data)."""
     header_size = 64
@@ -548,6 +582,9 @@ def main():
           nph_file(fourcc("MATL"), 3, material_blobs() + [("UVTR", 0, 0, 16, uv, uv)]))
     write(os.path.join(CORPUS, "nph", "scene"), nph_file(fourcc("SCEN"), 1, scene_blobs()))
     write(os.path.join(CORPUS, "nph", "scene_cells"), nph_file(fourcc("SCEN"), 2, scene_cell_blobs()))
+    write(os.path.join(CORPUS, "nph", "scene_collision"),
+          nph_file(fourcc("SCEN"), 3, scene_collision_blobs()))
+    write(os.path.join(CORPUS, "nph", "collision"), nph_file(fourcc("COLL"), 1, collision_blobs()))
     write(os.path.join(CORPUS, "nph", "sound"), nph_file(fourcc("SND "), 1, sound_blobs(False)))
     write(os.path.join(CORPUS, "nph", "sound_streamed"),
           nph_file(fourcc("SND "), 1, sound_blobs(True)))

@@ -494,6 +494,53 @@ def gltf_foliage():
     }
 
 
+def gltf_collision():
+    """Collision (tools/cook/collision.h; ADR-0107): a crate with two convex proxies (a child, and
+    a root with a Blender duplicate's suffix), a floor and a sign asked by their extras for their
+    triangles and a hull (the sign is flat), a proxy that finds no node, and an extra that names
+    no kind."""
+    corners = [((-1, 1)[i & 1], (-1, 1)[(i >> 1) & 1], (-1, 1)[(i >> 2) & 1]) for i in range(8)]
+    box = [0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4,
+           6, 1, 3, 5, 3, 7, 5]
+    plane = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)]
+    pos = b"".join(struct.pack("<3f", *p) for p in corners + plane)
+    idx = struct.pack("<42H", *(box + [0, 2, 1, 0, 3, 2]))
+    buf = pos + idx
+    return {
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0, 2, 3, 4, 5, 6]}],
+        "nodes": [
+            {"name": "Crate", "mesh": 0, "translation": [5, 0, 0], "children": [1]},
+            {"name": "UCX_Crate_01", "mesh": 2, "translation": [0, 0.5, 0],
+             "scale": [0.5, 0.5, 0.5]},
+            {"name": "UCX_Crate_02.001", "mesh": 2, "translation": [5, -0.5, 0],
+             "scale": [0.5, 0.5, 0.5]},
+            {"name": "Floor", "mesh": 1, "scale": [10, 1, 10], "extras": {"collision": "mesh"}},
+            {"name": "Sign", "mesh": 1, "extras": {"collision": "hull"}},
+            {"name": "UCX_Nothing", "mesh": 0},
+            {"name": "Odd", "mesh": 1, "extras": {"collision": 3}},
+        ],
+        "meshes": [
+            {"name": "Box", "primitives": [{"attributes": {"POSITION": 0}, "indices": 2}]},
+            {"name": "Plane", "primitives": [{"attributes": {"POSITION": 1}, "indices": 3}]},
+            {"name": "ProxyBox", "primitives": [{"attributes": {"POSITION": 0}, "indices": 2}]},
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 8, "type": "VEC3",
+             "min": [-1, -1, -1], "max": [1, 1, 1]},
+            {"bufferView": 0, "byteOffset": 96, "componentType": 5126, "count": 4,
+             "type": "VEC3", "min": [-1, 0, -1], "max": [1, 0, 1]},
+            {"bufferView": 1, "componentType": 5123, "count": 36, "type": "SCALAR"},
+            {"bufferView": 1, "byteOffset": 72, "componentType": 5123, "count": 6,
+             "type": "SCALAR"},
+        ],
+        "bufferViews": [{"buffer": 0, "byteLength": 144},
+                        {"buffer": 0, "byteOffset": 144, "byteLength": 84}],
+        "buffers": [{"byteLength": len(buf), "uri": _data_uri(buf)}],
+    }
+
+
 def gltf_seeds():
     triangle, triangle_buf = gltf_triangle()
     return {
@@ -503,6 +550,7 @@ def gltf_seeds():
         "triangle_glb": glb(triangle, triangle_buf),
         "specgloss_dds": _dump(gltf_specgloss_dds()),
         "foliage_masked": _dump(gltf_foliage()),
+        "collision": _dump(gltf_collision()),
     }
 
 

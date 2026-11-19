@@ -14,6 +14,7 @@
 
 #include <cgltf.h>
 #include <cook/gltf.h>
+#include <cook/scene_import.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -1115,6 +1116,34 @@ typedef struct NodeVisit {
 
 typedef NPH_ARRAY(NodeVisit) NodeVisitArray;
 
+// What a node's extras ask it to collide as (CookGltfNode.collision): -1 when they say nothing;
+// a value that names no kind is warned about and ignored.
+static i32 node_collision(CookGltfScene *scene, const cgltf_node *n, const char *name)
+{
+    if (n->extras.data == NULL) {
+        return -1;
+    }
+    NphJsonDoc doc;
+    i32 kind = -1;
+    if (nph_json_parse(nph_str_from_cstr(n->extras.data), scene->alloc, &doc) == NPH_RESULT_OK &&
+        doc.root != NULL && doc.root->type == NPH_JSON_OBJECT) {
+        const NphJsonValue *v = nph_json_object_get(doc.root, NPH_STR("collision"));
+        NphStr s;
+        CookCollisionKind k = COOK_COLLISION_NONE;
+        if (v != NULL && nph_json_as_str(v, &s) == NPH_RESULT_OK &&
+            cook_collision_kind_parse(s, &k)) {
+            kind = (i32)k;
+        } else if (v != NULL) {
+            NPH_LOG_WARN(&NPH_LOG_COOK,
+                         "node %s: its collision is not \"mesh\", \"hull\" or \"none\"; ignored",
+                         name);
+            scene->warnings += 1U;
+        }
+    }
+    nph_json_doc_free(&doc);
+    return kind;
+}
+
 // Appends the subtree of `root` depth first, a parent before its children
 // and siblings in document order, without recursion (a hostile document
 // can nest nodes as deep as it has nodes). A node met twice (glTF forbids
@@ -1145,6 +1174,7 @@ static NphResult append_tree(CookGltfScene *scene, const cgltf_data *data, const
         out->mesh = n->mesh != NULL ? (i32)cgltf_mesh_index(data, n->mesh) : -1;
         out->camera = -1;
         out->light = -1;
+        out->collision = node_collision(scene, n, out->name);
         if (n->skin != NULL) {
             NPH_LOG_WARN(&NPH_LOG_COOK, "node %s: skinning is not supported; the mesh is static",
                          out->name);

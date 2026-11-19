@@ -975,10 +975,12 @@ side, its one-shots played, nothing starved or dropped ([audio.md](audio.md)
   main-thread budget. Capturing and blending in parallel jobs, or blending
   on the GPU (every consumer of instance transforms would), comes before
   games move that many.
-- Colliders are spheres, capsules, and boxes. Convex hulls, triangle
-  meshes, and heightfields need cooked collision assets; compounds through
-  the hierarchy, joint components, and sensors are to come (the physics
-  API has them all meanwhile).
+- Colliders are spheres, capsules, and boxes. The cooker writes convex
+  hulls and triangle meshes as collision assets, named by cooked scenes'
+  nodes (docs/cook.md "Collision"; ADR-0107), which colliders take next
+  (ADR-0102's step four). Heightfields, compounds through the hierarchy,
+  joint components, and sensors are to come (the physics API has them all
+  meanwhile).
 - The character controller is not a component: a game keeps its
   characters in its state block and moves them in its systems.
 - Hot reload unloads the old image only after checking the engine's own
