@@ -173,11 +173,12 @@ static NphRenderTransform render_transform_of(const NphWorldTransform *wt)
     return t;
 }
 
-// The material table the preview draws as of now (ADR-0105): for each slot, the entity's own,
-// else the one the mesh names, as the scene renderer holds it (the default material while it
-// loads, or where none is named or it failed). A reference is taken anew where the GUID changed
-// or the material was replaced by a new asset (its first cook). How many slots, up to the last
-// that draws a material of its own.
+// The material table the preview draws as of now (ADR-0105): for each slot its faces use, the
+// entity's own, else the one the mesh names, as the scene renderer holds it (the default
+// material while it loads, or where none is named or it failed); none for a slot without faces,
+// which nothing draws. A reference is taken anew where the GUID changed or the material was
+// replaced by a new asset (its first cook). How many slots, up to the last that draws a material
+// of its own.
 static u32 preview_table(Editor *ed, NphRenderMaterial table[COOK_POLYMESH_MATERIALS])
 {
     EditorMeshEdit *me = &ed->mesh_edit;
@@ -191,9 +192,12 @@ static u32 preview_table(Editor *ed, NphRenderMaterial table[COOK_POLYMESH_MATER
         if (sr == NULL) {
             continue;
         }
-        NphGuid want = mr != NULL ? nph_mesh_renderer_material(mr, s) : NPH_GUID_NULL;
-        if (nph_guid_is_null(want) && me->mesh.materials[s][0] != '\0') {
-            want = cooker_asset_guid(me->mesh.materials[s], "material");
+        NphGuid want = NPH_GUID_NULL;
+        if ((me->preview_slots & (1U << s)) != 0U) {
+            want = mr != NULL ? nph_mesh_renderer_material(mr, s) : NPH_GUID_NULL;
+            if (nph_guid_is_null(want) && me->mesh.materials[s][0] != '\0') {
+                want = cooker_asset_guid(me->mesh.materials[s], "material");
+            }
         }
         const NphSceneMaterialState st =
             nph_scene_renderer_material_state(sr, me->preview_refs[s], &table[s]);
@@ -283,6 +287,7 @@ static NphResult rebuild_preview(Editor *ed)
                                          &data);
     }
     NphRenderMesh created = NPH_RENDER_MESH_NULL;
+    u32 slots = 1U; // the whole mesh is slot 0's when it has no submeshes
     if (res == NPH_RESULT_OK) {
         NphRenderSubmesh whole;
         NphRenderMeshDesc desc;
@@ -294,6 +299,8 @@ static NphResult rebuild_preview(Editor *ed)
             subs[i].index_offset = mesh.submeshes.data[i].index_offset;
             subs[i].index_count = mesh.submeshes.data[i].index_count;
             subs[i].material_slot = mesh.submeshes.data[i].material_slot;
+            NPH_ASSERT(subs[i].material_slot < COOK_POLYMESH_MATERIALS);
+            slots = (i == 0U ? 0U : slots) | (1U << subs[i].material_slot);
         }
         if (mesh.submeshes.len != 0U) {
             desc.submeshes = subs;
@@ -306,6 +313,7 @@ static NphResult rebuild_preview(Editor *ed)
         // The instance moves to the new mesh: a new one, the old pair gone.
         drop_preview(ed);
         me->preview = created;
+        me->preview_slots = slots;
         NphRenderMaterial table[COOK_POLYMESH_MATERIALS];
         const u32 used = preview_table(ed, table);
         res = make_preview_instance(ed, table, used);
@@ -670,6 +678,13 @@ static bool slot_overridden(const Editor *ed, u32 s)
     return mr != NULL && !nph_guid_is_null(nph_mesh_renderer_material(mr, s));
 }
 
+// Whether face `f` takes the material dropped on `face`: the selected faces when `selection`
+// (`face` is one of them), `face` alone otherwise.
+static bool face_takes(const EditorMeshEdit *me, bool selection, u32 face, u32 f)
+{
+    return selection ? f < me->selected.len && me->selected.data[f] != 0U : f == face;
+}
+
 NphResult editor_mesh_edit_face_material(Editor *ed, u32 face, const char *key, u32 *out_slot)
 {
     NPH_ASSERT(ed != NULL && key != NULL);
@@ -687,8 +702,7 @@ NphResult editor_mesh_edit_face_material(Editor *ed, u32 face, const char *key, 
     u32 kept[COOK_POLYMESH_MATERIALS];
     memset(kept, 0, sizeof kept);
     for (u32 f = 0; f < me->mesh.faces.len; ++f) {
-        const bool changes = selection ? me->selected.data[f] != 0U : f == face;
-        if (!changes) {
+        if (!face_takes(me, selection, face, f)) {
             kept[me->mesh.faces.data[f].material] += 1U;
         }
     }
@@ -713,14 +727,13 @@ NphResult editor_mesh_edit_face_material(Editor *ed, u32 face, const char *key, 
     // Nothing to do when the faces already draw it from that slot.
     bool same = strcmp(me->mesh.materials[slot], key) == 0;
     for (u32 f = 0; f < me->mesh.faces.len && same; ++f) {
-        const bool changes = selection ? me->selected.data[f] != 0U : f == face;
-        same = !changes || me->mesh.faces.data[f].material == slot;
+        same = !face_takes(me, selection, face, f) || me->mesh.faces.data[f].material == slot;
     }
     if (!same) {
         NPH_TRY(push_undo(me, ed->alloc));
         u32 count = 0U;
         for (u32 f = 0; f < me->mesh.faces.len; ++f) {
-            if (selection ? me->selected.data[f] != 0U : f == face) {
+            if (face_takes(me, selection, face, f)) {
                 me->mesh.faces.data[f].material = slot;
                 ++count;
             }

@@ -761,21 +761,27 @@ NphResult cooker_cook_mesh(Cooker *c, const char *source_path)
         r = NPH_RESULT_INVALID_ARGUMENT;
     }
     if (r == NPH_RESULT_OK) {
-        NphAssetWriter w;
-        nph_asset_writer_init(&w, c->alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION, guid,
-                              content_hash);
-        CookMeshStats st;
-        r = cook_mesh_process(&mesh, &c->mesh, NULL, c->jobs, &w, &st);
         // The slots' materials (SLMT, ADR-0105), named by the GUIDs their sources cook to,
-        // which the mesh references: drawn where an entity names none for the slot.
+        // which the mesh references: drawn where an entity names none for the slot. Only the
+        // slots its faces use (its submeshes'): one that names a material and has no face is
+        // left out, so that no entity loads what nothing draws.
+        u32 used = 0U;
+        for (u32 i = 0; i < mesh.submeshes.len; ++i) {
+            NPH_ASSERT(mesh.submeshes.data[i].material_slot < COOK_POLYMESH_MATERIALS);
+            used |= 1U << mesh.submeshes.data[i].material_slot;
+        }
         NphGuid slots[COOK_POLYMESH_MATERIALS];
         NphGuid deps[COOK_POLYMESH_MATERIALS];
+        u32 named = 0U;
         u32 dep_count = 0U;
-        const u32 named = cook_polymesh_material_count(&poly);
-        for (u32 s = 0; s < named; ++s) {
-            slots[s] = poly.materials[s][0] != '\0' ? asset_guid(poly.materials[s], "material")
-                                                    : NPH_GUID_NULL;
-            bool seen = nph_guid_is_null(slots[s]);
+        for (u32 s = 0; s < COOK_POLYMESH_MATERIALS; ++s) {
+            slots[s] = NPH_GUID_NULL;
+            if ((used & (1U << s)) == 0U || poly.materials[s][0] == '\0') {
+                continue;
+            }
+            slots[s] = asset_guid(poly.materials[s], "material");
+            named = s + 1U;
+            bool seen = false;
             for (u32 d = 0; d < dep_count && !seen; ++d) {
                 seen = nph_guid_equals(deps[d], slots[s]);
             }
@@ -783,6 +789,11 @@ NphResult cooker_cook_mesh(Cooker *c, const char *source_path)
                 deps[dep_count++] = slots[s];
             }
         }
+        NphAssetWriter w;
+        nph_asset_writer_init(&w, c->alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION, guid,
+                              content_hash);
+        CookMeshStats st;
+        r = cook_mesh_process(&mesh, &c->mesh, NULL, c->jobs, &w, &st);
         if (r == NPH_RESULT_OK && named != 0U) {
             r = nph_asset_writer_add_blob(&w, NPH_MESH_TAG_SLOT_MATERIALS, 0U, slots,
                                           sizeof(NphGuid) * named, NPH_ASSET_CODEC_NONE, 0U);

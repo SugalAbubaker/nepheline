@@ -335,12 +335,13 @@ files, which have none, still read. The reader checks every value:
 
 It is a fuzz target.
 
-The cooked mesh names the slots' materials by the GUIDs their sources
-cook to (`<key>#material`), in a slot-materials blob (`asset.md`, mesh
-version 8), and references them in the cook database. The sources need
-not be cooked first: the GUID comes from the key. An entity drawing the
-mesh draws a slot's material where its MeshRenderer names none for it
-(`runtime.md`).
+The cooked mesh names the materials of the slots its faces use by the
+GUIDs their sources cook to (`<key>#material`), in a slot-materials blob
+(`asset.md`, mesh version 8), and references them in the cook database. A
+slot that names a material but has no face is left out, so that no entity
+loads what nothing draws. The sources need not be cooked first: the GUID
+comes from the key. An entity drawing the mesh draws a slot's material
+where its MeshRenderer names none for it (`runtime.md`).
 
 The primitives (cube, plane, cylinder, sphere) are closed where they
 should be, face outwards, and map UVs in [0, 1]. `cook_polymesh_extrude`

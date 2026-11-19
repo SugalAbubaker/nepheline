@@ -689,6 +689,14 @@ static NphResult mirror_mesh(NphSceneRenderer *sr, EntityRecord *r, const NphMes
         (const NphMeshMaterials *)nph_world_get(sr->world, r->entity, sr->ids.mesh_materials);
     const u64 source = mesh_source(m, more);
     if ((r->flags & (u32)(REC_MESH | REC_RELOAD)) != (u32)REC_MESH || source != r->source) {
+        // The extra slots' table before any reference is taken, so that failing leaves none.
+        u32 *more_refs = NULL;
+        if (more != NULL) {
+            more_refs = NPH_ALLOC_ARRAY(sr->alloc, u32, NPH_MESH_MATERIALS_EXTRA);
+            if (more_refs == NULL) {
+                return NPH_RESULT_OUT_OF_MEMORY;
+            }
+        }
         // The new references first, then the old ones go: an asset named
         // before and after is neither unloaded nor reloaded.
         const u32 mesh = render_assets_acquire(&sr->assets, m->mesh, RENDER_ASSET_MESH);
@@ -700,12 +708,7 @@ static NphResult mirror_mesh(NphSceneRenderer *sr, EntityRecord *r, const NphMes
         // Its mesh's own for the slots it names none for, now if the mesh is ready (else as
         // it becomes so: resolve_pending).
         const bool slots = acquire_mesh_slots(sr, mesh, m, materials);
-        u32 *more_refs = NULL;
-        if (more != NULL) {
-            more_refs = NPH_ALLOC_ARRAY(sr->alloc, u32, NPH_MESH_MATERIALS_EXTRA);
-            if (more_refs == NULL) {
-                return NPH_RESULT_OUT_OF_MEMORY;
-            }
+        if (more_refs != NULL) {
             for (u32 s = 0; s < NPH_MESH_MATERIALS_EXTRA; ++s) {
                 more_refs[s] = render_assets_acquire(&sr->assets, nph_mesh_materials_get(more, s),
                                                      RENDER_ASSET_MATERIAL);

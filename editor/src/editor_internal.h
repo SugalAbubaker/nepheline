@@ -175,9 +175,11 @@ typedef struct EditorMeshEdit {
     NphRenderMesh preview;
     NphRenderInstance preview_instance;
     bool preview_stale;
-    // The preview's materials (ADR-0105): for each slot, the material it draws (the entity's
-    // own, else the one the mesh names) held in the scene renderer (NPH_SCENE_MATERIAL_NONE for
-    // none), its GUID, and the render material its instance was made with.
+    // The preview's materials (ADR-0105): for each slot its faces use (`preview_slots`, a bit a
+    // slot), the material it draws (the entity's own, else the one the mesh names) held in the
+    // scene renderer (NPH_SCENE_MATERIAL_NONE for none), its GUID, and the render material its
+    // instance was made with.
+    u32 preview_slots;
     u32 preview_refs[COOK_POLYMESH_MATERIALS];
     NphGuid preview_guids[COOK_POLYMESH_MATERIALS];
     NphRenderMaterial preview_drawn[COOK_POLYMESH_MATERIALS];

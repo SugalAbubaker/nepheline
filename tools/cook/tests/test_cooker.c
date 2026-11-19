@@ -892,8 +892,19 @@ NTEST_F(CookFixture, an_editable_mesh_names_its_slots_materials)
     NTEST_ASSERT_EQ_UINT(e->dep_count, 2U);
     NTEST_EXPECT_TRUE(nph_guid_equals(e->deps[0], brick) && nph_guid_equals(e->deps[1], glass));
 
-    // One material in two slots is one reference.
+    // A slot no face uses is left out, as nothing draws it: the material of slot 1, and of
+    // slot 5 past the others.
     snprintf(m.materials[1], sizeof m.materials[1], "materials/glass.nmat");
+    snprintf(m.materials[5], sizeof m.materials[5], "materials/stone.nmat");
+    NTEST_ASSERT_EQ_INT(cook_polymesh_save(&m, path), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(read_slot_materials(f, c, "box.nmesh", slots), 3U);
+    NTEST_EXPECT_TRUE(nph_guid_is_null(slots[1]));
+    e = cook_db_find(cooker_db(c), NPH_STR("box.nmesh"), NPH_STR("mesh"));
+    NTEST_ASSERT_NOT_NULL(e);
+    NTEST_EXPECT_EQ_UINT(e->dep_count, 2U);
+    // With a face, it is in; one material in two slots is one reference.
+    m.faces.data[5].material = 1U;
     NTEST_ASSERT_EQ_INT(cook_polymesh_save(&m, path), NPH_RESULT_OK);
     NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
     NTEST_EXPECT_EQ_UINT(read_slot_materials(f, c, "box.nmesh", slots), 3U);
