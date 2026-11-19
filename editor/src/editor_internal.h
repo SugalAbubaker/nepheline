@@ -21,6 +21,8 @@
 #include "ui_renderer.h"
 #include "view.h"
 
+#include <cook/material.h>
+
 #define EDITOR_PATH_MAX            512U
 #define EDITOR_CONSOLE_INPUT_MAX   512U
 #define EDITOR_CONSOLE_LINES       4096U
@@ -39,10 +41,13 @@
 #define EDITOR_WINDOW_OUTLINER  "Outliner"
 #define EDITOR_WINDOW_INSPECTOR "Inspector"
 #define EDITOR_WINDOW_ASSETS    "Assets"
+#define EDITOR_WINDOW_MATERIAL  "Material"
 
 // Dear ImGui drag-and-drop payload types.
-#define EDITOR_DRAG_ENTITY "nph.entity" // an NphEntity
-#define EDITOR_DRAG_ASSET  "nph.asset"  // a scene's or a mesh's source key, NUL-terminated
+#define EDITOR_DRAG_ENTITY   "nph.entity"   // an NphEntity
+#define EDITOR_DRAG_ASSET    "nph.asset"    // a scene's or a mesh's source key, NUL-terminated
+#define EDITOR_DRAG_MATERIAL "nph.material" // a material's source key, NUL-terminated
+#define EDITOR_DRAG_IMAGE    "nph.image"    // an image's source key, NUL-terminated
 
 // The smallest viewport image, in pixels a side.
 #define EDITOR_VIEWPORT_MIN 16U
@@ -180,6 +185,39 @@ typedef struct EditorMeshEdit {
     NphRenderInstance stale_instance; // the entity's instance before the reload
 } EditorMeshEdit;
 
+typedef NPH_ARRAY(CookMaterialSource) EditorMaterialSnapshots;
+
+// An image of the project, for a texture slot's list.
+typedef struct EditorImageKey {
+    char key[COOK_MATERIAL_IMAGE_MAX];
+} EditorImageKey;
+typedef NPH_ARRAY(EditorImageKey) EditorImageKeys;
+
+// The material panel (material_edit.c, panel_material.c; ADR-0105 decision 5):
+// one material's source, drawn as it is changed and written as each change
+// settles, with a history of its own while it is open.
+typedef struct EditorMaterialEdit {
+    bool open;
+    char key[EDITOR_PROJECT_PATH_MAX]; // its source
+    NphGuid guid;                      // the cooked material (cooker_asset_guid)
+    CookMaterialSource source;         // as shown and drawn
+    CookMaterialSource before;         // the source before the change being made
+    bool changing;                     // a change not settled yet: drawn, not written
+    bool panel_changing;               // and the panel's widgets made it: they settle it
+    EditorMaterialSnapshots undo;      // the source before each settled change
+    EditorMaterialSnapshots redo;
+    bool live_dirty;   // the source changed: drawn at the next sync point
+    bool live_pending; // the renderer could not take the source yet (loading): again next frame
+    u32 cook;          // the last cook asked for (0: none)
+    bool cook_wanted;  // a cook the project had no room for: asked again next frame
+    char error[192];   // why the last write or cook failed; "" when none did
+    bool focused;      // the panel's window had the keyboard focus last frame
+    bool reveal;       // bring the panel's window forward
+    u64 revision;      // counts the settled changes
+    // The project's images, for the texture slots' lists: listed when one opens.
+    EditorImageKeys images;
+} EditorMaterialEdit;
+
 typedef struct EditorPanels {
     bool viewport;
     bool console;
@@ -188,6 +226,7 @@ typedef struct EditorPanels {
     bool outliner;
     bool inspector;
     bool assets;
+    bool material;
     bool demo;    // Dear ImGui's demo window (development builds)
     bool metrics; // Dear ImGui's metrics window
 } EditorPanels;
@@ -272,6 +311,7 @@ struct Editor {
     NphMutex resolve_lock;
     EditorAssets assets;
     EditorMeshEdit mesh_edit;
+    EditorMaterialEdit material;
     EditorAutosave autosave;
     EditorRecovery recovery;
 
@@ -403,6 +443,24 @@ void editor_mesh_edit_toolbar(Editor *ed);
 // Extrudes the selected faces by a quarter of their mean size.
 void editor_mesh_edit_extrude_selection(Editor *ed);
 void editor_mesh_edit_select_all(Editor *ed);
+
+// material_edit.c (docs/editor.md "Materials")
+void editor_material_init(Editor *ed);
+// Closes the material (a change being made settles) and frees the panel's
+// arrays (detach, destroy).
+void editor_material_free(Editor *ed);
+// At the sync point: a source the renderer could not take yet, and a cook
+// the project had no room for, are tried again.
+void editor_material_update(Editor *ed);
+// A request of the project finished (after its assets were reloaded).
+void editor_material_finished(Editor *ed, const EditorImportResult *res);
+// True when the panel's window has the keyboard focus: undo and redo are its.
+bool editor_material_focused(const Editor *ed);
+// Lists the project's images into ed->material.images, by key.
+void editor_material_list_images(Editor *ed);
+
+// panel_material.c
+void editor_panel_material(Editor *ed);
 
 // gizmo_ui.c
 // Shows the gizmo on the primary selection and drags it. True when it has

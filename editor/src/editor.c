@@ -229,6 +229,17 @@ static void shortcuts(Editor *ed)
             NPH_IGNORE_RESULT(editor_mesh_edit_begin(ed)); // logged
         }
     }
+    if (editor_material_focused(ed) && io->KeyCtrl) {
+        // The material panel's own history while it has the focus (ADR-0105).
+        if (igIsKeyPressed_Bool(ImGuiKey_Z, true)) {
+            (void)(io->KeyShift ? editor_material_redo(ed) : editor_material_undo(ed));
+            return;
+        }
+        if (igIsKeyPressed_Bool(ImGuiKey_Y, true)) {
+            (void)editor_material_redo(ed);
+            return;
+        }
+    }
     if (editor_mesh_editing(ed)) {
         // The mesh's own keys, its own history.
         if (io->KeyCtrl) {
@@ -344,6 +355,7 @@ static void dockspace(Editor *ed)
         igDockBuilderDockWindow(EDITOR_WINDOW_VIEWPORT, center);
         igDockBuilderDockWindow(EDITOR_WINDOW_OUTLINER, left);
         igDockBuilderDockWindow(EDITOR_WINDOW_INSPECTOR, right);
+        igDockBuilderDockWindow(EDITOR_WINDOW_MATERIAL, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_STATS, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_CONSOLE, bottom);
         igDockBuilderDockWindow(EDITOR_WINDOW_ASSETS, bottom);
@@ -440,6 +452,7 @@ static void main_menu(Editor *ed)
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_INSPECTOR, NULL, &ed->show.inspector, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_CONSOLE, NULL, &ed->show.console, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_ASSETS, NULL, &ed->show.assets, true);
+        (void)igMenuItem_BoolPtr(EDITOR_WINDOW_MATERIAL, NULL, &ed->show.material, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_PROFILER, NULL, &ed->show.profiler, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_STATS, NULL, &ed->show.stats, true);
         igSeparator();
@@ -649,6 +662,7 @@ static void hook_sync(NphEngine *e, void *user)
     editor_selection_prune(&ed->selection, nph_engine_world(ed->engine));
     editor_assets_update(ed);
     editor_mesh_edit_update(ed);
+    editor_material_update(ed);
     const u64 now = nph_time_now_ns();
     editor_autosave_update(ed, now);
     ui_platform_new_frame(&ed->platform, nph_time_ns_to_s(now - ed->last_frame_ns));
@@ -680,6 +694,11 @@ static void hook_sync(NphEngine *e, void *user)
     }
     if (ed->show.inspector) {
         editor_panel_inspector(ed);
+    }
+    if (ed->show.material) {
+        editor_panel_material(ed);
+    } else {
+        ed->material.focused = false;
     }
     if (ed->show.console) {
         editor_panel_console(ed);
@@ -805,6 +824,7 @@ NphResult editor_create(const EditorDesc *desc, Editor **out)
     ed->log_sink = desc->log;
     nph_mutex_init(&ed->resolve_lock);
     editor_mesh_edit_init(ed);
+    editor_material_init(ed);
     (void)snprintf(ed->shader_dir, sizeof ed->shader_dir, "%s",
                    desc->shader_dir != NULL ? desc->shader_dir : NPH_SHADER_DIR);
     editor_camera_default(&ed->camera);
@@ -1016,6 +1036,8 @@ void editor_detach(Editor *ed)
     }
     editor_mesh_edit_free(ed); // unsaved changes are dropped
     editor_mesh_edit_init(ed);
+    editor_material_free(ed); // a change being made is written: the project is still there
+    editor_material_init(ed);
     editor_assets_close(ed); // after the import in progress, if any
     editor_viewport_free(ed);
     editor_console_free(ed);

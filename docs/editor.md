@@ -104,9 +104,10 @@ editor starts beside it (ADR-0106).
 ## The panels
 
 The default layout puts the outliner on the left, the viewport in the
-centre, the inspector and the statistics on the right, and the console,
-the assets, and the profiler as tabs below. View > Reset Layout restores
-it, and the View menu shows or hides each panel.
+centre, the inspector, the material panel, and the statistics on the
+right, and the console, the assets, and the profiler as tabs below. View >
+Reset Layout restores it, and the View menu shows or hides each panel. The
+material panel shows itself when a material opens.
 
 ### Viewport
 
@@ -126,7 +127,8 @@ While editing, the camera is the editor's:
 **Picking** casts a ray from the eye through the mouse. A mesh is hit by
 its triangles, tested in the entity's own space after its bounds; a light
 or a camera, which has no mesh, by a small sphere around its origin. The
-nearest hit wins.
+nearest hit wins, and names the material slot of the surface it hit (the
+slot of the triangle's submesh).
 
 **Overlays** are the renderer's debug lines: the ground grid (a metre a
 cell, under the pivot), a sphere and an arrow for each light and camera,
@@ -142,7 +144,9 @@ world's own camera. A click on the scene gives the game the input, and
 Escape takes it back.
 
 A scene dragged from the asset browser, or files dropped from outside,
-land where the mouse is (see "Assets").
+land where the mouse is (see "Assets"). A material dragged from the browser
+goes on the surface under the mouse: that slot of the entity's mesh (see
+"Material").
 
 ### Gizmos
 
@@ -167,6 +171,8 @@ The world's entities as a tree by their hierarchy:
   entity;
 - dragging an entity onto another makes it a child, and keeps it where it
   is in the world; dropped on the empty space below, it becomes a root;
+- a material dragged from the asset browser onto an entity goes on every
+  slot of its mesh;
 - F2, or Rename in the context menu, renames in place. The context menu
   also creates children, duplicates, and deletes;
 - a filter shows the entities whose name contains it, as a flat list.
@@ -180,6 +186,12 @@ hints (`scene/component.h`): numbers are dragged within their RANGE,
 ANGLE fields are shown in degrees, COLOR vectors use a colour editor,
 rotations are edited as Euler angles, text, string ids, and GUIDs are
 typed, and an entity reference takes an entity dropped from the outliner.
+A material slot of MeshRenderer or MeshMaterials shows its material's
+source (or "(default)"), takes a material dropped from the asset browser,
+gives the default back on a right-click, and opens a `.nmat` in the
+material panel with Edit. A change to MeshMaterials touches the
+MeshRenderer in the same step, since its slots are read when the
+MeshRenderer's are.
 READONLY fields are greyed and HIDDEN ones not shown. Add Component lists
 the registered components the entity lacks; each component's header
 removes it.
@@ -195,13 +207,57 @@ the path as buttons leading back up. Each file shows its kind (scene,
 editable mesh, image, sound, material, or neither) and whether the cooker
 has cooked it.
 - Double-clicking a folder opens it, a scene places it in front of the
-  camera (cooking it first if it has not been), and an image, a sound, or a
-  material cooks it.
-- A scene dragged into the viewport is placed where the mouse is.
-- The context menu places, cooks, or cooks again even when current; Cook
-  Folder cooks every scene under the folder shown.
+  camera (cooking it first if it has not been), a material opens it in the
+  material panel, and an image or a sound cooks it.
+- A scene dragged into the viewport is placed where the mouse is. A
+  material drags onto an entity (in the viewport, the outliner, or a slot
+  in the inspector), and an image onto a material's texture slot.
+- The context menu places, edits a material, cooks, or cooks again even
+  when current; Cook Folder cooks every scene under the folder shown, and
+  New Material makes one there (see "Material").
 - While the import thread works, the panel shows what it is doing and how
   many requests wait.
+
+### Material
+
+One material's source (`.nmat`, ADR-0105), edited in place: opened from the
+asset browser (double-click, or Edit), from a slot in the inspector (Edit),
+or made with New Material (here, or in the browser): a `.nmat` with the
+defaults, light grey, not metallic, roughness 0.5, named "New Material"
+(then "New Material 2" and on) in the folder the browser shows, written,
+cooked, and opened.
+- **Its fields:** the base colour and its alpha, metallic, roughness, the
+  emissive colour and its strength, the normal scale, the occlusion
+  strength; the alpha mode (opaque, mask with its cutoff, or blend),
+  double-sided, unlit; the tiling, rotation (degrees) and offset of its
+  texture coordinates; and the five texture slots. Colours are shown and
+  edited in sRGB, and kept linear, as the source keeps them.
+- **A texture slot** takes an image of the project, from its list (every
+  image under the sources, listed as it opens) or dropped from the browser,
+  with its wrap on each axis and nearest filtering. An image's data kind is
+  the slot's (ADR-0105): a normal map is cooked as one.
+- **Drawn as it changes.** While a value is dragged, every entity drawing
+  the material shows it from the next frame
+  (`nph_scene_renderer_material_set`), with nothing written: the image
+  follows the drag. A change of image shows once it is cooked.
+- **Written as it settles.** When the drag ends (or at once for a click,
+  a choice, or a dropped image), the source is written and cooked, and the
+  cook reloads the material in place, wherever it is drawn: no entity
+  loses its instance. A material has no unsaved state.
+- **Its own history.** Every settled change is a step of the panel's
+  history while the material is open: Undo and Redo in the panel, or
+  Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y while it has the focus. It is not the
+  scene's history: a material is not scene state, so changing one leaves
+  the scene clean, and the scene's undo does not touch it. Opening another
+  material, or closing the panel, ends it.
+- **Errors** (a source not written, a cook that failed, such as one naming
+  a missing image) show under the material's name; the console says why.
+
+**Materials on entities** are steps of the scene's history ("Set
+Material"): dropped on the viewport, on the slot of the surface under the
+mouse; on an entity in the outliner, on every slot of its mesh; on a slot
+in the inspector, on that slot. Slots past the eighth are MeshMaterials'. A
+material dropped before it was ever cooked is cooked then.
 
 ### Console
 
@@ -618,7 +674,9 @@ step runs on the job system. It reads nothing the simulation writes.
 - The camera's invariants, including a 64-bit pivot 10,000 km from the
   origin.
 - The view and the gizmo's math (projection and rays, axis and plane
-  hits, angles, snapping), and picking against a mesh's triangles.
+  hits, angles, snapping), and picking against a mesh's triangles, which
+  names the slot of the submesh it hit (`test_picking.c`, on a mesh made
+  in the test, moved and without submeshes too).
 - The history on a plain world: every kind of change both ways, deleted
   and undone entities back under their own handles, subtrees with their
   references, merged drags and the clean state, steps falling off and
@@ -662,6 +720,18 @@ step runs on the job system. It reads nothing the simulation writes.
   - Colliders are outlined (the selection's over the scene, all with
     View > Colliders), and a box with a RigidBody falls in play onto a
     floor with a Collider, the edited scene untouched after Stop.
+  - A material cooked again changes in place: the cube keeps its instance
+    on every frame and turns to the new colour.
+  - A new material is written with the defaults, numbered when its name is
+    taken, cooked, and opened; nothing but a material opens.
+  - A material in the panel is drawn as it is dragged, with nothing
+    written; written and cooked when it settles, the cube keeping its
+    instance; undone and redone by the panel's history, which the scene's
+    history never sees; a source that does not validate changes nothing.
+  - A material dropped on the viewport takes the slot of the surface under
+    the mouse, as one step of the scene's history; the outliner's drop takes
+    every slot, a slot past the eighth goes in MeshMaterials, and what is
+    refused is.
   - **Phase 9's exit criterion** (CLAUDE.md §12): a scene is built from
     an imported scene, a move, a light, and a camera; saved; opened by a
     second editor on the same project (as after a restart), where its

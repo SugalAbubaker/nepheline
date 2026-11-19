@@ -22,10 +22,12 @@ add_library(nph_editor_core STATIC
     src/history.c
     src/history.h
     src/imgui_c.h
+    src/material_edit.c
     src/mesh_edit.c
     src/panel_assets.c
     src/panel_console.c
     src/panel_inspector.c
+    src/panel_material.c
     src/panel_outliner.c
     src/panel_profiler.c
     src/panel_stats.c
@@ -73,6 +75,7 @@ nph_add_test(editor
         tests/test_editor_log.c
         tests/test_gizmo.c
         tests/test_history.c
+        tests/test_picking.c
         tests/test_project.c
         tests/test_selection.c
         tests/test_ui_platform.c

@@ -5,7 +5,8 @@
 // viewport's eye.
 //   - An entity with a visible MeshRenderer is hit by its mesh's triangles,
 //     tested in the entity's own space after a test against the mesh's
-//     bounds.
+//     bounds. The hit names the material slot of the triangle's submesh, so
+//     a material dropped there sets that slot (ADR-0105).
 //   - An entity without a mesh but with a Light or a Camera is hit by a
 //     small sphere around its origin, so lights and cameras can be clicked.
 // The nearest hit wins. Meshes come through a lookup, so the scene renderer
@@ -25,6 +26,7 @@ typedef bool (*EditorMeshLookup)(void *user, NphEntity e, NphMeshView *out);
 typedef struct EditorPick {
     NphEntity entity;
     f64 distance; // from the eye, along the ray
+    u32 slot;     // the material slot of the surface hit: its submesh's (0 for a marker)
 } EditorPick;
 
 // The radius of the sphere a light or a camera is picked by, in metres.

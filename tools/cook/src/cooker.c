@@ -224,11 +224,16 @@ static void output_prefix(const char *key, char *out, u64 cap)
     }
 }
 
-static NphGuid asset_guid(const char *key, const char *sub)
+NphGuid cooker_asset_guid(const char *key, const char *sub)
 {
     char text[COOKER_PATH_MAX + 300U];
     snprintf(text, sizeof text, "%s#%s", key, sub);
     return nph_guid_from_cstr(text);
+}
+
+static NphGuid asset_guid(const char *key, const char *sub)
+{
+    return cooker_asset_guid(key, sub);
 }
 
 // The output path of an asset: "<prefix>/<file>.nph", with a GUID suffix

@@ -185,6 +185,28 @@ bool editor_viewport_point(Editor *ed, f32 x, f32 y, NphDVec3 *out)
     return true;
 }
 
+NphResult editor_viewport_drop_material(Editor *ed, const char *key, f32 x, f32 y)
+{
+    NPH_ASSERT(ed != NULL && key != NULL);
+    const f32 *r = ed->viewport.rect;
+    if (ed->engine == NULL || !ed->viewport.shown || x < r[0] || y < r[1] || x >= r[0] + r[2] ||
+        y >= r[1] + r[3]) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    EditorView view;
+    const NphRenderCamera cam = editor_camera_render(&ed->camera);
+    editor_view_init(&view, &cam, r[0], r[1], r[2], r[3]);
+    NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
+    EditorPick hit;
+    if (!editor_pick(nph_engine_edit_world(ed->engine), nph_engine_components(ed->engine),
+                     sr != NULL ? lookup_mesh : NULL, sr, view.eye, editor_view_ray(&view, x, y),
+                     &hit)) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    // The surface under the mouse: the slot of the submesh it is (ADR-0105).
+    return editor_material_assign(ed, hit.entity, hit.slot, key);
+}
+
 #define COLOR_SELECTED NPH_RENDER_RGBA(255, 160, 40, 255)
 #define COLOR_MARKER   NPH_RENDER_RGBA(230, 220, 120, 255)
 #define COLOR_GRID     NPH_RENDER_RGBA(90, 90, 96, 255)
@@ -399,7 +421,8 @@ void editor_panel_viewport(Editor *ed)
         ed->viewport.rect[2] = avail.x;
         ed->viewport.rect[3] = avail.y;
         ed->viewport.shown = true;
-        // A scene dragged from the asset browser lands under the mouse.
+        // A scene dragged from the asset browser lands under the mouse; a
+        // material goes on the surface under it.
         if (!nph_engine_is_playing(ed->engine) && igBeginDragDropTarget()) {
             const ImGuiPayload *payload =
                 igAcceptDragDropPayload(EDITOR_DRAG_ASSET, ImGuiDragDropFlags_None);
@@ -408,6 +431,14 @@ void editor_panel_viewport(Editor *ed)
                 ((const char *)payload->Data)[payload->DataSize - 1] == '\0' &&
                 editor_viewport_point(ed, io->MousePos.x, io->MousePos.y, &at)) {
                 editor_assets_place(ed, (const char *)payload->Data, at);
+            }
+            const ImGuiPayload *material =
+                igAcceptDragDropPayload(EDITOR_DRAG_MATERIAL, ImGuiDragDropFlags_None);
+            if (material != NULL && material->DataSize > 0 &&
+                ((const char *)material->Data)[material->DataSize - 1] == '\0' &&
+                editor_viewport_drop_material(ed, (const char *)material->Data, io->MousePos.x,
+                                              io->MousePos.y) == NPH_RESULT_NOT_FOUND) {
+                NPH_LOG_INFO(&LOG_EDITOR, "drop a material on a mesh to give it to that surface");
             }
             igEndDragDropTarget();
         }

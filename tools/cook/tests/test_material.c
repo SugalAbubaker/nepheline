@@ -486,6 +486,9 @@ NTEST_F(MaterialCook, cooks_the_material_and_its_images_by_slot)
     NTEST_ASSERT_NOT_NULL(e);
     NTEST_EXPECT_TRUE(
         nph_guid_equals(e->guid, nph_guid_from_cstr("materials/brick.nmat#material")));
+    // Known before the cook, from the key: what the editor names a material by (ADR-0105).
+    NTEST_EXPECT_TRUE(
+        nph_guid_equals(e->guid, cooker_asset_guid("materials/brick.nmat", "material")));
     NTEST_EXPECT_EQ_STR(e->output, "materials/brick_nmat/material.nph");
     NTEST_EXPECT_EQ_UINT(a.asset.header.type_version, NPH_MATERIAL_TYPE_VERSION);
     NphMaterialView v;

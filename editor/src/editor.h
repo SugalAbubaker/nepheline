@@ -43,6 +43,7 @@
 #include "editor_log.h"
 #include "project.h"
 
+#include <cook/material.h>
 #include <cook/polymesh.h>
 
 typedef struct Editor Editor;
@@ -209,3 +210,63 @@ NPH_MUST_USE NphResult editor_mesh_edit_extrude(Editor *ed, f32 distance);
 // Undoes or redoes the last change while editing; false when there is none.
 bool editor_mesh_edit_undo(Editor *ed);
 bool editor_mesh_edit_redo(Editor *ed);
+
+// ---------------------------------------------------------------------------
+// Materials (docs/editor.md "Materials"; ADR-0105)
+// ---------------------------------------------------------------------------
+
+// The slot editor_material_assign gives every slot of the entity's mesh.
+#define EDITOR_MATERIAL_EVERY_SLOT 0xFFFFFFFFU
+
+// Opens the material whose source is `key` (a project's `.nmat`) in the
+// material panel, its history empty, and brings the panel forward. The one
+// open closes first: a change being made to it settles. NPH_RESULT_INVALID_STATE
+// without a project; NPH_RESULT_INVALID_ARGUMENT for a key that is not a
+// material's; the file's and the reader's errors (the panel stays as it was).
+NPH_MUST_USE NphResult editor_material_open(Editor *ed, const char *key);
+
+// Makes a material with the defaults (cook/material.h) in the sources' folder
+// `folder` ("" their top), named "New Material", with the first number from 2
+// that is free when that is taken; writes it, cooks it, and opens it. Its key
+// in `out_key` (NULL: not wanted). NPH_RESULT_INVALID_STATE without a project;
+// NPH_RESULT_OVERFLOW when the key does not fit; NPH_RESULT_BUSY when a hundred
+// names are taken; the file's errors.
+NPH_MUST_USE NphResult editor_material_new(Editor *ed, const char *folder, char *out_key, u64 cap);
+
+// The source of the material in the panel, NULL when none is open; its key.
+const CookMaterialSource *editor_material_source(const Editor *ed);
+const char *editor_material_key(const Editor *ed);
+
+// Changes the open material to `now`. It is drawn so from the next frame,
+// with nothing written. When `settled` (a drag settles when it ends; a click
+// settles at once), the change since the source was last settled is written
+// and cooked, and is a step of the panel's history: the scene's history and
+// its unsaved state do not change. NPH_RESULT_INVALID_STATE when no material
+// is open; NPH_RESULT_INVALID_ARGUMENT for a source that does not validate
+// (nothing changes); the file's errors and the project's.
+NPH_MUST_USE NphResult editor_material_change(Editor *ed, const CookMaterialSource *now,
+                                              bool settled);
+
+// Undoes or redoes the panel's last settled change (a change being made
+// settles first), written and cooked as one; false when there is none.
+bool editor_material_undo(Editor *ed);
+bool editor_material_redo(Editor *ed);
+
+// Closes the panel's material: a change being made settles. Safe when none
+// is open.
+void editor_material_close(Editor *ed);
+
+// Gives slot `slot` of entity `e` (EDITOR_MATERIAL_EVERY_SLOT: each slot its
+// mesh has) the material whose source is `key`, as one step of the scene's
+// history; cooks the material when it is not. NPH_RESULT_INVALID_STATE while
+// playing or without a project; NPH_RESULT_NOT_FOUND for an entity that is
+// not alive or has no MeshRenderer; NPH_RESULT_INVALID_ARGUMENT for a key
+// that is not a material's or a slot past NPH_MESH_RENDERER_MATERIALS +
+// NPH_MESH_MATERIALS_EXTRA; the history's errors.
+NPH_MUST_USE NphResult editor_material_assign(Editor *ed, NphEntity e, u32 slot, const char *key);
+
+// What dropping the material whose source is `key` on the viewport at (x, y)
+// does (display units, over its image as last shown): the slot of the surface
+// there gets it (editor_material_assign). NPH_RESULT_NOT_FOUND when no entity
+// is there, or (x, y) is not over the image; assign's errors.
+NPH_MUST_USE NphResult editor_viewport_drop_material(Editor *ed, const char *key, f32 x, f32 y);

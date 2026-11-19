@@ -8,7 +8,10 @@
 //   - COLOR vectors use a colour editor;
 //   - rotations are edited as Euler angles;
 //   - TEXT, string ids, and GUIDs are typed;
-//   - entity references take an entity dropped from the outliner.
+//   - entity references take an entity dropped from the outliner;
+//   - a material slot (MeshRenderer's, MeshMaterials') names its material's
+//     source, takes a material dropped from the asset browser, and opens a
+//     `.nmat` in the material panel (ADR-0105).
 // READONLY fields are shown greyed and HIDDEN ones not at all.
 //
 // While editing, a change goes through the history: a drag, or typing into
@@ -22,6 +25,7 @@
 
 #include "editor_internal.h"
 
+#include <cook/cooker.h>
 #include <float.h>
 #include <stdio.h>
 #include <string.h>
@@ -225,6 +229,76 @@ static void guid_field(u8 *value, const NphFieldDesc *f, FieldEdit *edit)
     }
 }
 
+// True for a field that holds a material slot: MeshRenderer's material<i>,
+// MeshMaterials' (runtime/components.h).
+static bool is_material_slot(const NphFieldDesc *f)
+{
+    return (NphFieldKind)f->kind == NPH_FIELD_GUID && strncmp(f->name, "material", 8U) == 0;
+}
+
+// A material slot: its material's source, or the default material; a
+// material dropped from the asset browser takes it, right-click gives it
+// the default, and Edit opens a `.nmat` in the material panel (ADR-0105).
+static void material_field(Editor *ed, u8 *value, const NphFieldDesc *f, FieldEdit *edit)
+{
+    NphGuid g;
+    memcpy(&g, value + f->offset, sizeof g);
+    char key[EDITOR_PROJECT_PATH_MAX];
+    char sub[32];
+    const bool known = !nph_guid_is_null(g) && ed->project != NULL &&
+                       editor_project_source_of(ed->project, g, key, sizeof key, sub, sizeof sub);
+    char label[EDITOR_PROJECT_PATH_MAX + 40U];
+    if (nph_guid_is_null(g)) {
+        (void)snprintf(label, sizeof label, "(default)");
+    } else if (known && strcmp(sub, "material") == 0) {
+        (void)snprintf(label, sizeof label, "%s", key);
+    } else if (known) {
+        (void)snprintf(label, sizeof label, "%s %s", key, sub); // a glTF's: "city.gltf material/3"
+    } else {
+        char hex[NPH_GUID_STRING_LEN + 1U];
+        nph_guid_to_string(g, hex);
+        (void)snprintf(label, sizeof label, "%s", hex);
+    }
+    const bool editable = known && cooker_source_kind(key) == COOKER_SOURCE_MATERIAL;
+    (void)igButton(label, ui_vec2(editable ? -48.0F : -FLT_MIN, 0.0F));
+    const u64 widget = (u64)igGetItemID();
+    if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+        igSetTooltip("drop a material from the Assets panel here; right-click for the default");
+    }
+    bool changed = false;
+    if (igBeginDragDropTarget()) {
+        const ImGuiPayload *p =
+            igAcceptDragDropPayload(EDITOR_DRAG_MATERIAL, ImGuiDragDropFlags_None);
+        if (p != NULL && p->DataSize > 0 && ((const char *)p->Data)[p->DataSize - 1] == '\0') {
+            const char *dropped = (const char *)p->Data;
+            const NphGuid material = cooker_asset_guid(dropped, "material");
+            memcpy(value + f->offset, &material, sizeof material);
+            changed = true;
+            if (ed->project != NULL && !editor_project_is_cooked(ed->project, dropped)) {
+                u32 id = 0U;
+                NPH_IGNORE_RESULT(editor_project_cook(ed->project, dropped, false, 0U, &id));
+            }
+        }
+        igEndDragDropTarget();
+    }
+    if (igIsItemClicked(ImGuiMouseButton_Right) && !nph_guid_is_null(g)) {
+        const NphGuid none = NPH_GUID_NULL;
+        memcpy(value + f->offset, &none, sizeof none);
+        changed = true;
+    }
+    if (editable) {
+        igSameLine(0.0F, -1.0F);
+        if (igSmallButton("Edit")) {
+            NPH_IGNORE_RESULT(editor_material_open(ed, key)); // logged
+        }
+    }
+    if (changed) {
+        edit->changed = true;
+        edit->key = widget;
+        edit->finished = true;
+    }
+}
+
 // One field of `value` (a copy of the component); widgets under the field's id.
 static void field(Editor *ed, NphWorld *w, const NphFieldDesc *f, u8 *value, FieldEdit *edit)
 {
@@ -337,7 +411,11 @@ static void field(Editor *ed, NphWorld *w, const NphFieldDesc *f, u8 *value, Fie
         text_field(value, f, edit);
         break;
     case NPH_FIELD_GUID:
-        guid_field(value, f, edit);
+        if (is_material_slot(f)) {
+            material_field(ed, value, f, edit);
+        } else {
+            guid_field(value, f, edit);
+        }
         break;
     default:
         igTextDisabled("(%s)", nph_field_kind_name(kind));
@@ -351,8 +429,28 @@ static void apply(Editor *ed, NphWorld *w, NphEntity e, NphComponentId id, const
                   const FieldEdit *edit, const char *component)
 {
     NphResult r = NPH_RESULT_OK;
+    const NphRuntimeComponents *rc = nph_engine_components(ed->engine);
+    const NphMeshRenderer *mr = NPH_WORLD_GET(w, e, rc->mesh_renderer, NphMeshRenderer);
     if (nph_engine_is_playing(ed->engine)) {
         r = nph_world_set(w, e, id, value);
+    } else if (id == rc->mesh_materials && mr != NULL) {
+        // The extra slots are read when the MeshRenderer changes
+        // (runtime/components.h): both, as one step.
+        const NphMeshRenderer same = *mr;
+        char label[EDITOR_HISTORY_LABEL_MAX];
+        (void)snprintf(label, sizeof label, "Edit %s", component);
+        r = editor_history_begin(ed->history, label);
+        if (r == NPH_RESULT_OK) {
+            r = editor_history_set(ed->history, e, id, value);
+            if (r == NPH_RESULT_OK) {
+                r = editor_history_set(ed->history, e, rc->mesh_renderer, &same);
+            }
+            if (r == NPH_RESULT_OK) {
+                editor_history_end(ed->history);
+            } else {
+                editor_history_abort(ed->history);
+            }
+        }
     } else {
         char label[EDITOR_HISTORY_LABEL_MAX];
         (void)snprintf(label, sizeof label, "Edit %s", component);

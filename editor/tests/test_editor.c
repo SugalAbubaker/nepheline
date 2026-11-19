@@ -21,6 +21,7 @@
 #include "editor_internal.h"
 #include "test_cook_support.h"
 
+#include <cook/cooker.h>
 #include <cook/material.h>
 #include <stdio.h>
 #include <string.h>
@@ -1938,5 +1939,183 @@ NTEST(Editor, a_material_cooked_again_changes_in_place)
     }
     NTEST_EXPECT_TRUE(green[1] > green[0] + 30.0F);
     NTEST_EXPECT_TRUE(green[1] > green[2] + 30.0F);
+    finish(&fx);
+}
+
+// ---------------------------------------------------------------------------
+// The material panel, and materials given to entities (ADR-0105 decisions 5, 6)
+// ---------------------------------------------------------------------------
+
+// The material source of the project's `key`, read from its file.
+static CookMaterialSource source_on_disk(EditorFixture *f, const char *key)
+{
+    char path[1300];
+    (void)snprintf(path, sizeof path, "%s/assets/%s", f->project, key);
+    CookMaterialSource s;
+    memset(&s, 0, sizeof s);
+    NTEST_EXPECT_EQ_INT(cook_material_source_load(nph_allocator_system(), path, &s), NPH_RESULT_OK);
+    return s;
+}
+
+// The viewport's centre: red, green, or blue by far (`channel`).
+static bool centre_is(EditorFixture *f, u32 channel)
+{
+    f32 c[3];
+    centre_colour(f, c);
+    return c[channel] > c[(channel + 1U) % 3U] + 30.0F &&
+           c[channel] > c[(channel + 2U) % 3U] + 30.0F;
+}
+
+NTEST(Editor, a_new_material_is_written_with_the_defaults_cooked_and_opened)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    char key[256];
+    NTEST_ASSERT_EQ_INT(editor_material_new(ed, "materials", key, sizeof key), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(key, "materials/New Material.nmat");
+    NTEST_ASSERT_NOT_NULL(editor_material_key(ed));
+    NTEST_EXPECT_EQ_STR(editor_material_key(ed), key);
+    CookMaterialSource fresh;
+    cook_material_source_default(&fresh);
+    NTEST_EXPECT_TRUE(cook_material_source_equal(editor_material_source(ed), &fresh));
+    const CookMaterialSource written = source_on_disk(&fx, key);
+    NTEST_EXPECT_TRUE(cook_material_source_equal(&written, &fresh));
+    // The name is taken now: the next one is numbered, and opens in its place.
+    char second[256];
+    NTEST_ASSERT_EQ_INT(editor_material_new(ed, "materials", second, sizeof second), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(second, "materials/New Material 2.nmat");
+    NTEST_EXPECT_EQ_STR(editor_material_key(ed), second);
+    // Both cooked, so either can be given to entities at once.
+    settle(&fx);
+    NTEST_EXPECT_TRUE(editor_project_is_cooked(editor_project(ed), key));
+    NTEST_EXPECT_TRUE(editor_project_is_cooked(editor_project(ed), second));
+    // Only a material opens.
+    NTEST_EXPECT_EQ_INT(editor_material_open(ed, "materials/paint.png"),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_STR(editor_material_key(ed), second);
+    editor_material_close(ed);
+    NTEST_EXPECT_NULL(editor_material_source(ed));
+    finish(&fx);
+}
+
+NTEST(Editor, a_material_is_drawn_as_it_changes_written_as_it_settles_and_undone_in_the_panel)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    paint(&fx, 1.0F, 0.0F, 0.0F);
+    const NphEntity cube = made_cube(&fx);
+    NTEST_ASSERT_EQ_INT(editor_material_assign(ed, cube, 0U, "materials/paint.nmat"),
+                        NPH_RESULT_OK);
+    settle(&fx);
+    NTEST_EXPECT_TRUE(centre_is(&fx, 0U));
+    const u64 scene = editor_history_state(ed->history);
+    NphSceneRenderer *sr = nph_engine_scene_renderer(fx.engine);
+    const NphRenderInstance kept = nph_scene_renderer_instance(sr, cube);
+    NTEST_ASSERT_NE_UINT(kept.value, 0U);
+
+    NTEST_ASSERT_EQ_INT(editor_material_open(ed, "materials/paint.nmat"), NPH_RESULT_OK);
+    CookMaterialSource s = *editor_material_source(ed);
+    s.base_color = nph_vec4(0.0F, 1.0F, 0.0F, 1.0F);
+    // Being dragged: drawn from the next frame, written nowhere. Its pixels take no history on
+    // the frames it changes, so it shows at once.
+    NTEST_ASSERT_EQ_INT(editor_material_change(ed, &s, false), NPH_RESULT_OK);
+    frames(&fx, 3U);
+    NTEST_EXPECT_TRUE(centre_is(&fx, 1U));
+    CookMaterialSource disk = source_on_disk(&fx, "materials/paint.nmat");
+    NTEST_EXPECT_NEAR_F32(disk.base_color.x, 1.0F, 1e-6F);
+    // Let go: written and cooked; the cube keeps its instance, and stays green.
+    NTEST_ASSERT_EQ_INT(editor_material_change(ed, &s, true), NPH_RESULT_OK);
+    disk = source_on_disk(&fx, "materials/paint.nmat");
+    NTEST_EXPECT_NEAR_F32(disk.base_color.x, 0.0F, 1e-6F);
+    NTEST_EXPECT_NEAR_F32(disk.base_color.y, 1.0F, 1e-6F);
+    settle(&fx);
+    NTEST_EXPECT_TRUE(centre_is(&fx, 1U));
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_instance(sr, cube).value, kept.value);
+    // The panel's history, not the scene's: the scene did not change.
+    NTEST_EXPECT_EQ_UINT(editor_history_state(ed->history), scene);
+    NTEST_ASSERT_TRUE(editor_material_undo(ed));
+    disk = source_on_disk(&fx, "materials/paint.nmat");
+    NTEST_EXPECT_NEAR_F32(disk.base_color.x, 1.0F, 1e-6F);
+    settle(&fx);
+    NTEST_EXPECT_TRUE(centre_is(&fx, 0U));
+    NTEST_ASSERT_TRUE(editor_material_redo(ed));
+    disk = source_on_disk(&fx, "materials/paint.nmat");
+    NTEST_EXPECT_NEAR_F32(disk.base_color.y, 1.0F, 1e-6F);
+    NTEST_EXPECT_FALSE(editor_material_redo(ed));
+    settle(&fx);
+    NTEST_EXPECT_TRUE(centre_is(&fx, 1U));
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_instance(sr, cube).value, kept.value);
+    NTEST_EXPECT_EQ_UINT(editor_history_state(ed->history), scene);
+    // A source that does not validate changes nothing.
+    s.roughness = 2.0F;
+    NTEST_EXPECT_EQ_INT(editor_material_change(ed, &s, true), NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_NEAR_F32(editor_material_source(ed)->roughness, 1.0F, 1e-6F);
+    finish(&fx);
+}
+
+NTEST(Editor, a_material_dropped_on_a_surface_takes_its_slot_as_one_step_of_the_scene)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    paint(&fx, 0.0F, 0.0F, 1.0F);
+    const NphEntity cube = made_cube(&fx);
+    const NphRuntimeComponents *rc = nph_engine_components(fx.engine);
+    const NphWorld *w = nph_engine_edit_world(fx.engine);
+    const NphGuid blue = cooker_asset_guid("materials/paint.nmat", "material");
+    const NphMeshRenderer *mr = NPH_WORLD_GET(w, cube, rc->mesh_renderer, NphMeshRenderer);
+    NTEST_ASSERT_NOT_NULL(mr);
+    const NphGuid before = mr->material0;
+    NTEST_EXPECT_FALSE(nph_guid_equals(before, blue));
+    // Dropped on the cube, which fills the viewport's middle: its one slot.
+    f32 x = 0.0F;
+    f32 y = 0.0F;
+    viewport_center(&fx, &x, &y);
+    NTEST_ASSERT_EQ_INT(editor_viewport_drop_material(ed, "materials/paint.nmat", x, y),
+                        NPH_RESULT_OK);
+    mr = NPH_WORLD_GET(w, cube, rc->mesh_renderer, NphMeshRenderer);
+    NTEST_EXPECT_TRUE(nph_guid_equals(mr->material0, blue));
+    NTEST_ASSERT_NOT_NULL(editor_history_undo_label(ed->history));
+    NTEST_EXPECT_EQ_STR(editor_history_undo_label(ed->history), "Set Material");
+    settle(&fx);
+    NTEST_EXPECT_TRUE(centre_is(&fx, 2U));
+    // One step of the scene's history.
+    NTEST_ASSERT_EQ_INT(editor_history_undo(ed->history), NPH_RESULT_OK);
+    mr = NPH_WORLD_GET(w, cube, rc->mesh_renderer, NphMeshRenderer);
+    NTEST_EXPECT_TRUE(nph_guid_equals(mr->material0, before));
+    NTEST_ASSERT_EQ_INT(editor_history_redo(ed->history), NPH_RESULT_OK);
+    mr = NPH_WORLD_GET(w, cube, rc->mesh_renderer, NphMeshRenderer);
+    NTEST_EXPECT_TRUE(nph_guid_equals(mr->material0, blue));
+    // Nowhere over the image, nothing.
+    NTEST_EXPECT_EQ_INT(editor_viewport_drop_material(ed, "materials/paint.nmat", -10.0F, -10.0F),
+                        NPH_RESULT_NOT_FOUND);
+    // The outliner's drop: every slot the mesh has (the cube's one).
+    NTEST_ASSERT_EQ_INT(editor_history_undo(ed->history), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(
+        editor_material_assign(ed, cube, EDITOR_MATERIAL_EVERY_SLOT, "materials/paint.nmat"),
+        NPH_RESULT_OK);
+    mr = NPH_WORLD_GET(w, cube, rc->mesh_renderer, NphMeshRenderer);
+    NTEST_EXPECT_TRUE(nph_guid_equals(mr->material0, blue));
+    NTEST_EXPECT_TRUE(nph_guid_is_null(mr->material1));
+    // A slot past the eighth goes in MeshMaterials.
+    NTEST_ASSERT_EQ_INT(editor_material_assign(ed, cube, 9U, "materials/paint.nmat"),
+                        NPH_RESULT_OK);
+    const NphMeshMaterials *mm = NPH_WORLD_GET(w, cube, rc->mesh_materials, NphMeshMaterials);
+    NTEST_ASSERT_NOT_NULL(mm);
+    NTEST_EXPECT_TRUE(nph_guid_equals(nph_mesh_materials_get(mm, 1U), blue));
+    // What is refused.
+    NTEST_EXPECT_EQ_INT(editor_material_assign(ed, cube, 0U, "materials/paint.png"),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(
+        editor_material_assign(ed, cube, NPH_MESH_RENDERER_MATERIALS + NPH_MESH_MATERIALS_EXTRA,
+                               "materials/paint.nmat"),
+        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(editor_material_assign(ed, NPH_ENTITY_NULL, 0U, "materials/paint.nmat"),
+                        NPH_RESULT_NOT_FOUND);
     finish(&fx);
 }

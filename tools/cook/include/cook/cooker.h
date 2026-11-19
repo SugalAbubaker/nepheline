@@ -97,6 +97,11 @@ typedef enum CookerSourceKind {
 
 CookerSourceKind cooker_source_kind(const char *path);
 
+// The GUID of the asset the cooker makes of source `key` (relative to the sources) as its
+// sub-asset `sub` ("material", "mesh", "scene", "material/<i>"...): derived from the two alone,
+// so it is known before the source is first cooked, and stays while the key does.
+NphGuid cooker_asset_guid(const char *key, const char *sub);
+
 // Cooks one source by its kind: a scene, an image as a texture with the
 // default usage (HDR for .hdr) or its settings file's, an editable mesh, a
 // sound, or a material. A directory is walked (cooker_cook_directory).

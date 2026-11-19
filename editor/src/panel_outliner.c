@@ -115,6 +115,19 @@ static void drag_and_drop(Editor *ed, NphEntity e, const char *label, bool edita
                 report(r, "reparent");
             }
         }
+        // A material from the asset browser: every slot of the entity's mesh,
+        // since no surface of it is under the mouse here (ADR-0105).
+        const ImGuiPayload *m =
+            igAcceptDragDropPayload(EDITOR_DRAG_MATERIAL, ImGuiDragDropFlags_None);
+        if (m != NULL && m->DataSize > 0 && ((const char *)m->Data)[m->DataSize - 1] == '\0') {
+            const NphResult r =
+                editor_material_assign(ed, e, EDITOR_MATERIAL_EVERY_SLOT, (const char *)m->Data);
+            if (r == NPH_RESULT_NOT_FOUND) {
+                NPH_LOG_INFO(&LOG_EDITOR, "%s draws no mesh to give a material to", label);
+            } else {
+                report(r, "give a material");
+            }
+        }
         igEndDragDropTarget();
     }
 }
