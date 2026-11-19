@@ -12,12 +12,19 @@
 // input's own bytes, the material's factor, cutoff and wrap modes), so its
 // triangles for the rays alone are made of hostile texture coordinates too
 // (cook/ray_trim.h; ADR-0096). Embedded images are probed (header only).
+// First, the scene's collision is planned as settings asking every mesh for
+// a hull or its triangles would have it (the input's first byte picks), its
+// proxies taken out, and the first few nodes' shapes are written: the asset
+// must pass the runtime's view and every block the physics module's
+// validator (cook/collision.h; ADR-0107).
 #include <nepheline/asset/format.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/core/log.h>
 
+#include "fuzz_collision_check.h"
 #include "fuzz_mesh_check.h"
 
+#include <cook/collision.h>
 #include <cook/gltf.h>
 #include <cook/image.h>
 #include <cook/ray_trim.h>
@@ -36,6 +43,68 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 #define FUZZ_MAX_VERTICES    65536U
 #define FUZZ_VOXEL_TRIANGLES 4096U
 #define FUZZ_VOXEL_SLOTS     16U
+// Collision: the assets of at most this many nodes, of at most this many shapes each (within
+// FUZZ_COLLISION_BLOBS), and the vertex budget above.
+#define FUZZ_COLLISION_NODES  8U
+#define FUZZ_COLLISION_SHAPES 16U
+
+// The positions of `m`, which `out` (of its vertex count) receives.
+static void fuzz_positions(const CookMesh *m, NphVec3 *out)
+{
+    for (u32 v = 0; v < m->vertices.len; ++v) {
+        out[v] = m->vertices.data[v].position;
+    }
+}
+
+static void fuzz_collision(NphAllocator *alloc, const CookGltfScene *scene,
+                           const CookCollisionPlan *plan, u32 *budget)
+{
+    for (u32 k = 0; k < plan->node_count && k < FUZZ_COLLISION_NODES; ++k) {
+        const CookNodeCollision *e = &plan->nodes[k];
+        CookCollisionShapes shapes;
+        cook_collision_shapes_init(&shapes, alloc);
+        bool flat = false;
+        if (e->kind == COOK_COLLISION_NONE) {
+            for (u32 p = 0; p < e->proxy_count && p < FUZZ_COLLISION_SHAPES; ++p) {
+                const CookCollisionProxy *proxy = &plan->proxies[e->first_proxy + p];
+                if (proxy->point_count > *budget) {
+                    break;
+                }
+                *budget -= proxy->point_count;
+                NPH_IGNORE_RESULT(cook_collision_add_hull(
+                    &shapes, proxy->points, proxy->point_count, proxy->indices, proxy->index_count,
+                    plan->hull_vertices, &flat));
+            }
+        } else if (scene->meshes[e->mesh].mesh.vertices.len <= *budget) {
+            const CookMesh *m = &scene->meshes[e->mesh].mesh;
+            *budget -= m->vertices.len;
+            NphVec3 *points = NPH_ALLOC_ARRAY(alloc, NphVec3, m->vertices.len);
+            if (points != NULL) {
+                fuzz_positions(m, points);
+                if (e->kind == COOK_COLLISION_HULL) {
+                    NPH_IGNORE_RESULT(cook_collision_add_hull(&shapes, points, m->vertices.len,
+                                                              m->indices.data, m->indices.len,
+                                                              plan->hull_vertices, &flat));
+                } else {
+                    NPH_IGNORE_RESULT(cook_collision_add_mesh(&shapes, points, m->vertices.len,
+                                                              m->indices.data, m->indices.len,
+                                                              e->two_sided != 0));
+                }
+                NPH_FREE_ARRAY(alloc, NphVec3, points, m->vertices.len);
+            }
+        }
+        if (shapes.blocks.len != 0U) {
+            NphAssetWriter w;
+            nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_COLLISION, NPH_COLLISION_TYPE_VERSION,
+                                  nph_guid_from_cstr("fuzz"), 0U);
+            if (cook_collision_write(&shapes, NPH_LZ_LEVEL_FAST, &w) == NPH_RESULT_OK) {
+                fuzz_check_written_collision(alloc, &w);
+            }
+            nph_asset_writer_free(&w);
+        }
+        cook_collision_shapes_free(&shapes);
+    }
+}
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -65,6 +134,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         texels[i] = data[i % size];
     }
     u32 budget = FUZZ_MAX_VERTICES;
+    CookSceneImport import;
+    cook_scene_import_default(&import);
+    import.has_collision = 1;
+    import.collision = (data[0] & 1U) != 0U ? COOK_COLLISION_HULL : COOK_COLLISION_MESH;
+    CookCollisionPlan plan;
+    if (cook_collision_plan(&scene, &import, alloc, &plan) != NPH_RESULT_OK) {
+        cook_gltf_free(&scene); // out of memory: the scene is fit only to free
+        return 0;
+    }
+    fuzz_collision(alloc, &scene, &plan, &budget);
+    cook_collision_plan_free(&plan);
     for (u32 m = 0; m < scene.mesh_count; ++m) {
         const CookGltfMesh *gm = &scene.meshes[m];
         CookMesh *mesh = &scene.meshes[m].mesh;

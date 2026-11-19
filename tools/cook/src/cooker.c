@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The cooker (cooker.h): source keys, output paths, the incremental
 // decisions, the glTF and image drivers, and packing.
+#include <nepheline/asset/collision.h>
 #include <nepheline/asset/scene.h>
 #include <nepheline/asset/sound.h>
 #include <nepheline/core/assert.h>
@@ -11,6 +12,7 @@
 #include <nepheline/platform/time.h>
 
 #include <cook/bc.h>
+#include <cook/collision.h>
 #include <cook/cooker.h>
 #include <cook/gltf.h>
 #include <cook/image.h>
@@ -360,6 +362,7 @@ static u32 type_version(u32 type)
         {NPH_ASSET_TYPE_MATERIAL, NPH_MATERIAL_TYPE_VERSION},
         {NPH_ASSET_TYPE_SCENE, NPH_SCENE_TYPE_VERSION},
         {NPH_ASSET_TYPE_SOUND, NPH_SOUND_TYPE_VERSION},
+        {NPH_ASSET_TYPE_COLLISION, NPH_COLLISION_TYPE_VERSION},
     };
     for (u32 i = 0; i < NPH_ARRAY_COUNT(versions); ++i) {
         if (versions[i][0] == type) {
@@ -397,6 +400,9 @@ static u64 settings_hash(const Cooker *c, u32 type)
         // The cooker's defaults; a source's own settings are in its content
         // hash (cooker_cook_sound).
         h = nph_hash_combine(h, nph_hash64(&c->sound, sizeof c->sound, 3U));
+    } else if (type == NPH_ASSET_TYPE_COLLISION) {
+        // The physics module's builders' output, which the cooker's own version does not see.
+        h = nph_hash_combine(h, COOK_COLLISION_VERSION);
     } else if (type == NPH_ASSET_TYPE_SCENE && c->hlod.enabled) {
         // Its cells: their settings, and the meshes' their proxies sample.
         const CookHlodSettings hlod = cook_hlod_resolved(&c->hlod);
@@ -1343,10 +1349,158 @@ typedef struct SceneCells {
     f32 proxy_distance;
 } SceneCells;
 
+typedef NPH_ARRAY(NphSceneCollision) SceneCollisionArray;
+
+// Cooks the plan's collision assets (cook/collision.h; ADR-0107): one a mesh and kind, which every
+// node drawing the mesh that way shares (`collision/mesh/<i>/<kind>`), and one a node with proxies
+// (`collision/node/<i>`). `out` gets the scene's records, by ascending node, of the nodes whose
+// collision could be made: a shape that cannot (no triangle with an area, a coordinate beyond the
+// physics module's range) is left out with a warning.
+static NphResult cook_scene_collision(Cooker *c, const char *key, CookGltfScene *scene,
+                                      const CookCollisionPlan *plan, GuidArray *produced,
+                                      GuidArray *deps, SceneCollisionArray *out)
+{
+    const u64 shash =
+        nph_hash_combine(settings_hash(c, NPH_ASSET_TYPE_COLLISION), plan->hull_vertices);
+    NphAllocator *alloc = c->alloc;
+    GuidArray failed; // the meshes' assets that made no shape, tried once
+    NPH_ARRAY_INIT(&failed, alloc);
+    NphResult r = NPH_RESULT_OK;
+    for (u32 k = 0; k < plan->node_count && r == NPH_RESULT_OK; ++k) {
+        const CookNodeCollision *e = &plan->nodes[k];
+        char sub[64];
+        char file[COOK_GLTF_NAME_MAX + 48U];
+        if (e->kind == COOK_COLLISION_NONE) {
+            snprintf(sub, sizeof sub, "collision/node/%u", e->node);
+            snprintf(file, sizeof file, "collision_node_%u_%s", e->node,
+                     scene->nodes[e->node].name);
+        } else {
+            const char *kind = cook_collision_kind_name(e->kind);
+            snprintf(sub, sizeof sub, "collision/mesh/%u/%s", e->mesh, kind);
+            snprintf(file, sizeof file, "collision_%u_%s_%s", e->mesh,
+                     scene->meshes[e->mesh].mesh.name, kind);
+        }
+        NphSceneCollision rec;
+        memset(&rec, 0, sizeof rec);
+        rec.node = e->node;
+        rec.collision = asset_guid(key, sub);
+        if (guid_in(&failed, rec.collision)) {
+            continue;
+        }
+        if (guid_in(produced, rec.collision)) {
+            r = NPH_ARRAY_PUSH(out, rec); // a mesh's, made for a node before
+            continue;
+        }
+        if (is_current(c, key, sub, scene->content_hash, shash)) {
+            c->stats.skipped += 1U;
+            r = NPH_ARRAY_PUSH(produced, rec.collision);
+            if (r == NPH_RESULT_OK) {
+                r = NPH_ARRAY_PUSH(deps, rec.collision);
+            }
+            if (r == NPH_RESULT_OK) {
+                r = NPH_ARRAY_PUSH(out, rec);
+            }
+            continue;
+        }
+        CookCollisionShapes shapes;
+        cook_collision_shapes_init(&shapes, alloc);
+        NphVec3 *points = NULL;
+        u32 point_count = 0U;
+        if (e->kind == COOK_COLLISION_NONE) {
+            for (u32 p = 0; p < e->proxy_count && r == NPH_RESULT_OK; ++p) {
+                const CookCollisionProxy *proxy = &plan->proxies[e->first_proxy + p];
+                bool flat = false;
+                r = cook_collision_add_hull(&shapes, proxy->points, proxy->point_count,
+                                            proxy->indices, proxy->index_count, plan->hull_vertices,
+                                            &flat);
+                if (r == NPH_RESULT_INVALID_ARGUMENT) {
+                    NPH_LOG_WARN(&NPH_LOG_COOK,
+                                 "collision proxy %s: no shape (no triangle with an area, or a "
+                                 "coordinate beyond the physics range); left out",
+                                 proxy->name);
+                    scene->warnings += 1U;
+                    r = NPH_RESULT_OK;
+                } else if (r == NPH_RESULT_OK && flat) {
+                    NPH_LOG_WARN(&NPH_LOG_COOK,
+                                 "collision proxy %s is flat: its triangles collide, not a hull",
+                                 proxy->name);
+                    scene->warnings += 1U;
+                }
+            }
+        } else {
+            // The mesh's positions, in its frame, before its pipeline reorders them.
+            const CookMesh *m = &scene->meshes[e->mesh].mesh;
+            point_count = m->vertices.len;
+            points = NPH_ALLOC_ARRAY(alloc, NphVec3, point_count);
+            if (points == NULL) {
+                r = NPH_RESULT_OUT_OF_MEMORY;
+            }
+            for (u32 v = 0; v < point_count && points != NULL; ++v) {
+                points[v] = m->vertices.data[v].position;
+            }
+            bool flat = false;
+            if (r == NPH_RESULT_OK && e->kind == COOK_COLLISION_HULL) {
+                r = cook_collision_add_hull(&shapes, points, point_count, m->indices.data,
+                                            m->indices.len, plan->hull_vertices, &flat);
+            } else if (r == NPH_RESULT_OK) {
+                r = cook_collision_add_mesh(&shapes, points, point_count, m->indices.data,
+                                            m->indices.len, e->two_sided != 0);
+            }
+            if (r == NPH_RESULT_INVALID_ARGUMENT) {
+                NPH_LOG_WARN(&NPH_LOG_COOK,
+                             "mesh %s: no collision (no triangle with an area, or a coordinate "
+                             "beyond the physics range)",
+                             m->name);
+                scene->warnings += 1U;
+                r = NPH_RESULT_OK;
+            } else if (r == NPH_RESULT_OK && flat) {
+                NPH_LOG_WARN(&NPH_LOG_COOK,
+                             "mesh %s is flat: asked to collide as a hull, its triangles do",
+                             m->name);
+                scene->warnings += 1U;
+            }
+        }
+        if (points != NULL) {
+            NPH_FREE_ARRAY(alloc, NphVec3, points, point_count);
+        }
+        if (r == NPH_RESULT_OK && shapes.blocks.len == 0U) {
+            r = NPH_ARRAY_PUSH(&failed, rec.collision);
+            cook_collision_shapes_free(&shapes);
+            continue;
+        }
+        NphAssetWriter w;
+        nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_COLLISION, NPH_COLLISION_TYPE_VERSION,
+                              rec.collision, scene->content_hash);
+        if (r == NPH_RESULT_OK) {
+            r = cook_collision_write(&shapes, c->mesh.lz, &w);
+        }
+        if (r == NPH_RESULT_OK) {
+            char relative[COOKER_PATH_MAX];
+            output_path(c, key, sub, file, rec.collision, relative, sizeof relative);
+            r = emit(c, &w, key, sub, relative, NPH_ASSET_TYPE_COLLISION, scene->content_hash,
+                     shash, NULL, 0U);
+        }
+        nph_asset_writer_free(&w);
+        cook_collision_shapes_free(&shapes);
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(produced, rec.collision);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(deps, rec.collision);
+        }
+        if (r == NPH_RESULT_OK) {
+            r = NPH_ARRAY_PUSH(out, rec);
+        }
+    }
+    NPH_ARRAY_FREE(&failed);
+    return r;
+}
+
 static NphResult cook_scene_asset(Cooker *c, const char *key, const CookGltfScene *scene,
                                   const NphGuid *mesh_guids, const NphGuid *material_guids,
                                   NphGuid default_material, const GuidArray *deps,
-                                  NphGuid scene_guid, const SceneCells *cells)
+                                  NphGuid scene_guid, const SceneCells *cells,
+                                  const SceneCollisionArray *collisions)
 {
     const u64 shash = settings_hash(c, NPH_ASSET_TYPE_SCENE);
     if (is_current(c, key, "scene", scene->content_hash, shash)) {
@@ -1454,9 +1608,14 @@ static NphResult cook_scene_asset(Cooker *c, const char *key, const CookGltfScen
     h.light_count = scene->light_count;
     h.string_bytes = (u32)strings.len;
     h.cell_count = cell_count;
+    h.collision_count = collisions->len;
     if (r == NPH_RESULT_OK) {
         r = nph_asset_writer_add_blob(&w, NPH_SCENE_TAG_HEADER, 0U, &h, sizeof h,
                                       NPH_ASSET_CODEC_NONE, 0U);
+    }
+    if (r == NPH_RESULT_OK && collisions->len != 0U) {
+        r = nph_asset_writer_add_blob(&w, NPH_SCENE_TAG_COLLISION, 0U, collisions->data,
+                                      NPH_ARRAY_BYTES(collisions), NPH_ASSET_CODEC_NONE, 0U);
     }
     if (r == NPH_RESULT_OK) {
         r = nph_asset_writer_add_blob(&w, NPH_SCENE_TAG_NODES, 0U, nodes, (u64)n * sizeof *nodes,
@@ -2442,6 +2601,20 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
     if (material_guids == NULL || mesh_guids == NULL) {
         r = NPH_RESULT_OUT_OF_MEMORY;
     }
+    // What collides and how (cook/collision.h; ADR-0107): the proxies taken out of the scene
+    // before anything reads its nodes, the collision cooked before the meshes' pipeline changes
+    // their vertices.
+    CookCollisionPlan collision;
+    memset(&collision, 0, sizeof collision);
+    SceneCollisionArray collisions;
+    NPH_ARRAY_INIT(&collisions, alloc);
+    if (r == NPH_RESULT_OK) {
+        r = cook_collision_plan(&scene, &settings, alloc, &collision);
+    }
+    if (r == NPH_RESULT_OK) {
+        r = cook_scene_collision(c, key, &scene, &collision, &produced, &scene_deps, &collisions);
+    }
+    cook_collision_plan_free(&collision);
     if (r == NPH_RESULT_OK) {
         r = cook_scene_textures(c, key, &scene, &produced);
     }
@@ -2666,7 +2839,7 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
     }
     if (r == NPH_RESULT_OK) {
         r = cook_scene_asset(c, key, &scene, mesh_guids, material_guids, default_material,
-                             &scene_deps, scene_guid, hlod.active ? &cells : NULL);
+                             &scene_deps, scene_guid, hlod.active ? &cells : NULL, &collisions);
     }
     hlod_free(&hlod, alloc);
     if (r == NPH_RESULT_OK) {
@@ -2681,6 +2854,7 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
     if (material_guids != NULL) {
         NPH_FREE_ARRAY(alloc, NphGuid, material_guids, nph_max_u32(scene.material_count, 1U));
     }
+    NPH_ARRAY_FREE(&collisions);
     NPH_ARRAY_FREE(&scene_deps);
     NPH_ARRAY_FREE(&produced);
     if (scene.warnings != 0U) {

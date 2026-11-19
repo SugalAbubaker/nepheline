@@ -32,6 +32,7 @@ set(cook_sources
     src/bc_decode.c
     src/bc_encode.c
     src/cells.c
+    src/collision.c
     src/cook.c
     src/cooker.c
     src/database.c
@@ -75,8 +76,10 @@ endfunction()
 # The asset runtime for the formats, the renderer for its meshlet builder
 # (render/meshlet.h), which cooked and run-time meshes share, and the audio
 # module for the WAV reader and the sound encoders (audio/lossless.h,
-# audio/adpcm.h), which the runtime's decoders pair with.
-nph_add_cooklib(nph_cooklib nph::asset nph::render nph::audio)
+# audio/adpcm.h), which the runtime's decoders pair with, and the physics
+# module for the collision assets' hulls and triangle meshes (physics/hull.h,
+# physics/mesh.h), which the runtime's shapes use where they lie.
+nph_add_cooklib(nph_cooklib nph::asset nph::render nph::audio nph::physics)
 add_library(nph::cook ALIAS nph_cooklib)
 
 # The editor's cooker (docs/adr/0026-editor-import.md): the same sources
@@ -103,6 +106,7 @@ nph_add_test(cook
     SOURCES
         tests/test_bc.c
         tests/test_cells.c
+        tests/test_collision.c
         tests/test_cook_support.h
         tests/test_cooker.c
         tests/test_database.c

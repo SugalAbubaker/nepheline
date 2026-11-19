@@ -19,6 +19,11 @@
 //
 //     CELL  NphSceneCell[cell]          a cell's instances, bounds and proxy
 //
+// and, from version 3, what its nodes collide with where the cooker made it
+// (ADR-0107):
+//
+//     COLS  NphSceneCollision[collision]  a node and its collision asset
+//
 // Nodes are stored parent-before-child (a node's parent index is smaller
 // than its own), so a single forward pass computes world transforms. A
 // cell's instances follow one another in INST, the cells' in turn, the
@@ -34,9 +39,9 @@
 extern "C" {
 #endif
 
-// 2: the world partition's cells (CELL). Version 1, which has none, still
-// reads.
-#define NPH_SCENE_TYPE_VERSION 2U
+// 2: the world partition's cells (CELL). 3: the nodes' collision (COLS).
+// Versions 1 and 2, which have neither or no collision, still read.
+#define NPH_SCENE_TYPE_VERSION 3U
 
 #define NPH_SCENE_TAG_HEADER    NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_SCENE_TAG_NODES     NPH_FOURCC('N', 'O', 'D', 'E')
@@ -46,6 +51,7 @@ extern "C" {
 #define NPH_SCENE_TAG_LIGHTS    NPH_FOURCC('L', 'G', 'H', 'T')
 #define NPH_SCENE_TAG_STRINGS   NPH_FOURCC('S', 'T', 'R', 'S')
 #define NPH_SCENE_TAG_CELLS     NPH_FOURCC('C', 'E', 'L', 'L')
+#define NPH_SCENE_TAG_COLLISION NPH_FOURCC('C', 'O', 'L', 'S')
 
 #define NPH_SCENE_NO_NODE NPH_U32_MAX
 
@@ -57,8 +63,9 @@ typedef struct NphSceneHeader {
     u32 light_count;
     u32 string_bytes;
     u32 flags;
-    u32 cell_count; // version 2 (reserved, zero, before)
-    u32 reserved[8];
+    u32 cell_count;      // version 2 (reserved, zero, before)
+    u32 collision_count; // version 3 (reserved, zero, before)
+    u32 reserved[7];
 } NphSceneHeader;
 
 NPH_STATIC_ASSERT(sizeof(NphSceneHeader) == 64U, "the scene header is 64 bytes");
@@ -145,6 +152,18 @@ typedef struct NphSceneCell {
 
 NPH_STATIC_ASSERT(sizeof(NphSceneCell) == 96U, "a cell is 96 bytes");
 
+// What a node collides with (version 3; ADR-0107): a collision asset
+// (asset/collision.h) whose shapes are in the node's frame. The records
+// run by ascending node, a node once at most.
+typedef struct NphSceneCollision {
+    u32 node;
+    u32 reserved0; // zero
+    NphGuid collision;
+    u32 reserved[2]; // zero
+} NphSceneCollision;
+
+NPH_STATIC_ASSERT(sizeof(NphSceneCollision) == 32U, "a collision record is 32 bytes");
+
 typedef struct NphSceneView {
     const NphSceneHeader *header;
     const NphSceneNode *nodes;
@@ -153,15 +172,19 @@ typedef struct NphSceneView {
     const NphSceneCamera *cameras;
     const NphSceneLight *lights;
     const char *strings;
-    const NphSceneCell *cells; // NULL without them
-    u32 cell_count;            // 0 before version 2, whatever its header's word held
+    const NphSceneCell *cells;           // NULL without them
+    u32 cell_count;                      // 0 before version 2, whatever its header's word held
+    const NphSceneCollision *collisions; // NULL without them
+    u32 collision_count;                 // 0 before version 3, whatever its header's word held
 } NphSceneView;
 
 // Resolves and validates a READY scene asset: counts against blobs, node
 // links in range and parents before children, instance and name offsets
 // in range, names terminated; the cells' instance ranges in range and in
 // order, none overlapping, their bounds and origins finite, a proxy's cell
-// a positive power of two and its distance positive and finite.
+// a positive power of two and its distance positive and finite; the
+// collision records' nodes in range and ascending, their assets named, and
+// their reserved words zero.
 NPH_MUST_USE NphResult nph_scene_view(const NphAsset *asset, NphSceneView *out);
 
 // The name of node `index`.

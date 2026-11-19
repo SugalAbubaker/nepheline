@@ -3,6 +3,7 @@
 // views: the input, copied to aligned memory, is validated; when it passes,
 // every blob is checksummed and unpacked and every typed view is resolved,
 // so a table that validation accepted can never lead a view out of bounds.
+#include <nepheline/asset/collision.h>
 #include <nepheline/asset/format.h>
 #include <nepheline/asset/loader.h>
 #include <nepheline/asset/material.h>
@@ -99,6 +100,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             if (nph_scene_view(&asset, &scene) == NPH_RESULT_OK) {
                 for (u32 i = 0; i < scene.header->node_count; ++i) {
                     (void)nph_scene_node_name(&scene, i);
+                }
+                for (u32 i = 0; i < scene.collision_count; ++i) {
+                    volatile u32 node = scene.collisions[i].node;
+                    (void)node;
+                }
+            }
+            NphCollisionView collision;
+            if (nph_collision_view(&asset, &collision) == NPH_RESULT_OK) {
+                // Each block's first and last byte, which the view vouches for.
+                for (u32 i = 0; i < collision.header->shape_count; ++i) {
+                    const NphCollisionBlock b = nph_collision_shape_block(&asset, &collision, i);
+                    const u8 *bytes = (const u8 *)b.data;
+                    volatile u8 sink = (u8)(bytes[0] ^ bytes[b.size - 1U]);
+                    (void)sink;
                 }
             }
             NphSoundView sound;

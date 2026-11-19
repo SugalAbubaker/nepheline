@@ -62,11 +62,15 @@ What there is today:
      Blender exports an object's custom properties as its node's `extras`, as it does the `no_rays` hint;
    - **by name:** nodes named `UCX_<object>` or `UCX_<object>_<NN>` are convex proxies of `<object>` (Unreal's
      convention, which Blender's exporters and asset stores use; `UBX_`, `USP_` and `UCP_` are taken as hulls too). The
-     object collides as its proxies, one hull each, and the proxies are neither drawn nor in the scene. A name that ends
-     in `_<NN>` itself is matched whole first.
-   - A **mesh** shape is the drawn triangles (every submesh) as one physics mesh: static and kinematic bodies only. A
-     **hull** is Quickhull of the positions, to `hull_vertices`; a flat mesh asked for as a hull becomes a mesh, with a
-     warning.
+     object collides as its proxies, one hull each, over what its extras or the scene would say.
+     - A proxy's name is matched whole first, then without a Blender duplicate's `.NNN`, then without the `_<NN>` count.
+     - Proxies are not drawn. They leave the scene's node list, except that one with a child, a camera or a light stays
+       as a node that draws nothing. A mesh only proxies drew is not cooked.
+     - A proxy that matches no node stays as it was, drawn, with a warning, so nothing vanishes unseen.
+   - A **mesh** shape is the drawn triangles (every submesh) as one physics mesh: static and kinematic bodies only. It
+     is two-sided where a material of the mesh's is double-sided.
+   - A **hull** is Quickhull of the positions, to `hull_vertices`. A flat mesh asked for as a hull becomes a mesh,
+     two-sided, with a warning.
 
    The sub-assets are `collision/mesh/<i>/<kind>` (shared by every node drawing mesh `i` the same way) and
    `collision/node/<i>` (a node's proxies). The cooked scene (type version 3) names each node's collision in an
