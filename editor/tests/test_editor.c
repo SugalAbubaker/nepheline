@@ -2119,3 +2119,128 @@ NTEST(Editor, a_material_dropped_on_a_surface_takes_its_slot_as_one_step_of_the_
                         NPH_RESULT_NOT_FOUND);
     finish(&fx);
 }
+
+// Waits for the viewport's centre to be of `channel` (the resolve weighs a still pixel's new
+// frame at 1/32: a new material shows over some frames).
+static bool centre_turns(EditorFixture *f, u32 channel)
+{
+    for (u32 waited = 0U; waited < 192U; waited += 8U) {
+        if (centre_is(f, channel)) {
+            return true;
+        }
+        frames(f, 8U);
+    }
+    return centre_is(f, channel);
+}
+
+NTEST(Editor, a_material_dropped_on_a_face_names_a_slot_of_the_mesh)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    paint(&fx, 0.0F, 0.0F, 1.0F);
+    const NphEntity cube = made_cube(&fx);
+    const u32 scene_steps = editor_history_undo_count(ed->history);
+    // Not while not editing.
+    NTEST_EXPECT_EQ_INT(editor_mesh_edit_face_material(ed, 0U, "materials/paint.nmat", NULL),
+                        NPH_RESULT_INVALID_STATE);
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_begin(ed), NPH_RESULT_OK);
+    frames(&fx, 2U);
+    // Dropped on the face in the viewport's middle: that face alone goes to a slot no other
+    // face keeps, named for the material, as one change of the editing's history.
+    f32 x = 0.0F;
+    f32 y = 0.0F;
+    viewport_center(&fx, &x, &y);
+    const EditorView v = editor_view(&fx);
+    u32 face = 0U;
+    NTEST_ASSERT_TRUE(editor_mesh_edit_pick_face(ed, &v, x, y, &face));
+    const u32 changes = ed->mesh_edit.undo.len;
+    NTEST_ASSERT_EQ_INT(editor_viewport_drop_material(ed, "materials/paint.nmat", x, y),
+                        NPH_RESULT_OK);
+    const CookPolyMesh *m = editor_mesh_edit_mesh(ed);
+    NTEST_ASSERT_NOT_NULL(m);
+    NTEST_EXPECT_EQ_UINT(m->faces.data[face].material, 1U);
+    NTEST_EXPECT_EQ_STR(m->materials[1], "materials/paint.nmat");
+    for (u32 f = 0; f < m->faces.len; ++f) {
+        NTEST_EXPECT_TRUE(f == face || m->faces.data[f].material == 0U);
+    }
+    NTEST_EXPECT_EQ_UINT(ed->mesh_edit.undo.len, changes + 1U);
+    // Again: nothing to change, no step.
+    u32 slot = 99U;
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_face_material(ed, face, "materials/paint.nmat", &slot),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(slot, 1U);
+    NTEST_EXPECT_EQ_UINT(ed->mesh_edit.undo.len, changes + 1U);
+    // On a selected face, every selected face: all of them, to the slot that names it.
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_select(ed, EDITOR_MESH_FACES, NULL, 0U, false),
+                        NPH_RESULT_OK);
+    editor_mesh_edit_select_all(ed);
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_face_material(ed, face, "materials/paint.nmat", &slot),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(slot, 1U);
+    for (u32 f = 0; f < m->faces.len; ++f) {
+        NTEST_EXPECT_EQ_UINT(m->faces.data[f].material, 1U);
+    }
+    // The preview draws the slot's material: the cube turns blue.
+    NTEST_EXPECT_TRUE(centre_turns(&fx, 2U));
+    NTEST_EXPECT_TRUE(nph_guid_equals(ed->mesh_edit.preview_guids[1],
+                                      cooker_asset_guid("materials/paint.nmat", "material")));
+    // The editing's own history undoes and redoes it.
+    NTEST_ASSERT_TRUE(editor_mesh_edit_undo(ed));
+    m = editor_mesh_edit_mesh(ed);
+    NTEST_EXPECT_EQ_UINT(m->faces.data[face == 0U ? 1U : 0U].material, 0U);
+    NTEST_ASSERT_TRUE(editor_mesh_edit_redo(ed));
+    m = editor_mesh_edit_mesh(ed);
+    NTEST_EXPECT_EQ_UINT(m->faces.data[face == 0U ? 1U : 0U].material, 1U);
+    // What is refused: a face out of range, a key that is not a material's, nowhere under the
+    // mouse; and when other faces keep every slot.
+    NTEST_EXPECT_EQ_INT(editor_mesh_edit_face_material(ed, 99U, "materials/paint.nmat", NULL),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(editor_mesh_edit_face_material(ed, face, "materials/paint.png", NULL),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(
+        editor_viewport_drop_material(ed, "materials/paint.nmat", v.x + 1.0F, v.y + 1.0F),
+        NPH_RESULT_NOT_FOUND);
+    const u32 top = 4U;
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_select(ed, EDITOR_MESH_FACES, &top, 1U, false),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_extrude(ed, 0.25F), NPH_RESULT_OK); // ten faces
+    CookPolyMesh *full = &ed->mesh_edit.mesh;
+    for (u32 f = 0; f < full->faces.len; ++f) {
+        full->faces.data[f].material = f % COOK_POLYMESH_MATERIALS;
+    }
+    NTEST_ASSERT_EQ_INT(editor_mesh_edit_select(ed, EDITOR_MESH_FACES, NULL, 0U, false),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(editor_mesh_edit_face_material(ed, 0U, "materials/glass.nmat", NULL),
+                        NPH_RESULT_FULL);
+    NTEST_ASSERT_TRUE(editor_mesh_edit_undo(ed)); // back before the extrusion
+    frames(&fx, 1U);
+
+    // Done: saved with its slots' materials and cooked; the entity, naming none for the slot,
+    // draws the cooked mesh's.
+    editor_mesh_edit_end(ed);
+    char source[1200];
+    (void)snprintf(source, sizeof source, "%s/meshes/cube.nmesh",
+                   editor_project_assets_dir(editor_project(ed)));
+    CookPolyMesh saved;
+    NTEST_ASSERT_EQ_INT(cook_polymesh_load(nph_allocator_system(), source, &saved), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cook_polymesh_material_count(&saved), 2U);
+    NTEST_EXPECT_EQ_STR(saved.materials[1], "materials/paint.nmat");
+    cook_polymesh_free(&saved);
+    for (u32 i = 0; i < 40U && ed->mesh_edit.committing; ++i) {
+        frames(&fx, 1U);
+        editor_project_wait(editor_project(ed));
+        nph_scene_renderer_wait(nph_engine_scene_renderer(fx.engine));
+    }
+    NTEST_EXPECT_FALSE(ed->mesh_edit.committing);
+    settle(&fx);
+    NTEST_EXPECT_TRUE(centre_turns(&fx, 2U));
+    const NphRenderFrameStats rs = nph_engine_frame_stats(fx.engine)->render;
+    NTEST_EXPECT_EQ_UINT(rs.instances, 1U); // the cooked mesh's, the preview gone
+    NTEST_EXPECT_EQ_UINT(ed->mesh_edit.preview_refs[1], NPH_SCENE_MATERIAL_NONE); // let go
+    NTEST_EXPECT_TRUE(nph_world_is_alive(nph_engine_edit_world(fx.engine), cube));
+    // The scene's history did not see any of it.
+    NTEST_EXPECT_EQ_UINT(editor_history_undo_count(ed->history), scene_steps);
+    finish(&fx);
+}

@@ -257,7 +257,20 @@ cooked, and opened.
 Material"): dropped on the viewport, on the slot of the surface under the
 mouse; on an entity in the outliner, on every slot of its mesh; on a slot
 in the inspector, on that slot. Slots past the eighth are MeshMaterials'. A
-material dropped before it was ever cooked is cooked then.
+material dropped before it was ever cooked is cooked then. An entity's own
+material for a slot draws in place of the one its mesh names, if any; a slot
+it names none for draws the mesh's.
+
+**Materials on faces** (ADR-0105): while a mesh is edited, a material
+dropped on the viewport goes to the face under the mouse (and to every
+selected face, when it is one of them), as one change of the editing's
+history (`editor_mesh_edit_face_material`). The faces go to the slot that
+names the material, else to a slot no other face keeps, which is named for
+it; a slot the entity's MeshRenderer leaves to the mesh comes first, so the
+faces draw it on this entity too. The editable mesh keeps each slot's
+material in its source (`.nmesh` version 2, docs/cook.md), and the cooked
+mesh carries them: every entity drawing it draws them where its own
+MeshRenderer names none for the slot.
 
 ### Console
 
@@ -530,9 +543,14 @@ Tab, or Edit > Edit Mesh, edits the mesh the selected entity draws, when it
 is cooked from an editable mesh of the project (the database names its
 source). Editing works on the source:
 - **The preview.** The mesh is triangulated as the cooker will and drawn
-  as it changes, with the default material, by a render mesh and instance
-  of the editor's own. The scene renderer hides the entity's instance
-  meanwhile (`nph_scene_renderer_set_hidden`).
+  as it changes, by a render mesh and instance of the editor's own, a
+  submesh a slot in use. Each slot draws the entity's own material for it,
+  else the one the mesh names: the scene renderer's own entries for them
+  (`nph_scene_renderer_material_acquire`), so the preview follows the
+  material panel's changes and their cooks, and the instance is made again
+  when what it draws changes (a material loaded, cooked anew, or given to
+  the entity). The scene renderer hides the entity's instance meanwhile
+  (`nph_scene_renderer_set_hidden`).
 - **Selection.** Vertices (1) or faces (2) are selected by clicking, with
   Ctrl adding or removing one; Ctrl+A selects all. A vertex is picked by
   its position on screen, within 12 pixels. A face is picked by the ray,
@@ -547,8 +565,12 @@ source). Editing works on the source:
 - **Extrude.** Ctrl+E extrudes the selected faces as one region, by a
   quarter of their mean size (`cook_polymesh_extrude`). The moved faces
   stay selected, for the gizmo.
-- **History.** Every change (a drag, a move, an extrusion) is a step of the
-  editing's own history: a copy of the mesh before it, at most 64.
+- **Materials.** A material dropped on a face gives it, or the selected
+  faces it is one of, a slot of the mesh that names it (see "Materials on
+  faces" above).
+- **History.** Every change (a drag, a move, an extrusion, a material on
+  faces) is a step of the editing's own history: a copy of the mesh before
+  it, at most 64.
   Ctrl+Z and Ctrl+Y undo and redo them while editing. The scene's history
   does not see mesh changes.
 - **Ending.** Editing ends with Tab, Escape, Done, selecting another
@@ -732,6 +754,12 @@ step runs on the job system. It reads nothing the simulation writes.
     the mouse, as one step of the scene's history; the outliner's drop takes
     every slot, a slot past the eighth goes in MeshMaterials, and what is
     refused is.
+  - A material dropped on a face while its mesh is edited takes a free slot
+    of the mesh, named for it, as one change of the editing's history (none
+    when nothing changes), and on a selected face every selected face, to
+    the slot that names it; the preview draws it; the edit's history undoes
+    and redoes it; a full mesh and bad faces and keys are refused; ending
+    saves the slots' materials, and the entity draws the cooked mesh's.
   - **Phase 9's exit criterion** (CLAUDE.md §12): a scene is built from
     an imported scene, a move, a light, and a camera; saved; opened by a
     second editor on the same project (as after a restart), where its
@@ -748,8 +776,8 @@ device.
 
 - Mesh editing has vertices and faces, not edges, and moves, rotates,
   scales, and extrudes; deleting, merging, splitting, and the other
-  modeling tools are §8.13's "Phase 2". The preview draws with the default
-  material, whatever the entity's.
+  modeling tools are §8.13's "Phase 2". A face is given a material by a
+  drop; there is no list of the mesh's slots to pick from yet.
 - A reloaded mesh drops the instances drawing it until the new version is
   ready (a frame or two). Mesh editing covers its own entity with the
   preview; other entities sharing the mesh blink. Materials and textures

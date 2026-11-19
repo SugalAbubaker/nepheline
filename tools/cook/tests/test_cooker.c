@@ -827,6 +827,93 @@ NTEST_F(CookFixture, cooks_editable_meshes_and_tells_what_it_wrote)
     cook_polymesh_free(&m);
 }
 
+// The slots' materials of the mesh cooked from `key` (mesh.h SLMT) into `out` (null GUIDs past
+// them): how many.
+static u32 read_slot_materials(CookFixture *f, const Cooker *c, const char *key,
+                               NphGuid out[NPH_MESH_SLOT_MATERIALS_MAX])
+{
+    memset(out, 0, sizeof(NphGuid) * NPH_MESH_SLOT_MATERIALS_MAX);
+    const CookDbEntry *e = cook_db_find(cooker_db(c), nph_str_from_cstr(key), NPH_STR("mesh"));
+    NTEST_ASSERT_NOT_NULL(e);
+    char full[1500];
+    snprintf(full, sizeof full, "%s/%s", f->out_dir, e->output);
+    void *bytes = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(full, f->alloc, &bytes, &size), NPH_RESULT_OK);
+    NphAssetFileInfo info;
+    NTEST_ASSERT_EQ_INT(nph_asset_file_validate(bytes, size, &info), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(info.header.type_version, NPH_MESH_TYPE_VERSION);
+    const NphAssetBlobEntry *b = nph_asset_file_find(&info, NPH_MESH_TAG_SLOT_MATERIALS, 0U);
+    u32 count = 0U;
+    if (b != NULL) {
+        NTEST_ASSERT_EQ_UINT(b->raw_size % sizeof(NphGuid), 0U);
+        NTEST_ASSERT_LE_UINT(b->raw_size, NPH_MESH_SLOT_MATERIALS_MAX * sizeof(NphGuid));
+        NTEST_ASSERT_EQ_INT(nph_asset_file_unpack_blob(bytes, b, out), NPH_RESULT_OK);
+        count = (u32)(b->raw_size / sizeof(NphGuid));
+    }
+    nph_file_free_all(f->alloc, bytes, size);
+    return count;
+}
+
+NTEST_F(CookFixture, an_editable_mesh_names_its_slots_materials)
+{
+    // A cube whose slots 0 and 2 name materials (sources that need not be there yet: the mesh
+    // names them by the GUIDs they cook to), slot 1 none; one face in slot 2.
+    CookPolyMesh m;
+    cook_polymesh_init(&m, f->alloc);
+    NTEST_ASSERT_EQ_INT(cook_polymesh_cube(&m, 1.0F), NPH_RESULT_OK);
+    m.faces.data[4].material = 2U;
+    snprintf(m.materials[0], sizeof m.materials[0], "materials/brick.nmat");
+    snprintf(m.materials[2], sizeof m.materials[2], "materials/glass.nmat");
+    char path[1300];
+    test_path_in(&f->dir, "box.nmesh", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(cook_polymesh_save(&m, path), NPH_RESULT_OK);
+    CookerDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.alloc = f->alloc;
+    desc.out_dir = f->out_dir;
+    desc.source_root = f->dir.dir;
+    cook_texture_settings_default(&desc.texture);
+    cook_mesh_settings_default(&desc.mesh);
+    desc.mesh.lz = NPH_LZ_LEVEL_FAST;
+    Cooker *c = NULL;
+    NTEST_ASSERT_EQ_INT(cooker_create(&desc, &c), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    const NphGuid brick = cooker_asset_guid("materials/brick.nmat", "material");
+    const NphGuid glass = cooker_asset_guid("materials/glass.nmat", "material");
+    NphGuid slots[NPH_MESH_SLOT_MATERIALS_MAX];
+    NTEST_ASSERT_EQ_UINT(read_slot_materials(f, c, "box.nmesh", slots), 3U);
+    NTEST_EXPECT_TRUE(nph_guid_equals(slots[0], brick));
+    NTEST_EXPECT_TRUE(nph_guid_is_null(slots[1]));
+    NTEST_EXPECT_TRUE(nph_guid_equals(slots[2], glass));
+    // The mesh references them.
+    const CookDbEntry *e = cook_db_find(cooker_db(c), NPH_STR("box.nmesh"), NPH_STR("mesh"));
+    NTEST_ASSERT_NOT_NULL(e);
+    NTEST_ASSERT_EQ_UINT(e->dep_count, 2U);
+    NTEST_EXPECT_TRUE(nph_guid_equals(e->deps[0], brick) && nph_guid_equals(e->deps[1], glass));
+
+    // One material in two slots is one reference.
+    snprintf(m.materials[1], sizeof m.materials[1], "materials/glass.nmat");
+    NTEST_ASSERT_EQ_INT(cook_polymesh_save(&m, path), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(read_slot_materials(f, c, "box.nmesh", slots), 3U);
+    NTEST_EXPECT_TRUE(nph_guid_equals(slots[1], glass));
+    e = cook_db_find(cooker_db(c), NPH_STR("box.nmesh"), NPH_STR("mesh"));
+    NTEST_ASSERT_NOT_NULL(e);
+    NTEST_EXPECT_EQ_UINT(e->dep_count, 2U);
+
+    // Naming none: no table and no references.
+    memset(m.materials, 0, sizeof m.materials);
+    NTEST_ASSERT_EQ_INT(cook_polymesh_save(&m, path), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(read_slot_materials(f, c, "box.nmesh", slots), 0U);
+    e = cook_db_find(cooker_db(c), NPH_STR("box.nmesh"), NPH_STR("mesh"));
+    NTEST_ASSERT_NOT_NULL(e);
+    NTEST_EXPECT_EQ_UINT(e->dep_count, 0U);
+    cooker_destroy(c);
+    cook_polymesh_free(&m);
+}
+
 // A WAV file at `path`: `seconds` of a mono 16-bit tone at 8 kHz.
 static void write_tone_wav(const char *path, f64 seconds, f64 freq)
 {

@@ -175,6 +175,12 @@ typedef struct EditorMeshEdit {
     NphRenderMesh preview;
     NphRenderInstance preview_instance;
     bool preview_stale;
+    // The preview's materials (ADR-0105): for each slot, the material it draws (the entity's
+    // own, else the one the mesh names) held in the scene renderer (NPH_SCENE_MATERIAL_NONE for
+    // none), its GUID, and the render material its instance was made with.
+    u32 preview_refs[COOK_POLYMESH_MATERIALS];
+    NphGuid preview_guids[COOK_POLYMESH_MATERIALS];
+    NphRenderMaterial preview_drawn[COOK_POLYMESH_MATERIALS];
     // After editing: the cook that brings the cooked mesh up to date, and
     // the reload that brings it back in view.
     bool committing;
@@ -436,6 +442,8 @@ void editor_mesh_edit_finished(Editor *ed, const EditorImportResult *res);
 // The viewport while editing: the gizmo on the selection and picking
 // elements. True when the gizmo has the mouse.
 bool editor_mesh_edit_viewport(Editor *ed, const EditorView *v, bool hovered, ImDrawList *dl);
+// The face of the mesh being edited that the ray through (x, y) meets first, or false.
+bool editor_mesh_edit_pick_face(Editor *ed, const EditorView *v, f32 x, f32 y, u32 *out_face);
 // The mesh's edges, vertices or face centres, and the selection, as debug
 // lines.
 void editor_mesh_edit_overlays(Editor *ed, const EditorView *v);

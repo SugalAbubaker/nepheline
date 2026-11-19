@@ -196,6 +196,14 @@ NphResult editor_viewport_drop_material(Editor *ed, const char *key, f32 x, f32 
     EditorView view;
     const NphRenderCamera cam = editor_camera_render(&ed->camera);
     editor_view_init(&view, &cam, r[0], r[1], r[2], r[3]);
+    // While a mesh is edited, its face under the mouse: the mesh's slot (ADR-0105).
+    if (editor_mesh_editing(ed)) {
+        u32 face = 0U;
+        if (!editor_mesh_edit_pick_face(ed, &view, x, y, &face)) {
+            return NPH_RESULT_NOT_FOUND;
+        }
+        return editor_mesh_edit_face_material(ed, face, key, NULL);
+    }
     NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
     EditorPick hit;
     if (!editor_pick(nph_engine_edit_world(ed->engine), nph_engine_components(ed->engine),
@@ -438,7 +446,10 @@ void editor_panel_viewport(Editor *ed)
                 ((const char *)material->Data)[material->DataSize - 1] == '\0' &&
                 editor_viewport_drop_material(ed, (const char *)material->Data, io->MousePos.x,
                                               io->MousePos.y) == NPH_RESULT_NOT_FOUND) {
-                NPH_LOG_INFO(&LOG_EDITOR, "drop a material on a mesh to give it to that surface");
+                NPH_LOG_INFO(&LOG_EDITOR, "%s",
+                             editor_mesh_editing(ed)
+                                 ? "drop a material on a face of the mesh being edited"
+                                 : "drop a material on a mesh to give it to that surface");
             }
             igEndDragDropTarget();
         }

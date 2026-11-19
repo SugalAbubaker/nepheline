@@ -511,10 +511,13 @@ def nmesh_seeds():
     faces the triangulation must handle, and degenerate cases."""
     import json
 
-    def doc(positions, faces, smoothing=None):
-        d = {"nmesh": 1, "positions": positions, "faces": faces}
+    def doc(positions, faces, smoothing=None, materials=None):
+        # Version 1 unless the slots name materials (version 2), so both still read.
+        d = {"nmesh": 1 if materials is None else 2, "positions": positions, "faces": faces}
         if smoothing is not None:
             d["smoothing"] = smoothing
+        if materials is not None:
+            d["materials"] = materials
         return json.dumps(d, separators=(",", ":")).encode("utf-8")
 
     quad_uv = [[0, 1], [1, 1], [1, 0], [0, 0]]
@@ -528,6 +531,10 @@ def nmesh_seeds():
     seeds["cube_materials_flat"] = doc(
         cube_positions, [{"v": f, "uv": quad_uv, "m": i % 3} for i, f in enumerate(cube_faces)],
         0)
+    # Version 2: the slots' materials (ADR-0105), the second naming none.
+    seeds["cube_slot_materials"] = doc(
+        cube_positions, [{"v": f, "uv": quad_uv, "m": i % 3} for i, f in enumerate(cube_faces)],
+        60, ["materials/brick.nmat", "", "materials/glass.nmat"])
     # An L and a comb, in the XZ plane facing +Y: reflex corners.
     ell = [[0, 0], [0, 2], [2, 2], [2, 1], [1, 1], [1, 0]]
     comb = [[0, 0], [0, 3], [5, 3], [5, 0], [4, 0], [4, 2], [3, 2], [3, 0], [2, 0], [2, 2],

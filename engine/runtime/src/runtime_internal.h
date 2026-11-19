@@ -66,6 +66,11 @@ typedef struct RenderAsset {
     u32 refresh;
     NphAssetHandle next;
     u32 next_textures[RENDER_MATERIAL_TEXTURES];
+    // A ready mesh's slots' materials (asset/mesh.h SLMT; ADR-0105), slot 0 first: drawn where
+    // an entity names none, each entity drawing the mesh holding its own references to them
+    // (scene_render.c), so that they load, reload and go as an entity's own materials do.
+    NphGuid slot_materials[NPH_MESH_SLOT_MATERIALS_MAX];
+    u32 slot_material_count;
 } RenderAsset;
 
 typedef struct RenderAssetCache {

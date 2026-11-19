@@ -23,18 +23,24 @@
 // it diffs cleanly in git:
 //
 //     {
-//       "nmesh": 1,
+//       "nmesh": 2,
 //       "smoothing": 60,
+//       "materials": ["materials/brick.nmat", "", "materials/glass.nmat"],
 //       "positions": [[x, y, z], ...],
 //       "faces": [{"v": [0, 1, 2, 3], "uv": [[u, v], ...], "m": 0}, ...]
 //     }
 //
 // "uv" (one per corner) and "m" (the material slot, 0 to
-// COOK_POLYMESH_MATERIALS - 1) are optional. Reading checks every value:
-// the version, finite numbers within COOK_MESH_MAX_COORDINATE, indices in
-// range, corner counts, and the totals below. Malformed input gives
-// NPH_RESULT_PARSE_ERROR (NPH_RESULT_VERSION_MISMATCH for another
-// version), never a crash: the reader is a fuzz target (tests/fuzz).
+// COOK_POLYMESH_MATERIALS - 1) are optional. "materials" (version 2,
+// ADR-0105) names the material of each slot by its `.nmat`'s source key,
+// "" for none, up to the last slot that names one: the cooked mesh carries
+// them, and they draw where the entity's MeshRenderer names no material for
+// the slot. Version 1 files still read, with no materials. Reading checks
+// every value: the version, finite numbers within COOK_MESH_MAX_COORDINATE,
+// indices in range, corner counts, material keys, and the totals below.
+// Malformed input gives NPH_RESULT_PARSE_ERROR (NPH_RESULT_VERSION_MISMATCH
+// for another version), never a crash: the reader is a fuzz target
+// (tests/fuzz).
 //
 // Thread-safety: a mesh belongs to one thread.
 
@@ -48,7 +54,9 @@
 extern "C" {
 #endif
 
-#define COOK_POLYMESH_VERSION          1U
+#define COOK_POLYMESH_VERSION          2U
+#define COOK_POLYMESH_OLDEST_VERSION   1U   // still read
+#define COOK_POLYMESH_MATERIAL_KEY_MAX 512U // bytes of a slot's material key, its NUL included
 #define COOK_POLYMESH_MAX_POSITIONS    (1U << 20U)
 #define COOK_POLYMESH_MAX_FACES        (1U << 20U)
 #define COOK_POLYMESH_MAX_CORNERS      (1U << 22U)
@@ -73,6 +81,9 @@ typedef struct CookPolyMesh {
     NphArrayU32 corners; // per corner: its position
     CookVec2Array uvs;   // per corner
     f32 smoothing;       // degrees, 0..180
+    // The material each slot names: a `.nmat`'s source key (cook/material.h
+    // cook_material_key_valid), "" for none.
+    char materials[COOK_POLYMESH_MATERIALS][COOK_POLYMESH_MATERIAL_KEY_MAX];
 } CookPolyMesh;
 
 // Empty, with the default smoothing. No allocation until something is added.
@@ -96,6 +107,9 @@ NPH_MUST_USE NphResult cook_polymesh_add_face(CookPolyMesh *m, const u32 *positi
 
 // Checks what the reader checks. NPH_RESULT_CORRUPT on the first problem.
 NPH_MUST_USE NphResult cook_polymesh_validate(const CookPolyMesh *m);
+
+// The slots up to the last that names a material: 0 when none does.
+u32 cook_polymesh_material_count(const CookPolyMesh *m);
 
 // ---------------------------------------------------------------------------
 // The `.nmesh` file

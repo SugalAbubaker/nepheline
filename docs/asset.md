@@ -221,7 +221,7 @@ from a READY asset and checks every count against its blob and every
 index and range against the array it addresses, so a view that resolves
 can be handed to the renderer without further checks:
 
-- **Mesh** (`mesh.h`, type version 7; earlier versions without voxels still read): `HEAD`
+- **Mesh** (`mesh.h`, type version 8; earlier versions without voxels still read): `HEAD`
   (counts, bounds, sphere, position quantisation), `POSN` (16-bit unorm
   positions across the bounds, 8 bytes each, separate from the other
   attributes so the visibility-buffer pass of §8.6.4 reads positions
@@ -300,7 +300,14 @@ can be handed to the renderer without further checks:
   parent a triangle of its run's submesh, every corner within its parent
   (its two weights at most 65535 together); a head, a level apart and a mesh
   of voxels have none. Whether a run holds for the material a scene draws
-  the submesh with (the keys are the same) is the loader's to check.
+  the submesh with (the keys are the same) is the loader's to check. From
+  version 8, a mesh may name a material for each of its slots
+  ([ADR-0105](adr/0105-materials-made-in-the-editor.md); an editable mesh's
+  slots, docs/cook.md "Editable meshes"): `SLMT`, an `NphGuid` a slot, slot
+  0 first, up to `NPH_MESH_SLOT_MATERIALS_MAX` (8), a null GUID naming none.
+  An entity draws a slot's material where its MeshRenderer names none for
+  it (docs/runtime.md). The view checks that it holds 1 to 8 whole GUIDs and
+  is of version 8 or later.
 - **Texture** (`texture.h`): `HEAD` (extent, mips, layers, format, kind,
   flags) and one `MIP ` blob per level holding every layer, exactly the
   bytes the format and extent imply (whole 4x4 blocks for BC formats).

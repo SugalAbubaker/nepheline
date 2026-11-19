@@ -153,3 +153,11 @@ steps 5 to 7 are the editor's. They land as four pull requests, the source and i
   alone.
 - **Recovery is not needed for materials:** every settled change is written, so autosave (ADR-0104) does not keep
   them.
+- **A mesh's slot materials are its entities' references** (decision 6, as built). An entity drawing a mesh that names
+  materials acquires them, for the slots its `MeshRenderer` names none for, as soon as the mesh is ready, at once when
+  its `MeshRenderer` changes while the mesh is. They load, reload and go as its own materials do, and a material
+  cooked after the mesh that names it (one dropped on a face before its first cook) reaches the entity by the reload.
+  The editor's preview of a mesh being edited draws each slot's material through references of its own in the scene
+  renderer (`nph_scene_renderer_material_acquire`), so it follows the panel's changes and their cooks.
+- **Mesh type version 8 cooks every mesh again once**, the reference scenes' too: their next nightly run takes the
+  hour that a change of the cooker's output takes there.

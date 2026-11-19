@@ -382,6 +382,23 @@ static NphResult mesh_rays(const NphAsset *asset, const NphMeshHeader *h,
     return NPH_RESULT_OK;
 }
 
+// The slots' materials (version 8): 1 to NPH_MESH_SLOT_MATERIALS_MAX whole GUIDs, slot 0 first.
+static NphResult mesh_slot_materials(const NphAsset *asset, NphMeshView *out)
+{
+    const NphAssetBlob *b = nph_asset_blob(asset, NPH_MESH_TAG_SLOT_MATERIALS, 0U);
+    if (b == NULL) {
+        return NPH_RESULT_OK;
+    }
+    const u64 count = b->size / sizeof(NphGuid);
+    if (asset->header.type_version < 8U || b->size % sizeof(NphGuid) != 0U || count == 0U ||
+        count > NPH_MESH_SLOT_MATERIALS_MAX) {
+        return NPH_RESULT_CORRUPT;
+    }
+    out->slot_materials = (const NphGuid *)b->data;
+    out->slot_material_count = (u32)count;
+    return NPH_RESULT_OK;
+}
+
 NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
 {
     NPH_ASSERT(out != NULL);
@@ -477,6 +494,7 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
     NPH_TRY(mesh_lods(asset, h, submeshes, meshlets, out));
     NPH_TRY(mesh_levels(asset, h, out));
     NPH_TRY(mesh_rays(asset, h, submeshes, out));
+    NPH_TRY(mesh_slot_materials(asset, out));
     out->header = h;
     out->positions = positions;
     out->attribs = attribs;

@@ -415,7 +415,13 @@ static NphResult create_mesh(RenderAssetCache *c, RenderAsset *a, const NphAsset
     NphRenderSubmesh subs[NPH_RENDER_MAX_SUBMESHES];
     NphRenderMeshDesc d;
     NPH_TRY(render_assets_mesh_desc(&mv, subs, &d));
-    return nph_render_mesh_create(c->renderer, &d, &a->mesh);
+    NPH_TRY(nph_render_mesh_create(c->renderer, &d, &a->mesh));
+    // The materials its slots name, for the entities drawing it (the view checked the count).
+    if (mv.slot_material_count != 0U) {
+        memcpy(a->slot_materials, mv.slot_materials, sizeof(NphGuid) * mv.slot_material_count);
+    }
+    a->slot_material_count = mv.slot_material_count;
+    return NPH_RESULT_OK;
 }
 
 // A material's textures load first; it is created once they settle.

@@ -38,6 +38,11 @@ static void round_trip(NphAllocator *alloc, const CookPolyMesh *m)
          memcmp(again.corners.data, m->corners.data, sizeof(u32) * (u64)m->corners.len) != 0)) {
         abort(); // what was written does not read back as the same mesh
     }
+    for (u32 s = 0; s < COOK_POLYMESH_MATERIALS; ++s) {
+        if (strncmp(again.materials[s], m->materials[s], COOK_POLYMESH_MATERIAL_KEY_MAX) != 0) {
+            abort(); // nor its slots' materials
+        }
+    }
     cook_polymesh_free(&again);
     nph_sb_free(&text);
 }

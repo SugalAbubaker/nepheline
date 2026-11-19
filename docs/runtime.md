@@ -308,14 +308,20 @@ default material, and a MeshRenderer that names no mesh draws nothing and
 is no failure. A frame never waits for a load (§10.5). A MeshRenderer holds
 eight material slots; a mesh of more also carries a MeshMaterials, with 24 more
 (ADR-0072), read whenever the MeshRenderer is: after changing one alone, touch
-the MeshRenderer. A cooked mesh's triangles for the rays alone go to the
+the MeshRenderer. A mesh may name a material for each of its first eight slots
+(asset.md, mesh version 8: an editable mesh's slots; ADR-0105), drawn where
+the MeshRenderer names none for the slot. The entity holds those as its own
+references, taken as soon as the mesh is ready (at once, when an entity's
+MeshRenderer changes while its mesh is), so they load, wait, reload and go
+with the entity's own, and a material the mesh names that is cooked later
+reaches the entity by the reload below. A cooked mesh's triangles for the rays alone go to the
 renderer with it, and an alpha-tested material's key with it where the device
 took its base colour texture (ADR-0096): whatever materials an entity names,
 the renderer's rays take the trimmed cards on the frames those materials hold
 them, the texture's finest level resident, and the mesh's own triangles on the
 others (ADR-0098; render.md "Rays and trimmed cards").
 
-Three calls are for a host, such as the editor:
+Four calls are for a host, such as the editor:
 - `nph_scene_renderer_reload` loads an asset again after its cooked file
   was replaced (a re-import, an edited mesh or material).
   - **A material changes in place** (ADR-0105). The cache keeps its entry
@@ -339,6 +345,12 @@ Three calls are for a host, such as the editor:
   MeshRenderer says, while the host draws it its own way (the editor's
   mesh editing). It holds across mesh and transform changes. Showing the
   instance again applies the transform it missed.
+- `nph_scene_renderer_material_acquire`, `_state` and `_release` hold a
+  material for the host's own instances (the editor's preview of a mesh
+  being edited, ADR-0105): the cache's entry for it, loading with each sync,
+  set and changed in place as the entities' are. Its state is loading,
+  ready (with its render material), failed, or stale: replaced by a new
+  asset (a first cook after failing), for the host to acquire anew.
 
 `nph_scene_import_cooked` spawns a cooked scene asset (asset/scene.h)
 under a named root: one entity per node with its transform and hierarchy,

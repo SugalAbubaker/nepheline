@@ -313,21 +313,34 @@ text, -0 written as 0), so it diffs cleanly:
 
 ```json
 {
-  "nmesh": 1,
+  "nmesh": 2,
   "smoothing": 60,
+  "materials": ["materials/brick.nmat", "", "materials/glass.nmat"],
   "positions": [[x, y, z], ...],
   "faces": [{"v": [0, 1, 2, 3], "uv": [[u, v], ...], "m": 0}, ...]
 }
 ```
 
-"uv" and "m" are optional. The reader checks every value:
+"uv" and "m" are optional. "materials" (version 2, ADR-0105) names each
+slot's material by its `.nmat` source's key, "" for none, up to the last
+slot that names one; a mesh that names none writes no list. Version 1
+files, which have none, still read. The reader checks every value:
 - the version;
 - finite coordinates within the mesh pipeline's limit;
 - indices in range, and 3 to 256 corners a face;
 - material slots below 8 (a MeshRenderer's);
+- material keys: relative, `/` between their parts, none empty, `.` or
+  `..`, no `\`, `:` or control character, ending in `.nmat`, at most 8;
 - the totals.
 
 It is a fuzz target.
+
+The cooked mesh names the slots' materials by the GUIDs their sources
+cook to (`<key>#material`), in a slot-materials blob (`asset.md`, mesh
+version 8), and references them in the cook database. The sources need
+not be cooked first: the GUID comes from the key. An entity drawing the
+mesh draws a slot's material where its MeshRenderer names none for it
+(`runtime.md`).
 
 The primitives (cube, plane, cylinder, sphere) are closed where they
 should be, face outwards, and map UVs in [0, 1]. `cook_polymesh_extrude`

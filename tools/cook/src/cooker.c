@@ -766,11 +766,32 @@ NphResult cooker_cook_mesh(Cooker *c, const char *source_path)
                               content_hash);
         CookMeshStats st;
         r = cook_mesh_process(&mesh, &c->mesh, NULL, c->jobs, &w, &st);
+        // The slots' materials (SLMT, ADR-0105), named by the GUIDs their sources cook to,
+        // which the mesh references: drawn where an entity names none for the slot.
+        NphGuid slots[COOK_POLYMESH_MATERIALS];
+        NphGuid deps[COOK_POLYMESH_MATERIALS];
+        u32 dep_count = 0U;
+        const u32 named = cook_polymesh_material_count(&poly);
+        for (u32 s = 0; s < named; ++s) {
+            slots[s] = poly.materials[s][0] != '\0' ? asset_guid(poly.materials[s], "material")
+                                                    : NPH_GUID_NULL;
+            bool seen = nph_guid_is_null(slots[s]);
+            for (u32 d = 0; d < dep_count && !seen; ++d) {
+                seen = nph_guid_equals(deps[d], slots[s]);
+            }
+            if (!seen) {
+                deps[dep_count++] = slots[s];
+            }
+        }
+        if (r == NPH_RESULT_OK && named != 0U) {
+            r = nph_asset_writer_add_blob(&w, NPH_MESH_TAG_SLOT_MATERIALS, 0U, slots,
+                                          sizeof(NphGuid) * named, NPH_ASSET_CODEC_NONE, 0U);
+        }
         if (r == NPH_RESULT_OK) {
             char relative[COOKER_PATH_MAX];
             output_path(c, key, "mesh", "mesh", guid, relative, sizeof relative);
-            r = emit(c, &w, key, "mesh", relative, NPH_ASSET_TYPE_MESH, content_hash, shash, NULL,
-                     0U);
+            r = emit(c, &w, key, "mesh", relative, NPH_ASSET_TYPE_MESH, content_hash, shash, deps,
+                     dep_count);
         } else {
             NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", key, nph_result_string(r));
         }

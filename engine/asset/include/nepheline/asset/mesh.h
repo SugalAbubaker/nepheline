@@ -92,6 +92,11 @@
 // while the submesh's material tests the alpha it was made for (NphMeshRayRange.alpha_key,
 // asset/material.h NphMaterialHeader.alpha_key), which is the loader's to check.
 //
+// From version 8, a mesh may name a material for each of its slots (ADR-0105: the materials an
+// editable mesh names, cook/polymesh.h), drawn where the entity's MeshRenderer names none:
+//
+//     SLMT  NphGuid[slot]  slot 0 first, up to NPH_MESH_SLOT_MATERIALS_MAX; a null GUID names none
+//
 // Positions are separate from the other attributes (§10.3 "bandwidth
 // discipline"): the visibility-buffer pass of §8.6.4 reads positions only.
 // Each position is three 16-bit unorm values across the mesh bounds
@@ -119,8 +124,13 @@ extern "C" {
 // 2: the levels of detail (LODS, LODC, LODG, LODM, LODN). 3: voxel clusters
 // in the levels (VOXB, VOXA). 4: meshes of voxels alone. 5: the voxels
 // compact (VOXC). 6: levels apart (LVLS, LODK). 7: triangles for the rays
-// alone (RAYS, RAYR, RAYT). Earlier versions without voxels still read.
-#define NPH_MESH_TYPE_VERSION 7U
+// alone (RAYS, RAYR, RAYT). 8: the slots' materials (SLMT). Earlier versions
+// without voxels still read.
+#define NPH_MESH_TYPE_VERSION 8U
+
+// Slots a mesh names materials for (SLMT): an editable mesh's (cook/polymesh.h
+// COOK_POLYMESH_MATERIALS), and a MeshRenderer's own.
+#define NPH_MESH_SLOT_MATERIALS_MAX 8U
 
 #define NPH_MESH_TAG_HEADER           NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_MESH_TAG_POSITIONS        NPH_FOURCC('P', 'O', 'S', 'N')
@@ -144,6 +154,7 @@ extern "C" {
 #define NPH_MESH_TAG_RAY_HEADER       NPH_FOURCC('R', 'A', 'Y', 'S')
 #define NPH_MESH_TAG_RAY_RANGES       NPH_FOURCC('R', 'A', 'Y', 'R')
 #define NPH_MESH_TAG_RAY_TRIANGLES    NPH_FOURCC('R', 'A', 'Y', 'T')
+#define NPH_MESH_TAG_SLOT_MATERIALS   NPH_FOURCC('S', 'L', 'M', 'T')
 
 #define NPH_MESHLET_MAX_VERTICES  64U
 #define NPH_MESHLET_MAX_TRIANGLES 124U
@@ -388,6 +399,9 @@ typedef struct NphMeshView {
     const NphMeshRayRange *ray_ranges;
     const NphMeshRayTriangle *ray_triangles;
     u32 ray_triangle_count;
+    // The slots' materials (version 8), slot 0 first: NULL (and 0) without them.
+    const NphGuid *slot_materials;
+    u32 slot_material_count;
 } NphMeshView;
 
 // Resolves and validates the blobs of a READY mesh asset.
@@ -408,8 +422,9 @@ typedef struct NphMeshView {
 // radii and errors not negative); the rays' triangles (version 7: a mesh of
 // triangles, their runs in submesh order filling RAYT, a run of some with a
 // key and a run of none without, every parent a triangle of its run's
-// submesh, every corner within its parent, every reserved word zero). That
-// the hierarchy is a tree and its bounds hold is the renderer's to check
+// submesh, every corner within its parent, every reserved word zero); the
+// slots' materials (version 8: 1 to NPH_MESH_SLOT_MATERIALS_MAX GUIDs, whole).
+// That the hierarchy is a tree and its bounds hold is the renderer's to check
 // (nph_render_mesh_create), as that a head's levels are its own: each is a
 // mesh asset of its own, viewed alone.
 NPH_MUST_USE NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out);

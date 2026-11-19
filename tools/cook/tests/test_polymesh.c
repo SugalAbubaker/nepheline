@@ -304,12 +304,24 @@ NTEST(polymesh, the_file_reads_back_what_was_written)
     NTEST_ASSERT_EQ_INT(cook_polymesh_cylinder(&m, 0.5F, 1.25F, 7U), NPH_RESULT_OK);
     m.smoothing = 42.5F;
     m.faces.data[0].material = 3U;
+    // Slots 0 and 3 name materials, 1 and 2 none: written up to the last that names one.
+    snprintf(m.materials[0], sizeof m.materials[0], "materials/brick.nmat");
+    snprintf(m.materials[3], sizeof m.materials[3], "materials/glass panes.nmat");
+    NTEST_EXPECT_EQ_UINT(cook_polymesh_material_count(&m), 4U);
     NphStrBuilder text;
     nph_sb_init(&text, alloc);
     NTEST_ASSERT_EQ_INT(cook_polymesh_write(&m, &text), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_str_contains(nph_str(text.data, text.len), NPH_STR("\"nmesh\": 2,")));
+    NTEST_EXPECT_TRUE(
+        nph_str_contains(nph_str(text.data, text.len),
+                         NPH_STR("\"materials\": [\"materials/brick.nmat\", \"\", \"\", "
+                                 "\"materials/glass panes.nmat\"]")));
     CookPolyMesh back;
     NTEST_ASSERT_EQ_INT(cook_polymesh_read(alloc, nph_str(text.data, text.len), &back),
                         NPH_RESULT_OK);
+    for (u32 s = 0; s < COOK_POLYMESH_MATERIALS; ++s) {
+        NTEST_EXPECT_EQ_STR(back.materials[s], m.materials[s]);
+    }
     NTEST_EXPECT_NEAR_F32(back.smoothing, 42.5F, 0.0F);
     NTEST_ASSERT_EQ_UINT(back.positions.len, m.positions.len);
     NTEST_ASSERT_EQ_UINT(back.faces.len, m.faces.len);
@@ -354,6 +366,19 @@ NTEST(polymesh, the_file_reads_back_what_was_written)
     NTEST_EXPECT_NEAR_F32(back.smoothing, COOK_POLYMESH_SMOOTHING, 0.0F);
     NTEST_EXPECT_EQ_UINT(back.faces.data[0].material, 0U);
     NTEST_EXPECT_TRUE(nph_vec2_eq(back.uvs.data[2], nph_vec2_zero()));
+    NTEST_EXPECT_EQ_UINT(cook_polymesh_material_count(&back), 0U);
+    // Naming none, a mesh writes no materials.
+    nph_sb_init(&text, alloc);
+    NTEST_ASSERT_EQ_INT(cook_polymesh_write(&back, &text), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(nph_str_contains(nph_str(text.data, text.len), NPH_STR("materials")));
+    nph_sb_free(&text);
+    cook_polymesh_free(&back);
+    // Version 1 has no materials: a list in one is not read.
+    static const char old[] = "{\"nmesh\": 1, \"materials\": [\"materials/brick.nmat\"], "
+                              "\"positions\": [[0,0,0],[1,0,0],[0,0,-1]], "
+                              "\"faces\": [{\"v\": [0,1,2]}]}";
+    NTEST_ASSERT_EQ_INT(cook_polymesh_read(alloc, nph_str_from_cstr(old), &back), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cook_polymesh_material_count(&back), 0U);
     cook_polymesh_free(&back);
     cook_polymesh_free(&m);
 }
@@ -380,6 +405,18 @@ NTEST(polymesh, the_reader_refuses_what_it_must)
         "{\"nmesh\": 1, " TRIANGLE ", \"faces\": [{\"v\": [0,1,2], \"uv\": [[0,0]]}]}",
         "{\"nmesh\": 1, " TRIANGLE ", \"faces\": [{\"v\": [0,1,2], \"m\": 8}]}",
         "{\"nmesh\": 1, " TRIANGLE ", \"faces\": [[0,1,2]]}",
+        // The slots' materials (version 2): a list of keys of `.nmat` sources, one a slot.
+        "{\"nmesh\": 2, \"materials\": \"a.nmat\", " TRIANGLE ", \"faces\": []}",
+        "{\"nmesh\": 2, \"materials\": [1], " TRIANGLE ", \"faces\": []}",
+        "{\"nmesh\": 2, \"materials\": [\"a.png\"], " TRIANGLE ", \"faces\": []}",
+        "{\"nmesh\": 2, \"materials\": [\"a.nmat.x\"], " TRIANGLE ", \"faces\": []}",
+        "{\"nmesh\": 2, \"materials\": [\"/a.nmat\"], " TRIANGLE ", \"faces\": []}",
+        "{\"nmesh\": 2, \"materials\": [\"../a.nmat\"], " TRIANGLE ", \"faces\": []}",
+        "{\"nmesh\": 2, \"materials\": [\"a//b.nmat\"], " TRIANGLE ", \"faces\": []}",
+        "{\"nmesh\": 2, \"materials\": [\"a\\\\b.nmat\"], " TRIANGLE ", \"faces\": []}",
+        "{\"nmesh\": 2, \"materials\": [\"c:/a.nmat\"], " TRIANGLE ", \"faces\": []}",
+        "{\"nmesh\": 2, \"materials\": "
+        "[\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"a.nmat\"], " TRIANGLE ", \"faces\": []}",
     };
 #undef TRIANGLE
     for (u32 i = 0; i < NPH_ARRAY_COUNT(bad); ++i) {
@@ -387,15 +424,20 @@ NTEST(polymesh, the_reader_refuses_what_it_must)
         NTEST_EXPECT_EQ_INT(cook_polymesh_read(alloc, nph_str_from_cstr(bad[i]), &m),
                             NPH_RESULT_PARSE_ERROR);
         NTEST_EXPECT_EQ_UINT(m.faces.len, 0U); // left empty
+        NTEST_EXPECT_EQ_UINT(cook_polymesh_material_count(&m), 0U);
         cook_polymesh_free(&m);
     }
+    // Versions before the first and after this one.
     CookPolyMesh m;
-    NTEST_EXPECT_EQ_INT(cook_polymesh_read(alloc,
-                                           nph_str_from_cstr("{\"nmesh\": 2, \"positions\": [], "
-                                                             "\"faces\": []}"),
-                                           &m),
-                        NPH_RESULT_VERSION_MISMATCH);
-    cook_polymesh_free(&m);
+    static const char *const other[] = {
+        "{\"nmesh\": 0, \"positions\": [], \"faces\": []}",
+        "{\"nmesh\": 3, \"positions\": [], \"faces\": []}",
+    };
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(other); ++i) {
+        NTEST_EXPECT_EQ_INT(cook_polymesh_read(alloc, nph_str_from_cstr(other[i]), &m),
+                            NPH_RESULT_VERSION_MISMATCH);
+        cook_polymesh_free(&m);
+    }
 
     // In memory: what validation catches.
     cook_polymesh_init(&m, alloc);
@@ -409,6 +451,13 @@ NTEST(polymesh, the_reader_refuses_what_it_must)
     m.positions.data[0].x = nph_f32_from_bits(0x7FC00000U); // NaN
     NTEST_EXPECT_EQ_INT(cook_polymesh_validate(&m), NPH_RESULT_CORRUPT);
     m.positions.data[0].x = -0.5F;
+    NTEST_EXPECT_EQ_INT(cook_polymesh_validate(&m), NPH_RESULT_OK);
+    // A slot's material: a key the reader would refuse, or one that does not end in its slot.
+    snprintf(m.materials[2], sizeof m.materials[2], "materials/brick.png");
+    NTEST_EXPECT_EQ_INT(cook_polymesh_validate(&m), NPH_RESULT_CORRUPT);
+    memset(m.materials[2], 'a', sizeof m.materials[2]);
+    NTEST_EXPECT_EQ_INT(cook_polymesh_validate(&m), NPH_RESULT_CORRUPT);
+    snprintf(m.materials[2], sizeof m.materials[2], "materials/brick.nmat");
     NTEST_EXPECT_EQ_INT(cook_polymesh_validate(&m), NPH_RESULT_OK);
     // Adding refuses as validation would.
     const u32 two[2] = {0U, 1U};
@@ -481,11 +530,16 @@ NTEST(polymesh, a_copy_is_its_own)
     CookPolyMesh m;
     cook_polymesh_init(&m, alloc);
     NTEST_ASSERT_EQ_INT(cook_polymesh_cube(&m, 1.0F), NPH_RESULT_OK);
+    snprintf(m.materials[1], sizeof m.materials[1], "materials/brick.nmat");
     CookPolyMesh c;
     NTEST_ASSERT_EQ_INT(cook_polymesh_copy(&m, alloc, &c), NPH_RESULT_OK);
     c.positions.data[0] = nph_vec3(9.0F, 9.0F, 9.0F);
     NTEST_EXPECT_NEAR_F32(m.positions.data[0].x, -0.5F, 0.0F);
     NTEST_EXPECT_EQ_UINT(c.faces.len, 6U);
+    NTEST_EXPECT_EQ_STR(c.materials[1], "materials/brick.nmat"); // its slots' materials too
+    // Cleared, a mesh names no materials.
+    cook_polymesh_clear(&c);
+    NTEST_EXPECT_EQ_UINT(cook_polymesh_material_count(&c), 0U);
     cook_polymesh_free(&c);
     CookPolyMesh empty;
     cook_polymesh_init(&empty, alloc);
@@ -507,8 +561,13 @@ NTEST(polymesh, the_fuzz_corpus_reads)
         u32 positions;
         u32 faces;
     } seeds[] = {
-        {"triangle", 3U, 1U}, {"cube", 8U, 6U},    {"cube_materials_flat", 8U, 6U},
-        {"concave", 18U, 2U}, {"pyramid", 5U, 5U}, {"regression_degenerate", 5U, 3U},
+        {"triangle", 3U, 1U},
+        {"cube", 8U, 6U},
+        {"cube_materials_flat", 8U, 6U},
+        {"concave", 18U, 2U},
+        {"pyramid", 5U, 5U},
+        {"regression_degenerate", 5U, 3U},
+        {"cube_slot_materials", 8U, 6U},
     };
     for (u32 i = 0; i < NPH_ARRAY_COUNT(seeds); ++i) {
         char path[1024];
@@ -520,6 +579,13 @@ NTEST(polymesh, the_fuzz_corpus_reads)
         if (strcmp(seeds[i].name, "cube") == 0) {
             NTEST_EXPECT_TRUE(closed(&m));
             NTEST_EXPECT_NEAR_F64(volume(&m), 1.0, 1e-5);
+        }
+        const bool named = strcmp(seeds[i].name, "cube_slot_materials") == 0;
+        NTEST_EXPECT_EQ_UINT(cook_polymesh_material_count(&m), named ? 3U : 0U);
+        if (named) {
+            NTEST_EXPECT_EQ_STR(m.materials[0], "materials/brick.nmat");
+            NTEST_EXPECT_EQ_STR(m.materials[1], "");
+            NTEST_EXPECT_EQ_STR(m.materials[2], "materials/glass.nmat");
         }
         cook_polymesh_free(&m);
     }

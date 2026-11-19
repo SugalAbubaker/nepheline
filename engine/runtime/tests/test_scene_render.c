@@ -4,13 +4,18 @@
 // a pack at build time): entities become instances and lights once their
 // assets load, follow their transforms, and go when they go. GPU tests
 // skip without a Vulkan device; the import test needs none.
+#include <nepheline/asset/format.h>
 #include <nepheline/asset/vfs.h>
 #include <nepheline/core/guid.h>
+#include <nepheline/platform/file.h>
+#include <nepheline/platform/platform.h>
 #include <nepheline/runtime/scene_render.h>
 #include <nepheline/scene/scene_io.h>
 #include <nepheline/scene/transform.h>
 
 #include "test_render_support.h"
+
+#include <stdio.h>
 
 #ifndef NPH_TEST_PACK
 #error "NPH_TEST_PACK must name the cooked showcase pack"
@@ -23,6 +28,12 @@
 #define SCENE_ASSETS   5U
 #define SCENE_ENTITIES 5U // the import root and four nodes
 
+// An asset a test writes (write_test_asset): its GUID and its path in the VFS.
+typedef struct TestAsset {
+    NphGuid guid;
+    char path[64];
+} TestAsset;
+
 typedef struct SceneFixture {
     RenderFixture rf;
     NphJobSystem *jobs;
@@ -32,7 +43,29 @@ typedef struct SceneFixture {
     NphRuntimeComponents ids;
     NphTransformSystem *transforms;
     NphSceneRenderer *sr;
+    // The assets the test wrote, in `dir` (mounted at "test" once there is one), found by the
+    // loader's resolver.
+    char dir[1024];
+    TestAsset written[8];
+    u32 written_count;
 } SceneFixture;
+
+static NphResult test_resolve(void *user, NphGuid guid, char *buf, u64 cap, u64 *out_len)
+{
+    const SceneFixture *f = (const SceneFixture *)user;
+    for (u32 i = 0U; i < f->written_count; ++i) {
+        if (nph_guid_equals(f->written[i].guid, guid)) {
+            const u64 n = strlen(f->written[i].path);
+            if (n + 1U > cap) {
+                return NPH_RESULT_OVERFLOW;
+            }
+            memcpy(buf, f->written[i].path, (size_t)n + 1U);
+            *out_len = n;
+            return NPH_RESULT_OK;
+        }
+    }
+    return NPH_RESULT_NOT_FOUND;
+}
 
 static void scene_setup(SceneFixture *f, bool gpu, u32 event_capacity)
 {
@@ -53,6 +86,8 @@ static void scene_setup(SceneFixture *f, bool gpu, u32 event_capacity)
     ld.alloc = nph_allocator_system();
     ld.vfs = f->vfs;
     ld.jobs = f->jobs;
+    ld.resolve = test_resolve;
+    ld.resolve_user = f;
     NTEST_ASSERT_EQ_INT(nph_asset_loader_create(&ld, &f->loader), NPH_RESULT_OK);
     NphWorldDesc wd;
     memset(&wd, 0, sizeof wd);
@@ -75,6 +110,76 @@ static void scene_teardown(SceneFixture *f)
     nph_vfs_destroy(f->vfs);
     nph_job_system_destroy(f->jobs);
     test_render_teardown(&f->rf);
+    if (f->dir[0] != '\0') {
+        NTEST_EXPECT_EQ_INT(nph_fs_remove_tree(f->dir), NPH_RESULT_OK);
+    }
+}
+
+// Writes `w` (then freed) as the asset `guid`, in the file `file` of the test's own content.
+static void write_test_asset(SceneFixture *f, const char *file, NphGuid guid, NphAssetWriter *w)
+{
+    if (f->dir[0] == '\0') {
+        char tmp[800];
+        NTEST_ASSERT_EQ_INT(nph_fs_temp_directory(tmp, sizeof tmp, NULL), NPH_RESULT_OK);
+        static u32 counter = 0U;
+        (void)snprintf(f->dir, sizeof f->dir, "%s/nph_scene_render_%llu_%u", tmp,
+                       (unsigned long long)nph_platform_process_id(), counter++);
+        NTEST_ASSERT_EQ_INT(nph_fs_create_directories(f->dir), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_INT(nph_vfs_mount_directory(f->vfs, NPH_STR("test"), f->dir, NULL),
+                            NPH_RESULT_OK);
+    }
+    NTEST_ASSERT_LT_UINT(f->written_count, NPH_ARRAY_COUNT(f->written));
+    TestAsset *t = &f->written[f->written_count++];
+    t->guid = guid;
+    (void)snprintf(t->path, sizeof t->path, "test/%s.nph", file);
+    char full[1200];
+    (void)snprintf(full, sizeof full, "%s/%s.nph", f->dir, file);
+    NTEST_ASSERT_EQ_INT(nph_asset_writer_write_file(w, full), NPH_RESULT_OK);
+    nph_asset_writer_free(w);
+}
+
+// A material of the defaults, `name` its GUID's text, in the test's content.
+static NphGuid write_test_material(SceneFixture *f, const char *file, const char *name)
+{
+    const NphGuid guid = nph_guid_from_cstr(name);
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, nph_allocator_system(), NPH_ASSET_TYPE_MATERIAL,
+                          NPH_MATERIAL_TYPE_VERSION, guid, 1U);
+    NphMaterialHeader h;
+    nph_material_header_default(&h);
+    NTEST_ASSERT_EQ_INT(nph_asset_writer_add_blob(&w, NPH_MATERIAL_TAG_HEADER, 0U, &h, sizeof h,
+                                                  NPH_ASSET_CODEC_NONE, 0U),
+                        NPH_RESULT_OK);
+    write_test_asset(f, file, guid, &w);
+    return guid;
+}
+
+// The cooked mesh `source` again as the mesh `name` (and file `file`), naming `slots` for its
+// slots (asset/mesh.h SLMT; ADR-0105).
+static NphGuid write_test_mesh(SceneFixture *f, const char *file, const char *name, NphGuid source,
+                               const NphGuid *slots, u32 count)
+{
+    NphAssetHandle h;
+    NTEST_ASSERT_EQ_INT(nph_asset_load_guid(f->loader, source, &h), NPH_RESULT_OK);
+    const NphAsset *a = nph_asset_get(f->loader, h);
+    NTEST_ASSERT_NOT_NULL(a);
+    const NphGuid guid = nph_guid_from_cstr(name);
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, nph_allocator_system(), NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
+                          guid, 1U);
+    for (u32 i = 0U; i < a->blob_count; ++i) {
+        const NphAssetBlob *b = &a->blobs[i];
+        NTEST_ASSERT_EQ_INT(nph_asset_writer_add_blob(&w, b->tag, b->index, b->data, b->size,
+                                                      NPH_ASSET_CODEC_NONE, b->alignment),
+                            NPH_RESULT_OK);
+    }
+    NTEST_ASSERT_EQ_INT(nph_asset_writer_add_blob(&w, NPH_MESH_TAG_SLOT_MATERIALS, 0U, slots,
+                                                  sizeof(NphGuid) * count, NPH_ASSET_CODEC_NONE,
+                                                  0U),
+                        NPH_RESULT_OK);
+    nph_asset_release(f->loader, h);
+    write_test_asset(f, file, guid, &w);
+    return guid;
 }
 
 static NphEntity import_showcase(SceneFixture *f, u32 *out_count)
@@ -949,6 +1054,148 @@ NTEST(SceneRender, a_reloaded_asset_is_loaded_again_for_whoever_draws_it)
     const NphRenderView view = test_view();
     const NphRenderFrameStats fs = test_render_frame(&fx.rf, &view, fx.rf.target);
     NTEST_EXPECT_EQ_UINT(fs.draws, 2U);
+    scene_teardown(&fx);
+}
+
+// Syncs and waits until nothing loads (a mesh's slots' materials load once the mesh is ready).
+static NphSceneRenderStats settle(SceneFixture *f)
+{
+    for (u32 i = 0U; i < 3U; ++i) {
+        (void)sync(f);
+        nph_scene_renderer_wait(f->sr);
+    }
+    return sync(f);
+}
+
+static NphEntity spawn_drawing(SceneFixture *f, NphGuid mesh)
+{
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM, f->ids.mesh_renderer};
+    NphEntity e;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(f->world, comps, 3U, &e), NPH_RESULT_OK);
+    mesh_renderer(f, e)->mesh = mesh;
+    return e;
+}
+
+// A mesh's slots' materials (ADR-0105) draw where its entity names none, held by the entity as
+// its own: loaded with it, given way to its own, reloaded for it, and gone with it.
+NTEST(SceneRender, a_mesh_names_the_materials_of_the_slots_its_entity_does_not)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, true, 256U);
+    if (fx.rf.dev == NULL) {
+        scene_teardown(&fx);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    make_scene_renderer(&fx);
+    const NphGuid textured = nph_guid_from_cstr("showcase.gltf#material/0"); // samples a texture
+    const NphGuid plain = nph_guid_from_cstr("showcase.gltf#material/1");
+    const NphGuid slots[2] = {textured, NPH_GUID_NULL};
+    const NphGuid mesh = write_test_mesh(&fx, "slots", "slots#mesh",
+                                         nph_guid_from_cstr("showcase.gltf#mesh/0"), slots, 2U);
+    // Naming none, the entity draws the mesh's: the mesh, its material, and that one's texture.
+    const NphEntity e = spawn_drawing(&fx, mesh);
+    NphSceneRenderStats st = settle(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 1U);
+    NTEST_EXPECT_EQ_UINT(st.pending, 0U);
+    NTEST_EXPECT_EQ_UINT(st.assets_ready, 3U);
+    NTEST_EXPECT_EQ_UINT(st.assets_failed, 0U);
+    // Its own for that slot takes the place of the mesh's, which goes with its texture; emptied
+    // again, the mesh's is back.
+    mesh_renderer(&fx, e)->material0 = plain;
+    st = settle(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 1U);
+    NTEST_EXPECT_EQ_UINT(st.assets_ready, 2U); // the mesh and its own
+    mesh_renderer(&fx, e)->material0 = NPH_GUID_NULL;
+    st = settle(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 1U);
+    NTEST_EXPECT_EQ_UINT(st.assets_ready, 3U);
+
+    // A material the mesh names that is not there yet draws as the default; made, and loaded
+    // again (as the editor does after its first cook), it is drawn: the entity holds it.
+    const NphGuid late_slots[1] = {nph_guid_from_cstr("late#material")};
+    const NphGuid late_mesh =
+        write_test_mesh(&fx, "late_slots", "late_slots#mesh",
+                        nph_guid_from_cstr("showcase.gltf#mesh/0"), late_slots, 1U);
+    const NphEntity late = spawn_drawing(&fx, late_mesh);
+    st = settle(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(st.assets_failed, 1U);
+    const NphRenderInstance before = nph_scene_renderer_instance(fx.sr, late);
+    (void)write_test_material(&fx, "late", "late#material");
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_reload(fx.sr, late_slots[0]), 1U);
+    st = settle(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 2U);
+    NTEST_EXPECT_EQ_UINT(st.assets_failed, 0U);
+    NTEST_EXPECT_NE_UINT(nph_scene_renderer_instance(fx.sr, late).value, before.value);
+    const NphRenderView view = test_view();
+    const NphRenderFrameStats fs = test_render_frame(&fx.rf, &view, fx.rf.target);
+    NTEST_EXPECT_EQ_UINT(fs.instances, 2U);
+
+    // Gone, the entities take the meshes' materials with them.
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(fx.world, e), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(fx.world, late), NPH_RESULT_OK);
+    st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.instances, 0U);
+    NTEST_EXPECT_EQ_UINT(st.assets_ready + st.assets_loading + st.assets_failed, 0U);
+    scene_teardown(&fx);
+}
+
+// The materials a host holds for its own instances (ADR-0105, the editor's mesh-editing preview):
+// the entities' own entries, loading with each sync, and stale when replaced by a new asset.
+NTEST(SceneRender, the_host_holds_materials_of_its_own)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, true, 256U);
+    if (fx.rf.dev == NULL) {
+        scene_teardown(&fx);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    make_scene_renderer(&fx);
+    const NphGuid textured = nph_guid_from_cstr("showcase.gltf#material/0");
+    NphRenderMaterial m;
+    const u32 ref = nph_scene_renderer_material_acquire(fx.sr, textured);
+    NTEST_ASSERT_NE_UINT(ref, NPH_SCENE_MATERIAL_NONE);
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_state(fx.sr, ref, &m),
+                        NPH_SCENE_MATERIAL_LOADING);
+    NTEST_EXPECT_EQ_UINT(m.value, 0U);
+    NphSceneRenderStats st = settle(&fx);
+    NTEST_EXPECT_EQ_UINT(st.assets_ready, 2U); // with its texture
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_state(fx.sr, ref, &m),
+                        NPH_SCENE_MATERIAL_READY);
+    NTEST_EXPECT_NE_UINT(m.value, 0U);
+    // Held by the host, it is set in place as an entity's is.
+    NphMaterialHeader h;
+    nph_material_header_default(&h);
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_set(fx.sr, textured, &h, NULL), NPH_RESULT_OK);
+    // None for a null GUID: failed, and released as nothing.
+    const u32 none = nph_scene_renderer_material_acquire(fx.sr, NPH_GUID_NULL);
+    NTEST_EXPECT_EQ_UINT(none, NPH_SCENE_MATERIAL_NONE);
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_state(fx.sr, none, &m),
+                        NPH_SCENE_MATERIAL_FAILED);
+    nph_scene_renderer_material_release(fx.sr, none);
+    // One that is not there fails; made and loaded again, the host's is stale, and acquired
+    // anew it is the new one.
+    const NphGuid later = nph_guid_from_cstr("later#material");
+    u32 late = nph_scene_renderer_material_acquire(fx.sr, later);
+    (void)settle(&fx);
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_state(fx.sr, late, &m),
+                        NPH_SCENE_MATERIAL_FAILED);
+    (void)write_test_material(&fx, "later", "later#material");
+    NTEST_EXPECT_EQ_UINT(nph_scene_renderer_reload(fx.sr, later), 0U); // no entity loses one
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_state(fx.sr, late, &m),
+                        NPH_SCENE_MATERIAL_STALE);
+    const u32 renewed = nph_scene_renderer_material_acquire(fx.sr, later);
+    nph_scene_renderer_material_release(fx.sr, late);
+    late = renewed;
+    (void)settle(&fx);
+    NTEST_EXPECT_EQ_INT(nph_scene_renderer_material_state(fx.sr, late, &m),
+                        NPH_SCENE_MATERIAL_READY);
+    // Released, they go.
+    nph_scene_renderer_material_release(fx.sr, ref);
+    nph_scene_renderer_material_release(fx.sr, late);
+    st = sync(&fx);
+    NTEST_EXPECT_EQ_UINT(st.assets_ready + st.assets_loading + st.assets_failed, 0U);
     scene_teardown(&fx);
 }
 

@@ -99,6 +99,10 @@ void cook_material_source_default(CookMaterialSource *out);
 // COOK_MATERIAL_IMAGE_MAX, with an image's extension (cooker.h COOKER_SOURCE_IMAGE).
 bool cook_material_image_key_valid(NphStr key);
 
+// As cook_material_image_key_valid, for a material's source key: a `.nmat` (cooker.h
+// COOKER_SOURCE_MATERIAL), as an editable mesh's slots name them (polymesh.h).
+bool cook_material_key_valid(NphStr key);
+
 // Checks what the reader checks. NPH_RESULT_CORRUPT on the first problem.
 NPH_MUST_USE NphResult cook_material_source_validate(const CookMaterialSource *m);
 

@@ -159,6 +159,13 @@ def mesh_ray_blobs():
     ]
 
 
+def mesh_slot_blobs():
+    """The triangle naming its slots' materials (mesh.h version 8, SLMT; ADR-0105): slot 0's,
+    and none for slot 1."""
+    slots = guid_from_str("materials/brick.nmat#material") + bytes(16)
+    return mesh_blobs() + [("SLMT", 0, 0, 16, slots, slots)]
+
+
 def mesh_lod_blobs():
     """The triangle with levels of detail (mesh.h version 2): its one meshlet
     as level 0 under a root group, the smallest hierarchy there is."""
@@ -514,6 +521,7 @@ def main():
     write(os.path.join(CORPUS, "nph", "mesh_levels_head"),
           nph_file(fourcc("MESH"), 6, mesh_levels_head_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_rays"), nph_file(fourcc("MESH"), 7, mesh_ray_blobs()))
+    write(os.path.join(CORPUS, "nph", "mesh_slots"), nph_file(fourcc("MESH"), 8, mesh_slot_blobs()))
     write(os.path.join(CORPUS, "nph", "texture"), nph_file(fourcc("TEX "), 1, texture_blobs()))
     write(os.path.join(CORPUS, "nph", "material"), nph_file(fourcc("MATL"), 1, material_blobs()))
     write(os.path.join(CORPUS, "nph", "material_keyed"),

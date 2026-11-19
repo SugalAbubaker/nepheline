@@ -344,23 +344,29 @@ NTEST(views, mesh_view_resolves_levels_of_detail)
     }
 }
 
+// Starts `w` with the blobs of the plain cube of `type_version`, for a test to add to.
+static void begin_cube(NphAssetWriter *w, NphAllocator *alloc, u32 type_version)
+{
+    ImageAsset plain;
+    memset(&plain, 0, sizeof plain);
+    plain.alloc = alloc;
+    build_cube(&plain, type_version);
+    nph_asset_writer_init(w, alloc, NPH_ASSET_TYPE_MESH, type_version, nph_guid_from_cstr("cube"),
+                          1U);
+    for (u32 i = 0; i < plain.asset.blob_count; ++i) {
+        const NphAssetBlob *b = &plain.asset.blobs[i];
+        add(w, b->tag, b->index, b->data, b->size);
+    }
+    image_asset_free(&plain);
+}
+
 // The cube with triangles for the rays alone (version 7): its one submesh's run of two, parts
 // of its first and its last triangle, for the alpha test of key 7.
 static void build_cube_with_rays(ImageAsset *ia, u32 type_version, bool header, bool ranges,
                                  bool triangles)
 {
-    ImageAsset plain;
-    memset(&plain, 0, sizeof plain);
-    plain.alloc = ia->alloc;
-    build_cube(&plain, type_version);
     NphAssetWriter w;
-    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_MESH, type_version,
-                          nph_guid_from_cstr("cube"), 1U);
-    for (u32 i = 0; i < plain.asset.blob_count; ++i) {
-        const NphAssetBlob *b = &plain.asset.blobs[i];
-        add(&w, b->tag, b->index, b->data, b->size);
-    }
-    image_asset_free(&plain);
+    begin_cube(&w, ia->alloc, type_version);
     NphMeshRayHeader rh;
     memset(&rh, 0, sizeof rh);
     rh.triangle_count = 2U;
@@ -464,6 +470,59 @@ NTEST(views, mesh_view_resolves_and_checks_triangles_for_the_rays)
         NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
         image_asset_free(&ia);
     }
+}
+
+// The cube naming the first `bytes` of a table of slots' materials (version 8): slot s's GUID
+// {s + 1, 0x5107}, slot 1's null (it names none).
+static void build_cube_with_slot_materials(ImageAsset *ia, u32 type_version, u64 bytes)
+{
+    NphAssetWriter w;
+    begin_cube(&w, ia->alloc, type_version);
+    NphGuid slots[NPH_MESH_SLOT_MATERIALS_MAX + 1U];
+    for (u32 s = 0; s < NPH_ARRAY_COUNT(slots); ++s) {
+        slots[s].lo = s == 1U ? 0U : s + 1U;
+        slots[s].hi = s == 1U ? 0U : 0x5107U;
+    }
+    NTEST_ASSERT_LE_UINT(bytes, sizeof slots);
+    add(&w, NPH_MESH_TAG_SLOT_MATERIALS, 0U, slots, bytes);
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, mesh_view_resolves_and_checks_the_slots_materials)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    NphMeshView v;
+    // Without them: none.
+    build_cube(&ia, NPH_MESH_TYPE_VERSION);
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(v.slot_materials == NULL && v.slot_material_count == 0U);
+    image_asset_free(&ia);
+    // Three slots, the second naming none; and all the slots there are.
+    build_cube_with_slot_materials(&ia, NPH_MESH_TYPE_VERSION, 3U * sizeof(NphGuid));
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(v.slot_material_count, 3U);
+    NTEST_EXPECT_TRUE(v.slot_materials[0].lo == 1U && v.slot_materials[0].hi == 0x5107U);
+    NTEST_EXPECT_TRUE(nph_guid_is_null(v.slot_materials[1]));
+    NTEST_EXPECT_TRUE(v.slot_materials[2].lo == 3U);
+    image_asset_free(&ia);
+    build_cube_with_slot_materials(&ia, NPH_MESH_TYPE_VERSION,
+                                   NPH_MESH_SLOT_MATERIALS_MAX * sizeof(NphGuid));
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(v.slot_material_count, NPH_MESH_SLOT_MATERIALS_MAX);
+    image_asset_free(&ia);
+    // Refused: more than the slots, none, a part of a GUID, and before version 8.
+    const u64 bad[3] = {(NPH_MESH_SLOT_MATERIALS_MAX + 1U) * sizeof(NphGuid), 0U,
+                        2U * sizeof(NphGuid) + 8U};
+    for (u32 i = 0; i < 3U; ++i) {
+        build_cube_with_slot_materials(&ia, NPH_MESH_TYPE_VERSION, bad[i]);
+        NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+        image_asset_free(&ia);
+    }
+    build_cube_with_slot_materials(&ia, 7U, 3U * sizeof(NphGuid));
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
 }
 
 // The cube with a coarser level of voxels (version 3): its meshlet at level
@@ -1883,6 +1942,7 @@ NTEST(views, fuzz_seeds_written_by_the_python_description_validate)
     check_seed_asset("nph/mesh_level", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/mesh_levels_head", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/mesh_rays", NPH_ASSET_TYPE_MESH);
+    check_seed_asset("nph/mesh_slots", NPH_ASSET_TYPE_MESH);
     check_seed_asset("nph/texture", NPH_ASSET_TYPE_TEXTURE);
     check_seed_asset("nph/material", NPH_ASSET_TYPE_MATERIAL);
     check_seed_asset("nph/material_keyed", NPH_ASSET_TYPE_MATERIAL);

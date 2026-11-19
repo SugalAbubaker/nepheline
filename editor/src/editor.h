@@ -207,6 +207,18 @@ NPH_MUST_USE NphResult editor_mesh_edit_move(Editor *ed, NphVec3 offset);
 // NPH_RESULT_INVALID_STATE without faces selected.
 NPH_MUST_USE NphResult editor_mesh_edit_extrude(Editor *ed, f32 distance);
 
+// Gives face `face` of the mesh being edited (and every selected face, when it is a selected
+// one) the material whose source is `key` (ADR-0105), as one change: the faces go to the slot
+// that names it, else to a slot no other face keeps (one the entity's MeshRenderer leaves to
+// the mesh first), which is named for it; the material is cooked when it is not. The mesh
+// draws it from then, and every entity drawing the cooked mesh, where its MeshRenderer names
+// none for the slot, once editing ends. Its slot in `out_slot` (NULL: not wanted).
+// NPH_RESULT_INVALID_STATE when not editing; NPH_RESULT_INVALID_ARGUMENT for a face out of
+// range or a key that is not a material's source key; NPH_RESULT_FULL when other faces keep
+// every slot.
+NPH_MUST_USE NphResult editor_mesh_edit_face_material(Editor *ed, u32 face, const char *key,
+                                                      u32 *out_slot);
+
 // Undoes or redoes the last change while editing; false when there is none.
 bool editor_mesh_edit_undo(Editor *ed);
 bool editor_mesh_edit_redo(Editor *ed);
@@ -267,6 +279,8 @@ NPH_MUST_USE NphResult editor_material_assign(Editor *ed, NphEntity e, u32 slot,
 
 // What dropping the material whose source is `key` on the viewport at (x, y)
 // does (display units, over its image as last shown): the slot of the surface
-// there gets it (editor_material_assign). NPH_RESULT_NOT_FOUND when no entity
-// is there, or (x, y) is not over the image; assign's errors.
+// there gets it (editor_material_assign); while a mesh is being edited, the
+// face there does (editor_mesh_edit_face_material). NPH_RESULT_NOT_FOUND when
+// no entity (or face of the mesh being edited) is there, or (x, y) is not over
+// the image; assign's errors, or the face's.
 NPH_MUST_USE NphResult editor_viewport_drop_material(Editor *ed, const char *key, f32 x, f32 y);

@@ -37,7 +37,9 @@ void cook_material_source_default(CookMaterialSource *out)
     // Every slot unused, repeating (NPH_MATERIAL_WRAP_REPEAT is 0) and filtered linearly.
 }
 
-bool cook_material_image_key_valid(NphStr key)
+// A source key of the cooker's `kind`: relative, '/' between its parts, no empty, "." or ".."
+// part, no '\\', ':' or control character, shorter than COOK_MATERIAL_IMAGE_MAX.
+static bool source_key_valid(NphStr key, CookerSourceKind kind)
 {
     if (key.data == NULL || key.len == 0U || key.len >= COOK_MATERIAL_IMAGE_MAX) {
         return false;
@@ -65,7 +67,17 @@ bool cook_material_image_key_valid(NphStr key)
     char path[COOK_MATERIAL_IMAGE_MAX];
     memcpy(path, key.data, (size_t)key.len);
     path[key.len] = '\0';
-    return cooker_source_kind(path) == COOKER_SOURCE_IMAGE;
+    return cooker_source_kind(path) == kind;
+}
+
+bool cook_material_image_key_valid(NphStr key)
+{
+    return source_key_valid(key, COOKER_SOURCE_IMAGE);
+}
+
+bool cook_material_key_valid(NphStr key)
+{
+    return source_key_valid(key, COOKER_SOURCE_MATERIAL);
 }
 
 static bool in_range(f32 x, f32 lo, f32 hi)

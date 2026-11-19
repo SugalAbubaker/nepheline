@@ -26,7 +26,11 @@ typedef enum RecordFlags {
     REC_RELOAD = 1U << 6U,      // acquire the assets again (nph_scene_renderer_reload)
     REC_SEEN = 1U << 7U,        // `seen` holds its world transform as last mirrored
     REC_CELL = 1U << 8U,        // mirrors a WorldCell
+    REC_MESH_SLOTS = 1U << 9U,  // holds its ready mesh's slots' materials where it names none
 } RecordFlags;
+
+NPH_STATIC_ASSERT(NPH_MESH_SLOT_MATERIALS_MAX <= NPH_MESH_RENDERER_MATERIALS,
+                  "a mesh's slots' materials stand in for a MeshRenderer's own");
 
 #define MOVING_NONE NPH_U32_MAX
 
@@ -257,7 +261,8 @@ static void release_mesh(NphSceneRenderer *sr, EntityRecord *r)
     if ((r->flags & (u32)REC_FAILED) != 0U) {
         sr->failed -= 1U;
     }
-    r->flags &= ~(u32)(REC_MESH | REC_FAILED | REC_HIDDEN | REC_PENDING | REC_RELOAD);
+    r->flags &=
+        ~(u32)(REC_MESH | REC_FAILED | REC_HIDDEN | REC_PENDING | REC_RELOAD | REC_MESH_SLOTS);
 }
 
 static void release_light(NphSceneRenderer *sr, EntityRecord *r)
@@ -653,6 +658,27 @@ static NphResult apply_visibility(NphSceneRenderer *sr, EntityRecord *r, const N
     return NPH_RESULT_OK;
 }
 
+// The materials the mesh at cache index `mesh` names for the slots MeshRenderer `m` names none
+// for (ADR-0105), acquired into `materials` as the entity's own, so that they load, reload and
+// go as its own do. False, and nothing acquired, while the mesh is not ready.
+static bool acquire_mesh_slots(NphSceneRenderer *sr, u32 mesh, const NphMeshRenderer *m,
+                               u32 materials[NPH_MESH_RENDERER_MATERIALS])
+{
+    const RenderAsset *a = render_asset(&sr->assets, mesh);
+    if (a == NULL || a->state != RENDER_ASSET_READY) {
+        return false;
+    }
+    for (u32 s = 0; s < a->slot_material_count; ++s) {
+        if (materials[s] == RENDER_ASSET_NONE &&
+            nph_guid_is_null(nph_mesh_renderer_material(m, s))) {
+            // `items` is fixed: acquiring never moves `a`.
+            materials[s] =
+                render_assets_acquire(&sr->assets, a->slot_materials[s], RENDER_ASSET_MATERIAL);
+        }
+    }
+    return true;
+}
+
 // The entity's MeshRenderer as of now: new references when the GUIDs
 // changed (or a reload asks), the transform and visibility of its instance
 // otherwise.
@@ -671,6 +697,9 @@ static NphResult mirror_mesh(NphSceneRenderer *sr, EntityRecord *r, const NphMes
             materials[s] = render_assets_acquire(&sr->assets, nph_mesh_renderer_material(m, s),
                                                  RENDER_ASSET_MATERIAL);
         }
+        // Its mesh's own for the slots it names none for, now if the mesh is ready (else as
+        // it becomes so: resolve_pending).
+        const bool slots = acquire_mesh_slots(sr, mesh, m, materials);
         u32 *more_refs = NULL;
         if (more != NULL) {
             more_refs = NPH_ALLOC_ARRAY(sr->alloc, u32, NPH_MESH_MATERIALS_EXTRA);
@@ -683,7 +712,7 @@ static NphResult mirror_mesh(NphSceneRenderer *sr, EntityRecord *r, const NphMes
             }
         }
         release_mesh(sr, r);
-        r->flags |= (u32)REC_MESH;
+        r->flags |= (u32)REC_MESH | (slots ? (u32)REC_MESH_SLOTS : 0U);
         r->source = source;
         r->mesh = mesh;
         memcpy(r->materials, materials, sizeof materials);
@@ -727,6 +756,11 @@ static NphResult resolve_pending(NphSceneRenderer *sr)
             continue;
         }
         bool settled = mesh->state == RENDER_ASSET_READY;
+        // The mesh's slots' materials, once it is ready: they settle before the instance is made.
+        if (settled && (r->flags & (u32)REC_MESH_SLOTS) == 0U) {
+            (void)acquire_mesh_slots(sr, r->mesh, m, r->materials);
+            r->flags |= (u32)REC_MESH_SLOTS;
+        }
         for (u32 s = 0; s < NPH_MESH_RENDERER_MATERIALS && settled; ++s) {
             settled = render_asset_settled(&sr->assets, r->materials[s]);
         }
@@ -1594,6 +1628,42 @@ NphResult nph_scene_renderer_material_set(NphSceneRenderer *sr, NphGuid guid,
         return NPH_RESULT_NOT_FOUND;
     }
     return render_assets_material_set(&sr->assets, index, header, uv);
+}
+
+NPH_STATIC_ASSERT(NPH_SCENE_MATERIAL_NONE == RENDER_ASSET_NONE,
+                  "a host's material reference is a cache index");
+
+u32 nph_scene_renderer_material_acquire(NphSceneRenderer *sr, NphGuid guid)
+{
+    NPH_ASSERT(sr != NULL);
+    return render_assets_acquire(&sr->assets, guid, RENDER_ASSET_MATERIAL);
+}
+
+void nph_scene_renderer_material_release(NphSceneRenderer *sr, u32 ref)
+{
+    NPH_ASSERT(sr != NULL);
+    render_assets_release(&sr->assets, ref);
+}
+
+NphSceneMaterialState nph_scene_renderer_material_state(const NphSceneRenderer *sr, u32 ref,
+                                                        NphRenderMaterial *out_material)
+{
+    NPH_ASSERT(sr != NULL && out_material != NULL);
+    *out_material = NPH_RENDER_MATERIAL_NULL;
+    const RenderAsset *a = render_asset(&sr->assets, ref);
+    if (a == NULL || a->state == RENDER_ASSET_FREE || a->kind != (u32)RENDER_ASSET_MATERIAL) {
+        return NPH_SCENE_MATERIAL_FAILED;
+    }
+    if (a->state == RENDER_ASSET_READY) {
+        *out_material = a->material; // drawable while a stale one waits to be acquired anew
+    }
+    if (a->forgotten != 0) {
+        return NPH_SCENE_MATERIAL_STALE;
+    }
+    if (a->state == RENDER_ASSET_READY) {
+        return NPH_SCENE_MATERIAL_READY;
+    }
+    return a->state == RENDER_ASSET_FAILED ? NPH_SCENE_MATERIAL_FAILED : NPH_SCENE_MATERIAL_LOADING;
 }
 
 bool nph_scene_renderer_set_hidden(NphSceneRenderer *sr, NphEntity entity, bool hidden)

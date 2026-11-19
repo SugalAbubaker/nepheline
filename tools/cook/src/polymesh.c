@@ -7,6 +7,7 @@
 #include <nepheline/math/scalar.h>
 #include <nepheline/platform/file.h>
 
+#include <cook/material.h>
 #include <cook/polymesh.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,6 +15,9 @@
 // UV coordinates beyond this are refused: far past any tiling a material
 // wants.
 #define MAX_UV 1e6F
+
+NPH_STATIC_ASSERT(COOK_POLYMESH_MATERIAL_KEY_MAX == COOK_MATERIAL_IMAGE_MAX,
+                  "a slot holds any key cook_material_key_valid takes");
 
 // The longest path cook_polymesh_save takes (its ".part" included).
 #define SAVE_PATH_MAX 4096U
@@ -54,6 +58,7 @@ void cook_polymesh_clear(CookPolyMesh *m)
     NPH_ARRAY_CLEAR(&m->faces);
     NPH_ARRAY_CLEAR(&m->corners);
     NPH_ARRAY_CLEAR(&m->uvs);
+    memset(m->materials, 0, sizeof m->materials);
 }
 
 NphResult cook_polymesh_copy(const CookPolyMesh *src, NphAllocator *alloc, CookPolyMesh *out)
@@ -61,6 +66,7 @@ NphResult cook_polymesh_copy(const CookPolyMesh *src, NphAllocator *alloc, CookP
     NPH_ASSERT(src != NULL && out != NULL);
     cook_polymesh_init(out, alloc);
     out->smoothing = src->smoothing;
+    memcpy(out->materials, src->materials, sizeof out->materials);
     NphResult r = NPH_RESULT_OK;
     if (src->positions.len != 0U) {
         r = NPH_ARRAY_PUSH_N(&out->positions, src->positions.data, src->positions.len);
@@ -169,7 +175,24 @@ NphResult cook_polymesh_validate(const CookPolyMesh *m)
             return NPH_RESULT_CORRUPT;
         }
     }
+    for (u32 s = 0; s < COOK_POLYMESH_MATERIALS; ++s) {
+        const char *key = m->materials[s];
+        const void *end = memchr(key, '\0', COOK_POLYMESH_MATERIAL_KEY_MAX);
+        if (end == NULL || (key[0] != '\0' && !cook_material_key_valid(nph_str_from_cstr(key)))) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
     return NPH_RESULT_OK;
+}
+
+u32 cook_polymesh_material_count(const CookPolyMesh *m)
+{
+    NPH_ASSERT(m != NULL);
+    u32 n = 0U;
+    for (u32 s = 0; s < COOK_POLYMESH_MATERIALS; ++s) {
+        n = m->materials[s][0] != '\0' ? s + 1U : n;
+    }
+    return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,8 +269,26 @@ static NphResult read_document(CookPolyMesh *m, const NphJsonValue *root)
     if (nph_json_as_i64(nph_json_object_get(root, NPH_STR("nmesh")), &version) != NPH_RESULT_OK) {
         return NPH_RESULT_PARSE_ERROR;
     }
-    if (version != (i64)COOK_POLYMESH_VERSION) {
+    if (version < (i64)COOK_POLYMESH_OLDEST_VERSION || version > (i64)COOK_POLYMESH_VERSION) {
         return NPH_RESULT_VERSION_MISMATCH;
+    }
+    // The slots' materials (version 2): each a material's key or "", no more than the slots.
+    const NphJsonValue *materials = nph_json_object_get(root, NPH_STR("materials"));
+    if (materials != NULL && version >= 2) {
+        if (materials->type != NPH_JSON_ARRAY || materials->count > COOK_POLYMESH_MATERIALS) {
+            return NPH_RESULT_PARSE_ERROR;
+        }
+        u32 s = 0U;
+        for (const NphJsonValue *e = materials->first_child; e != NULL; e = e->next, ++s) {
+            if (e->type != NPH_JSON_STRING ||
+                (e->string.len != 0U && !cook_material_key_valid(e->string))) {
+                return NPH_RESULT_PARSE_ERROR;
+            }
+            if (e->string.len != 0U) { // "" may have no bytes to copy from
+                memcpy(m->materials[s], e->string.data, (size_t)e->string.len);
+            }
+            m->materials[s][e->string.len] = '\0';
+        }
     }
     const NphJsonValue *smoothing = nph_json_object_get(root, NPH_STR("smoothing"));
     if (smoothing != NULL) {
@@ -325,6 +366,15 @@ static NphResult write_document(const CookPolyMesh *m, NphJsonWriter *w)
     NPH_TRY(nph_json_writer_i64(w, (i64)COOK_POLYMESH_VERSION));
     NPH_TRY(nph_json_writer_key(w, NPH_STR("smoothing")));
     NPH_TRY(nph_json_writer_f32_shortest(w, m->smoothing));
+    const u32 materials = cook_polymesh_material_count(m);
+    if (materials != 0U) {
+        NPH_TRY(nph_json_writer_key(w, NPH_STR("materials")));
+        NPH_TRY(nph_json_writer_begin_array_inline(w));
+        for (u32 s = 0; s < materials; ++s) {
+            NPH_TRY(nph_json_writer_str(w, nph_str_from_cstr(m->materials[s])));
+        }
+        NPH_TRY(nph_json_writer_end_array(w));
+    }
     NPH_TRY(nph_json_writer_key(w, NPH_STR("positions")));
     NPH_TRY(nph_json_writer_begin_array(w));
     for (u32 i = 0; i < m->positions.len; ++i) {

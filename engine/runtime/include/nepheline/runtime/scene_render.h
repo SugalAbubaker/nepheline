@@ -25,7 +25,10 @@
 // when the last entity using them goes. An entity waits, without an
 // instance, until its mesh and materials are ready; a mesh that fails to
 // load leaves the entity undrawn (counted, logged once per asset), and a
-// material that fails draws with the default material. A MeshRenderer
+// material that fails draws with the default material. A slot the
+// MeshRenderer names no material for draws the one the mesh names for it,
+// if any (asset/mesh.h SLMT, an editable mesh's slots; ADR-0105), held by
+// the entity as its own. A MeshRenderer
 // that names no mesh draws nothing and is not a failure. A frame never
 // waits for a load (§10.5 "Streaming must never hitch a frame") unless
 // the caller asks (nph_scene_renderer_wait).
@@ -260,6 +263,36 @@ u32 nph_scene_renderer_reload(NphSceneRenderer *sr, NphGuid guid);
 NPH_MUST_USE NphResult nph_scene_renderer_material_set(NphSceneRenderer *sr, NphGuid guid,
                                                        const NphMaterialHeader *header,
                                                        const NphMaterialUvTransform *uv);
+
+// ---------------------------------------------------------------------------
+// Materials the host draws with (ADR-0105)
+// ---------------------------------------------------------------------------
+
+#define NPH_SCENE_MATERIAL_NONE NPH_U32_MAX
+
+typedef enum NphSceneMaterialState {
+    NPH_SCENE_MATERIAL_LOADING = 0, // it and its textures are loading
+    NPH_SCENE_MATERIAL_READY,       // drawn as its render material
+    NPH_SCENE_MATERIAL_FAILED,      // it did not load: draw the default material
+    // Its asset was replaced by one that loads anew (a first cook after failing, a reload that
+    // could not be made in place; nph_scene_renderer_reload): release it and acquire the GUID
+    // again for the new one.
+    NPH_SCENE_MATERIAL_STALE,
+} NphSceneMaterialState;
+
+// A reference to the material with `guid` for the host's own instances (the editor's preview of
+// a mesh being edited): the scene renderer's own entry for it, which its entities' instances
+// draw, loading as theirs do, with each sync, and changing as theirs do (set, and loaded again in
+// place). NPH_SCENE_MATERIAL_NONE for a null GUID, a GUID it holds as another kind of asset, or
+// a full cache (logged). Each reference is released once, before the scene renderer is
+// destroyed; releasing NPH_SCENE_MATERIAL_NONE does nothing.
+u32 nph_scene_renderer_material_acquire(NphSceneRenderer *sr, NphGuid guid);
+void nph_scene_renderer_material_release(NphSceneRenderer *sr, u32 ref);
+
+// Where the material of `ref` stands, and in `out_material` its render material when it is ready
+// (a null handle otherwise). NPH_SCENE_MATERIAL_NONE is FAILED.
+NphSceneMaterialState nph_scene_renderer_material_state(const NphSceneRenderer *sr, u32 ref,
+                                                        NphRenderMaterial *out_material);
 
 // ---------------------------------------------------------------------------
 // Importing cooked scenes

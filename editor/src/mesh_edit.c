@@ -9,6 +9,11 @@
 //   - Vertices or faces are selected by clicking (Ctrl adds or removes), and
 //     the gizmo moves, rotates, and scales them about their centre in the
 //     entity's space. Faces extrude as one region.
+//   - A material dropped on a face gives the face (with the selected faces,
+//     when it is one of them) a slot that names it (ADR-0105). The preview
+//     draws each slot's material: the entity's own, else the one the mesh
+//     names, as the scene renderer holds them, so they follow the material
+//     panel's changes and their cooks.
 //   - Each change is a step of the editing's own history (a copy of the mesh
 //     before it), undone and redone with the usual keys while editing.
 //   - Ending saves the source and cooks it again on the import thread. The
@@ -25,6 +30,7 @@
 #include "editor_internal.h"
 
 #include <cook/cooker.h>
+#include <cook/material.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -167,8 +173,81 @@ static NphRenderTransform render_transform_of(const NphWorldTransform *wt)
     return t;
 }
 
-// The mesh as edited, triangulated as the cooker will (cook/polymesh.h),
-// drawn with the default material.
+// The material table the preview draws as of now (ADR-0105): for each slot, the entity's own,
+// else the one the mesh names, as the scene renderer holds it (the default material while it
+// loads, or where none is named or it failed). A reference is taken anew where the GUID changed
+// or the material was replaced by a new asset (its first cook). How many slots, up to the last
+// that draws a material of its own.
+static u32 preview_table(Editor *ed, NphRenderMaterial table[COOK_POLYMESH_MATERIALS])
+{
+    EditorMeshEdit *me = &ed->mesh_edit;
+    NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
+    const NphMeshRenderer *mr =
+        (const NphMeshRenderer *)nph_world_get(nph_engine_edit_world(ed->engine), me->entity,
+                                               nph_engine_components(ed->engine)->mesh_renderer);
+    u32 used = 0U;
+    for (u32 s = 0; s < COOK_POLYMESH_MATERIALS; ++s) {
+        table[s] = NPH_RENDER_MATERIAL_NULL;
+        if (sr == NULL) {
+            continue;
+        }
+        NphGuid want = mr != NULL ? nph_mesh_renderer_material(mr, s) : NPH_GUID_NULL;
+        if (nph_guid_is_null(want) && me->mesh.materials[s][0] != '\0') {
+            want = cooker_asset_guid(me->mesh.materials[s], "material");
+        }
+        const NphSceneMaterialState st =
+            nph_scene_renderer_material_state(sr, me->preview_refs[s], &table[s]);
+        if (!nph_guid_equals(want, me->preview_guids[s]) || st == NPH_SCENE_MATERIAL_STALE) {
+            // The new reference first: a material held before and after stays loaded.
+            const u32 next = nph_scene_renderer_material_acquire(sr, want);
+            nph_scene_renderer_material_release(sr, me->preview_refs[s]);
+            me->preview_refs[s] = next;
+            me->preview_guids[s] = want;
+            (void)nph_scene_renderer_material_state(sr, next, &table[s]);
+        }
+        used = table[s].value != 0U ? s + 1U : used;
+    }
+    return used;
+}
+
+// The preview's instance made again, of its mesh, with `used` slots of `table`.
+static NphResult make_preview_instance(Editor *ed, const NphRenderMaterial *table, u32 used)
+{
+    EditorMeshEdit *me = &ed->mesh_edit;
+    NphRenderer *r = nph_engine_renderer(ed->engine);
+    if (nph_render_instance_is_valid(r, me->preview_instance)) {
+        nph_render_instance_destroy(r, me->preview_instance);
+    }
+    me->preview_instance = NPH_RENDER_INSTANCE_NULL;
+    // Kept even when the instance is refused: logged once, not tried again every frame.
+    memcpy(me->preview_drawn, table, sizeof me->preview_drawn);
+    NphRenderInstanceDesc d;
+    memset(&d, 0, sizeof d);
+    d.mesh = me->preview;
+    d.materials = table;
+    d.material_count = used;
+    const NphWorldTransform wt = entity_transform(ed);
+    d.transform = render_transform_of(&wt);
+    return nph_render_instance_create(r, &d, &me->preview_instance);
+}
+
+// Lets go of the preview's materials.
+static void release_preview_materials(Editor *ed)
+{
+    EditorMeshEdit *me = &ed->mesh_edit;
+    NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
+    for (u32 s = 0; s < COOK_POLYMESH_MATERIALS; ++s) {
+        if (sr != NULL) {
+            nph_scene_renderer_material_release(sr, me->preview_refs[s]);
+        }
+        me->preview_refs[s] = NPH_SCENE_MATERIAL_NONE;
+        me->preview_guids[s] = NPH_GUID_NULL;
+        me->preview_drawn[s] = NPH_RENDER_MATERIAL_NULL;
+    }
+}
+
+// The mesh as edited, triangulated as the cooker will (cook/polymesh.h): a
+// submesh a slot, each drawn with its slot's material (preview_table).
 static NphResult rebuild_preview(Editor *ed)
 {
     EditorMeshEdit *me = &ed->mesh_edit;
@@ -205,9 +284,21 @@ static NphResult rebuild_preview(Editor *ed)
     }
     NphRenderMesh created = NPH_RENDER_MESH_NULL;
     if (res == NPH_RESULT_OK) {
-        NphRenderSubmesh sub;
+        NphRenderSubmesh whole;
         NphRenderMeshDesc desc;
-        nph_render_mesh_data_desc(&data, "mesh edit", &sub, &desc);
+        nph_render_mesh_data_desc(&data, "mesh edit", &whole, &desc);
+        // The cooker's submeshes, one a slot in use: the indices are the mesh's, in order.
+        NphRenderSubmesh subs[COOK_POLYMESH_MATERIALS];
+        NPH_ASSERT(mesh.submeshes.len <= COOK_POLYMESH_MATERIALS);
+        for (u32 i = 0; i < mesh.submeshes.len; ++i) {
+            subs[i].index_offset = mesh.submeshes.data[i].index_offset;
+            subs[i].index_count = mesh.submeshes.data[i].index_count;
+            subs[i].material_slot = mesh.submeshes.data[i].material_slot;
+        }
+        if (mesh.submeshes.len != 0U) {
+            desc.submeshes = subs;
+            desc.submesh_count = mesh.submeshes.len;
+        }
         res = nph_render_mesh_create(r, &desc, &created);
         nph_render_mesh_data_free(&data);
     }
@@ -215,12 +306,9 @@ static NphResult rebuild_preview(Editor *ed)
         // The instance moves to the new mesh: a new one, the old pair gone.
         drop_preview(ed);
         me->preview = created;
-        NphRenderInstanceDesc d;
-        memset(&d, 0, sizeof d);
-        d.mesh = created;
-        const NphWorldTransform wt = entity_transform(ed);
-        d.transform = render_transform_of(&wt);
-        res = nph_render_instance_create(r, &d, &me->preview_instance);
+        NphRenderMaterial table[COOK_POLYMESH_MATERIALS];
+        const u32 used = preview_table(ed, table);
+        res = make_preview_instance(ed, table, used);
     }
     if (v != NULL) {
         NPH_FREE_ARRAY(ed->alloc, NphRenderVertexInput, v, count);
@@ -237,6 +325,7 @@ static void hand_back(Editor *ed)
 {
     EditorMeshEdit *me = &ed->mesh_edit;
     drop_preview(ed);
+    release_preview_materials(ed);
     NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
     if (sr != NULL) {
         (void)nph_scene_renderer_set_hidden(sr, me->entity, false);
@@ -409,6 +498,19 @@ void editor_mesh_edit_update(Editor *ed)
         NPH_IGNORE_RESULT(rebuild_preview(ed)); // logged
     }
     NphRenderer *r = nph_engine_renderer(ed->engine);
+    // The materials as they load, as the entity's own change, and as they are cooked anew
+    // (ADR-0105): the instance is made again when what it draws changed.
+    if (me->active && r != NULL && nph_render_mesh_is_valid(r, me->preview)) {
+        NphRenderMaterial table[COOK_POLYMESH_MATERIALS];
+        const u32 used = preview_table(ed, table);
+        if (memcmp(table, me->preview_drawn, sizeof table) != 0) {
+            const NphResult res = make_preview_instance(ed, table, used);
+            if (res != NPH_RESULT_OK) {
+                NPH_LOG_ERROR(&LOG_EDITOR, "drawing the mesh being edited: %s",
+                              nph_result_string(res));
+            }
+        }
+    }
     if (r != NULL && nph_render_instance_is_valid(r, me->preview_instance)) {
         const NphWorldTransform wt = entity_transform(ed);
         const NphRenderTransform t = render_transform_of(&wt);
@@ -447,6 +549,9 @@ void editor_mesh_edit_init(Editor *ed)
 {
     EditorMeshEdit *me = &ed->mesh_edit;
     memset(me, 0, sizeof *me);
+    for (u32 s = 0; s < COOK_POLYMESH_MATERIALS; ++s) {
+        me->preview_refs[s] = NPH_SCENE_MATERIAL_NONE;
+    }
     cook_polymesh_init(&me->mesh, ed->alloc);
     NPH_ARRAY_INIT(&me->undo, ed->alloc);
     NPH_ARRAY_INIT(&me->redo, ed->alloc);
@@ -553,6 +658,90 @@ NphResult editor_mesh_edit_extrude(Editor *ed, f32 distance)
     }
     NPH_ARRAY_FREE(&faces);
     return r;
+}
+
+// Whether the entity's MeshRenderer names a material of its own for slot `s`, which then draws
+// in place of the mesh's.
+static bool slot_overridden(const Editor *ed, u32 s)
+{
+    const NphMeshRenderer *mr = (const NphMeshRenderer *)nph_world_get(
+        nph_engine_edit_world(ed->engine), ed->mesh_edit.entity,
+        nph_engine_components(ed->engine)->mesh_renderer);
+    return mr != NULL && !nph_guid_is_null(nph_mesh_renderer_material(mr, s));
+}
+
+NphResult editor_mesh_edit_face_material(Editor *ed, u32 face, const char *key, u32 *out_slot)
+{
+    NPH_ASSERT(ed != NULL && key != NULL);
+    EditorMeshEdit *me = &ed->mesh_edit;
+    if (!me->active) {
+        return NPH_RESULT_INVALID_STATE;
+    }
+    if (face >= me->mesh.faces.len || !cook_material_key_valid(nph_str_from_cstr(key))) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    // The faces it goes to: this one, or the selection it is part of.
+    const bool selection =
+        me->mode == EDITOR_MESH_FACES && face < me->selected.len && me->selected.data[face] != 0U;
+    // The faces that keep each slot after the change.
+    u32 kept[COOK_POLYMESH_MATERIALS];
+    memset(kept, 0, sizeof kept);
+    for (u32 f = 0; f < me->mesh.faces.len; ++f) {
+        const bool changes = selection ? me->selected.data[f] != 0U : f == face;
+        if (!changes) {
+            kept[me->mesh.faces.data[f].material] += 1U;
+        }
+    }
+    // Where the faces go, best first: a slot that names it, then one no other face keeps (named
+    // for it), each first among those the entity leaves to the mesh, so that the faces draw it
+    // on this entity too.
+    u32 slot = NPH_U32_MAX;
+    for (u32 pass = 0; pass < 4U && slot == NPH_U32_MAX; ++pass) {
+        const bool unkept = (pass & 1U) != 0U;
+        const bool any = pass >= 2U;
+        for (u32 s = 0; s < COOK_POLYMESH_MATERIALS && slot == NPH_U32_MAX; ++s) {
+            const bool fits = unkept ? kept[s] == 0U : strcmp(me->mesh.materials[s], key) == 0;
+            if (fits && (any || !slot_overridden(ed, s))) {
+                slot = s;
+            }
+        }
+    }
+    if (slot == NPH_U32_MAX) {
+        NPH_LOG_WARN(&LOG_EDITOR, "%s: every material slot is kept by other faces", me->name);
+        return NPH_RESULT_FULL;
+    }
+    // Nothing to do when the faces already draw it from that slot.
+    bool same = strcmp(me->mesh.materials[slot], key) == 0;
+    for (u32 f = 0; f < me->mesh.faces.len && same; ++f) {
+        const bool changes = selection ? me->selected.data[f] != 0U : f == face;
+        same = !changes || me->mesh.faces.data[f].material == slot;
+    }
+    if (!same) {
+        NPH_TRY(push_undo(me, ed->alloc));
+        u32 count = 0U;
+        for (u32 f = 0; f < me->mesh.faces.len; ++f) {
+            if (selection ? me->selected.data[f] != 0U : f == face) {
+                me->mesh.faces.data[f].material = slot;
+                ++count;
+            }
+        }
+        (void)snprintf(me->mesh.materials[slot], sizeof me->mesh.materials[slot], "%s", key);
+        changed(me);
+        NPH_LOG_INFO(&LOG_EDITOR, "%s: %s on %u face%s (slot %u)", me->name, key, count,
+                     count == 1U ? "" : "s", slot);
+        // Its asset, for the preview now and the cooked mesh's entities later.
+        if (!editor_project_is_cooked(ed->project, key)) {
+            u32 id = 0U;
+            const NphResult c = editor_project_cook(ed->project, key, false, 0U, &id);
+            if (c != NPH_RESULT_OK) {
+                NPH_LOG_WARN(&LOG_EDITOR, "cooking %s: %s", key, nph_result_string(c));
+            }
+        }
+    }
+    if (out_slot != NULL) {
+        *out_slot = slot;
+    }
+    return NPH_RESULT_OK;
 }
 
 // The distance an extrusion goes when the editor picks it: a quarter of
@@ -689,31 +878,13 @@ static bool ray_triangle(NphVec3 o, NphVec3 d, NphVec3 a, NphVec3 b, NphVec3 c, 
     return true;
 }
 
-// The element under (mx, my): the vertex nearest on screen within
-// PICK_PIXELS, or the face the ray meets first.
-static bool pick_element(Editor *ed, const EditorView *v, f32 mx, f32 my, u32 *out)
+bool editor_mesh_edit_pick_face(Editor *ed, const EditorView *v, f32 mx, f32 my, u32 *out)
 {
     const EditorMeshEdit *me = &ed->mesh_edit;
-    const NphWorldTransform wt = entity_transform(ed);
-    if (me->mode == EDITOR_MESH_VERTICES) {
-        f32 best = PICK_PIXELS * PICK_PIXELS;
-        bool any = false;
-        for (u32 i = 0; i < me->mesh.positions.len; ++i) {
-            f32 sx = 0.0F;
-            f32 sy = 0.0F;
-            if (!editor_view_project(v, nph_world_transform_point(&wt, me->mesh.positions.data[i]),
-                                     &sx, &sy)) {
-                continue;
-            }
-            const f32 d2 = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
-            if (d2 <= best) {
-                best = d2;
-                *out = i;
-                any = true;
-            }
-        }
-        return any;
+    if (!me->active) {
+        return false;
     }
+    const NphWorldTransform wt = entity_transform(ed);
     // The ray in the entity's space.
     NphMat3 inverse;
     if (!nph_mat3_inverse(nph_world_transform_linear(&wt), &inverse)) {
@@ -740,6 +911,34 @@ static bool pick_element(Editor *ed, const EditorView *v, f32 mx, f32 my, u32 *o
                 *out = f;
                 any = true;
             }
+        }
+    }
+    return any;
+}
+
+// The element under (mx, my): the vertex nearest on screen within
+// PICK_PIXELS, or the face the ray meets first.
+static bool pick_element(Editor *ed, const EditorView *v, f32 mx, f32 my, u32 *out)
+{
+    const EditorMeshEdit *me = &ed->mesh_edit;
+    if (me->mode != EDITOR_MESH_VERTICES) {
+        return editor_mesh_edit_pick_face(ed, v, mx, my, out);
+    }
+    const NphWorldTransform wt = entity_transform(ed);
+    f32 best = PICK_PIXELS * PICK_PIXELS;
+    bool any = false;
+    for (u32 i = 0; i < me->mesh.positions.len; ++i) {
+        f32 sx = 0.0F;
+        f32 sy = 0.0F;
+        if (!editor_view_project(v, nph_world_transform_point(&wt, me->mesh.positions.data[i]), &sx,
+                                 &sy)) {
+            continue;
+        }
+        const f32 d2 = (sx - mx) * (sx - mx) + (sy - my) * (sy - my);
+        if (d2 <= best) {
+            best = d2;
+            *out = i;
+            any = true;
         }
     }
     return any;
@@ -867,7 +1066,8 @@ void editor_mesh_edit_toolbar(Editor *ed)
         editor_mesh_edit_end(ed);
     }
     igSameLine(0.0F, 16.0F);
-    igTextDisabled("1 2: vertices faces  Ctrl+E: extrude  Ctrl+A: all  Tab: done");
+    igTextDisabled("1 2: vertices faces  Ctrl+E: extrude  Ctrl+A: all  Tab: done  "
+                   "materials: drop on a face");
 }
 
 void editor_mesh_edit_extrude_selection(Editor *ed)
