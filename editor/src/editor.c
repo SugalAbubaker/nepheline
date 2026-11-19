@@ -357,6 +357,7 @@ static void dockspace(Editor *ed)
         igDockBuilderDockWindow(EDITOR_WINDOW_OUTLINER, left);
         igDockBuilderDockWindow(EDITOR_WINDOW_INSPECTOR, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_MATERIAL, right);
+        igDockBuilderDockWindow(EDITOR_WINDOW_IMPORT, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_STATS, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_CONSOLE, bottom);
         igDockBuilderDockWindow(EDITOR_WINDOW_ASSETS, bottom);
@@ -454,6 +455,7 @@ static void main_menu(Editor *ed)
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_CONSOLE, NULL, &ed->show.console, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_ASSETS, NULL, &ed->show.assets, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_MATERIAL, NULL, &ed->show.material, true);
+        (void)igMenuItem_BoolPtr(EDITOR_WINDOW_IMPORT, NULL, &ed->show.import_settings, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_PROFILER, NULL, &ed->show.profiler, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_STATS, NULL, &ed->show.stats, true);
         igSeparator();
@@ -701,6 +703,9 @@ static void hook_sync(NphEngine *e, void *user)
         editor_panel_material(ed);
     } else {
         ed->material.focused = false;
+    }
+    if (ed->show.import_settings) {
+        editor_panel_import_settings(ed);
     }
     if (ed->show.console) {
         editor_panel_console(ed);
@@ -1053,6 +1058,7 @@ void editor_detach(Editor *ed)
     editor_mesh_edit_free(ed); // unsaved changes are dropped
     editor_mesh_edit_init(ed);
     editor_material_free(ed); // a change being made is written: the project is still there
+    editor_import_settings_close(ed);
     editor_material_init(ed);
     editor_material_previews_free(ed); // the pictures being made first: they read the project
     editor_material_previews_init(ed);

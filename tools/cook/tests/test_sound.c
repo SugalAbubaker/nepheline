@@ -6,6 +6,7 @@
 #include <nepheline/audio/adpcm.h>
 #include <nepheline/audio/lossless.h>
 #include <nepheline/core/alloc_debug.h>
+#include <nepheline/math/scalar.h>
 
 #include "test_cook_support.h"
 
@@ -254,6 +255,51 @@ NTEST(cook_sound, settings_default_and_parse)
     NTEST_EXPECT_EQ_INT(s.stream, before.stream);
     NTEST_EXPECT_TRUE(s.stream_seconds == before.stream_seconds);
     NTEST_EXPECT_EQ_INT(s.exhaustive, before.exhaustive);
+}
+
+NTEST(cook_sound, settings_write_what_parses_back)
+{
+    // Every key away from its default, and none: each writes what reads back the same.
+    CookSoundSettings s;
+    cook_sound_settings_default(&s);
+    s.codec = COOK_SOUND_CODEC_LOSSLESS;
+    s.stream = COOK_SOUND_STREAM_NEVER;
+    s.stream_seconds = 2.75F;
+    s.exhaustive = 1;
+    for (u32 round = 0U; round < 2U; ++round) {
+        NphStrBuilder sb;
+        nph_sb_init(&sb, nph_allocator_system());
+        NTEST_ASSERT_EQ_INT(cook_sound_settings_write(&s, &sb), NPH_RESULT_OK);
+        CookSoundSettings back;
+        cook_sound_settings_default(&back);
+        NTEST_ASSERT_EQ_INT(ts_parse(nph_sb_cstr(&sb), &back), NPH_RESULT_OK);
+        NTEST_EXPECT_TRUE(cook_sound_settings_equal(&back, &s));
+        if (round == 1U) {
+            NTEST_EXPECT_EQ_STR(nph_sb_cstr(&sb), "{}\n"); // the defaults: no key at all
+        }
+        nph_sb_free(&sb);
+        cook_sound_settings_default(&s);
+    }
+    // A threshold of 0 is the default's.
+    CookSoundSettings zero;
+    cook_sound_settings_default(&zero);
+    zero.stream_seconds = 0.0F;
+    NTEST_EXPECT_TRUE(cook_sound_settings_equal(&zero, &s));
+    zero.exhaustive = 1;
+    NTEST_EXPECT_FALSE(cook_sound_settings_equal(&zero, &s));
+    // Out of range: refused.
+    NphStrBuilder sb;
+    nph_sb_init(&sb, nph_allocator_system());
+    const i32 past = (i32)COOK_SOUND_CODEC_ADPCM + 1; // no codec: written over the field, not cast
+    NTEST_ASSERT_EQ_UINT(sizeof s.codec, sizeof past);
+    memcpy(&s.codec, &past, sizeof past);
+    NTEST_EXPECT_EQ_INT(cook_sound_settings_write(&s, &sb), NPH_RESULT_CORRUPT);
+    cook_sound_settings_default(&s);
+    s.stream_seconds = -1.0F;
+    NTEST_EXPECT_EQ_INT(cook_sound_settings_write(&s, &sb), NPH_RESULT_CORRUPT);
+    s.stream_seconds = NPH_F32_INFINITY;
+    NTEST_EXPECT_EQ_INT(cook_sound_settings_write(&s, &sb), NPH_RESULT_CORRUPT);
+    nph_sb_free(&sb);
 }
 
 // ---------------------------------------------------------------------------

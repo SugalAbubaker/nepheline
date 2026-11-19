@@ -843,7 +843,11 @@ it:
 Its bytes join the source's content hash, so editing it recooks the
 sound; an unknown key or value fails the source rather than being ignored.
 The defaults come from `nph_cook`'s `--sound-codec`, `--sound-stream`, and
-`--stream-seconds` (the settings file's own words).
+`--stream-seconds` (the settings file's own words). `cook_sound_settings_write`
+writes settings back as this JSON, each key only where it is not the default,
+so what reads over the defaults is the same settings (the editor's Import
+Settings window saves them with `cook_sound_settings_save`; the sound fuzz
+target checks the round trip for every input).
 
 ## Fuzzing
 

@@ -45,6 +45,9 @@
 
 #include <cook/material.h>
 #include <cook/polymesh.h>
+#include <cook/scene_import.h>
+#include <cook/sound.h>
+#include <cook/texture_import.h>
 
 typedef struct Editor Editor;
 
@@ -284,3 +287,48 @@ NPH_MUST_USE NphResult editor_material_assign(Editor *ed, NphEntity e, u32 slot,
 // no entity (or face of the mesh being edited) is there, or (x, y) is not over
 // the image; assign's errors, or the face's.
 NPH_MUST_USE NphResult editor_viewport_drop_material(Editor *ed, const char *key, f32 x, f32 y);
+
+// ---------------------------------------------------------------------------
+// Import settings (docs/editor.md "Import settings"; ADR-0107)
+// ---------------------------------------------------------------------------
+
+// Opens the import settings of the source `key` (a scene, an image, or a sound, relative to the
+// sources) in the Import Settings window and brings it forward: its settings file's
+// (<source>.import.json), or the cooker's when it has none. A file that does not read shows the
+// cooker's settings, with why (editor_import_settings_error), and Save replaces it. Changes not
+// saved in the one shown are dropped. NPH_RESULT_INVALID_STATE without a project;
+// NPH_RESULT_INVALID_ARGUMENT for a key of another kind of source; NPH_RESULT_NOT_FOUND for a
+// source that is not there.
+NPH_MUST_USE NphResult editor_import_settings_open(Editor *ed, const char *key);
+
+// The source the window shows, "" when none; why its file did not read or did not save, "" when
+// nothing is wrong; whether the settings shown are not what its file holds.
+const char *editor_import_settings_key(const Editor *ed);
+const char *editor_import_settings_error(const Editor *ed);
+bool editor_import_settings_changed(const Editor *ed);
+
+// The settings the window shows, by its source's kind; NULL when it shows another kind.
+const CookSceneImport *editor_import_settings_scene(const Editor *ed);
+const CookTextureImport *editor_import_settings_texture(const Editor *ed);
+const CookSoundSettings *editor_import_settings_sound(const Editor *ed);
+
+// Changes the settings the window shows (nothing is written). NPH_RESULT_INVALID_STATE when it
+// shows another kind of source, or none; NPH_RESULT_INVALID_ARGUMENT for settings out of range.
+NPH_MUST_USE NphResult editor_import_settings_change_scene(Editor *ed, const CookSceneImport *s);
+NPH_MUST_USE NphResult editor_import_settings_change_texture(Editor *ed,
+                                                             const CookTextureImport *s);
+NPH_MUST_USE NphResult editor_import_settings_change_sound(Editor *ed, const CookSoundSettings *s);
+
+// Writes the settings shown to the source's settings file and cooks the source again by them.
+// NPH_RESULT_INVALID_STATE when no source is shown; the file's errors (logged, and shown).
+NPH_MUST_USE NphResult editor_import_settings_save(Editor *ed);
+
+// Removes the source's settings file, so it cooks again by the cooker's settings, and shows
+// those. NPH_RESULT_INVALID_STATE when no source is shown; the file system's errors.
+NPH_MUST_USE NphResult editor_import_settings_use_cooker(Editor *ed);
+
+// Shows what the source's settings file holds again, dropping changes not saved.
+void editor_import_settings_revert(Editor *ed);
+
+// Closes the window's source; changes not saved are dropped. Safe when none is shown.
+void editor_import_settings_close(Editor *ed);
