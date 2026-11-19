@@ -405,6 +405,39 @@ type version 3, [asset.md](asset.md)) as `KHR_texture_transform`'s do: scale, th
 offset, the glTF importer's composition. An untiled material has none. It is for the renderer to
 apply to every texture coordinate of the material (ADR-0105).
 
+## Material previews (`preview.h`)
+
+The editor's asset browser shows each material as a lit sphere (ADR-0105 decision 7), drawn on
+the CPU from the material's source and its images, independent of the renderer. Its lighting
+matches the renderer's only roughly.
+- **The images.** Each slot's image is decoded, its colour data brought to linear light (base
+  colour and emissive), and reduced in one pass to at most 256 texels a side: each texel is the
+  exact mean of the block it covers (`cook_preview_reduce`), so a large image is never copied
+  whole as floats. Its mip levels follow (`cook_image_downsample`). A normal map is renormalised
+  at each level, its green flipped first where its import settings say DirectX's convention. An
+  image that cannot be read or decoded leaves its slot empty: the sphere is drawn without it.
+- **The sphere** is seen straight on, four samples a pixel. Its texture coordinates wrap twice
+  around it, so its front shows one tile whole (`u = 1/2 + longitude / pi`,
+  `v = 1/2 - latitude / pi`). They go through the material's transform as the renderer's do,
+  and a normal map is read in the sphere's own tangent frame (the renderer turns coordinates
+  with the transform, not tangents). Each read is filtered trilinearly at the level its footprint
+  asks for (nearest where the slot asks), with the slot's wraps.
+- **The light** is a neutral studio: the renderer's sky model made grey, brighter overhead, so
+  that it tints no material. Diffuse light comes from its irradiance (SH9, the occlusion's
+  bounce), specular from its radiance in the reflected direction, blurred toward its irradiance
+  with roughness, by the split sum with the renderer's DFG terms. A key light from above and to
+  the left adds the renderer's GGX highlight; every term is `render/reference.h`'s. The exposure
+  brings a white diffuse sphere's brightest point out of AgX (the view's default) at 0.65, short
+  of white, so that bright colours keep their hue, and the sRGB curve encodes it. An unlit
+  material shows its base colour; an emission of 1 adds half the white point's input; a masked
+  material is cut below its cutoff; a blended one leaves its alpha in the picture, which is
+  transparent outside the sphere.
+- **The cache file** is a texture asset (`asset/texture.h`: one 128 x 128 RGBA8 sRGB level,
+  LZ-coded) whose header's content hash is the key the picture was made for (`cook_preview_save`).
+  The reader (`cook_preview_read`) checks the file as the loader does, the blobs' checksums
+  included, and the picture's size and format: a picture made for another key is stale, and
+  anything else is refused. It is a fuzz target.
+
 ## The mesh pipeline (`mesh.h`)
 
 `cook_mesh_process` runs, in order:
@@ -765,6 +798,9 @@ input must never crash"):
   a header and a texture transform that `nph_material_view` takes.
 - `tests/fuzz/fuzz_texture_import.c`: images' import settings, read and
   written back to the same settings.
+- `tests/fuzz/fuzz_preview.c`: material previews' cache files, read for the
+  key their header names; one that reads must not read for another key,
+  nor from memory off its alignment.
 - The glTF target also gives every mesh's material slots an alpha test (a
   texture of 16 texels a side of the input's own bytes, the material's
   factor, cutoff and wrap modes), so the triangles for the rays alone are
@@ -845,7 +881,7 @@ are logged with everything outside printable ASCII replaced.
 
 ## Testing
 
-- `cook_tests` (132 cases): the block codecs against hand-built blocks
+- `cook_tests` (162 cases): the block codecs against hand-built blocks
   from the format descriptions (BC1's palettes among them) and against
   the line-fit bound; DDS files built byte by byte in every format read,
   against the block decoders, and the malformed and unsupported refused;
@@ -871,8 +907,15 @@ are logged with everything outside printable ASCII replaced.
   triangulation of convex, concave, star-shaped, and degenerate faces
   into their own area, normals by the smoothing angle, submeshes by
   material, the file read back and refused where it must be, extrusion
-  that keeps a mesh closed, copies); the cooker's canonical and relative
-  paths, identities, outputs, collisions, incremental decisions,
+  that keeps a mesh closed, copies, the slots' materials cooked for the
+  slots faces use); material previews (a white sphere lit short of white
+  on nothing, colour from the factors and images, metal and roughness
+  shaping the highlight, unlit and emission, mask and blend, tiling, flat
+  and tilted normal maps, the same bytes twice, block means in linear
+  light, images made from files with their levels and settings, the cache
+  file read for its key alone and refused when touched); the cooker's
+  canonical and relative paths, identities, outputs, collisions,
+  incremental decisions,
   stale-asset removal, directories, packs, and editable meshes cooked
   with the assets written reported; sounds: the plan by length and
   settings, every WAV encoding as PCM holding its samples and as lossless

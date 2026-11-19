@@ -217,6 +217,18 @@ has cooked it.
   New Material makes one there (see "Material").
 - While the import thread works, the panel shows what it is doing and how
   many requests wait.
+- **A material shows as a lit sphere** (ADR-0105 decision 7): its row is a
+  thumbnail tall, and holding the mouse over it shows the preview at its
+  full 128 pixels; the material panel shows the open material's too. A
+  preview is drawn on the CPU (docs/cook.md "Material previews") by jobs: an
+  I/O job reads the cached picture, or the material's source and images; a
+  low-priority worker job decodes, reduces and draws them; an I/O job caches
+  the picture under the cooked directory (`previews/<source>.nph`). What a
+  picture shows is keyed by the cook database: the material's content hash
+  and its textures' (`editor_project_content_key`). When the material or an
+  image of it is cooked from other content, the picture is drawn again, the
+  old one showing until then; a picture already cached for that content is
+  read, not drawn. The 256 asked for last are kept, four made at once.
 
 ### Material
 
@@ -688,11 +700,19 @@ step runs on the job system. It reads nothing the simulation writes.
   faces would want an incremental preview.
 - **The UI renderer** grows its buffers by doubling, and allocates a
   staging copy for each texture upload.
+- **Material previews** keep a table of 256 entries (about 280 KB) and the
+  studio's tables (8 KB), made the first time a preview is asked for (about
+  5 ms on the main thread, once). Each picture is a GPU image of 64 KB
+  (16 MB at most). Making one allocates on its jobs, and lets go when done:
+  the picture (64 KB), and the images' files with their decoded pixels (a
+  4096-pixel square image: its file, 64 MB decoded, 1 MB reduced). Drawing
+  one takes 15 to 20 ms of a worker in Development; a cached one, a 64 KB
+  read.
 - **Reading the clipboard** grows a buffer to the text's size.
 
 ## Testing
 
-`editor_tests` (67 tests):
+`editor_tests` (83 tests):
 - The camera's invariants, including a 64-bit pivot 10,000 km from the
   origin.
 - The view and the gizmo's math (projection and rays, axis and plane
@@ -760,6 +780,11 @@ step runs on the job system. It reads nothing the simulation writes.
     the slot that names it; the preview draws it; the edit's history undoes
     and redoes it; a full mesh and bad faces and keys are refused; ending
     saves the slots' materials, and the entity draws the cooked mesh's.
+  - A material's preview is drawn on the jobs when the browser asks for it,
+    and cached; drawn again, green after red, when the material is cooked
+    from other content; read from the cache when asked for anew. A material
+    not cooked has none, and the frames that draw it in the browser and the
+    material panel pass the validation gate.
   - **Phase 9's exit criterion** (CLAUDE.md §12): a scene is built from
     an imported scene, a move, a light, and a camera; saved; opened by a
     second editor on the same project (as after a restart), where its

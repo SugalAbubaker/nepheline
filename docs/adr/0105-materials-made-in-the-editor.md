@@ -161,3 +161,9 @@ steps 5 to 7 are the editor's. They land as four pull requests, the source and i
   renderer (`nph_scene_renderer_material_acquire`), so it follows the panel's changes and their cooks.
 - **Mesh type version 8 cooks every mesh again once**, the reference scenes' too: their next nightly run takes the
   hour that a change of the cooker's output takes there.
+- **Previews are lit by a neutral studio** (decision 7, as built): the renderer's sky model made grey, as its default
+  blue sky tinted every material, and AgX brings a white diffuse sphere out at 0.65, short of white, so that bright
+  colours keep their hue. A picture is keyed by the cook database's content hashes of the material and its
+  textures, so it is drawn again exactly when they are cooked from other content. It is cached under the cooked
+  directory as a texture asset whose reader is fuzzed. Its jobs follow the job system's rule: reading and writing
+  files on the I/O threads, decoding and drawing on a low-priority worker.

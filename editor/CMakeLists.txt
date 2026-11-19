@@ -23,6 +23,7 @@ add_library(nph_editor_core STATIC
     src/history.h
     src/imgui_c.h
     src/material_edit.c
+    src/material_preview.c
     src/mesh_edit.c
     src/panel_assets.c
     src/panel_console.c

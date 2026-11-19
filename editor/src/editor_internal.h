@@ -22,6 +22,7 @@
 #include "view.h"
 
 #include <cook/material.h>
+#include <cook/preview.h>
 
 #define EDITOR_PATH_MAX            512U
 #define EDITOR_CONSOLE_INPUT_MAX   512U
@@ -226,6 +227,33 @@ typedef struct EditorMaterialEdit {
     EditorImageKeys images;
 } EditorMaterialEdit;
 
+// Material previews (material_preview.c; ADR-0105 decision 7): a lit sphere of each material the
+// asset browser or the material panel shows, made on jobs, cached under the cooked directory.
+#define EDITOR_PREVIEWS_MAX       256U // pictures kept (64 KB of GPU memory each)
+#define EDITOR_PREVIEWS_IN_FLIGHT 4U   // made at once
+
+typedef struct EditorPreviewJob EditorPreviewJob; // material_preview.c
+
+typedef struct EditorPreview {
+    char key[EDITOR_PROJECT_PATH_MAX]; // the material's source; "" for an entry not in use
+    u64 wanted;                        // the key of the content to show (0: it is not cooked)
+    u64 checked;                       // the project's generation `wanted` was looked up at
+    u64 made;                          // the key the picture was made for (0: no picture yet)
+    u64 failed; // the key a making failed for: not tried again until the content changes
+    u64 used;   // the frame it was last asked for
+    NphGpuImage image;
+    EditorPreviewJob *job; // making it, or NULL
+} EditorPreview;
+
+typedef struct EditorPreviews {
+    CookPreviewStudio *studio; // made on first use
+    EditorPreview *items;      // EDITOR_PREVIEWS_MAX, allocated on first use
+    u64 frame;
+    u32 in_flight;
+    u32 drawn;  // pictures drawn since the editor attached
+    u32 loaded; // pictures read from the cache
+} EditorPreviews;
+
 typedef struct EditorPanels {
     bool viewport;
     bool console;
@@ -320,6 +348,7 @@ struct Editor {
     EditorAssets assets;
     EditorMeshEdit mesh_edit;
     EditorMaterialEdit material;
+    EditorPreviews previews;
     EditorAutosave autosave;
     EditorRecovery recovery;
 
@@ -471,6 +500,18 @@ void editor_material_list_images(Editor *ed);
 
 // panel_material.c
 void editor_panel_material(Editor *ed);
+
+// material_preview.c (docs/editor.md "Assets")
+void editor_material_previews_init(Editor *ed);
+// Waits for the pictures being made and lets every picture go (detach: before the project
+// closes, while the engine's jobs and device are there).
+void editor_material_previews_free(Editor *ed);
+// At the sync point: pictures made are shown, and the next asked for begun.
+void editor_material_previews_update(Editor *ed);
+// The preview of the material whose source is `key`, as a texture for the UI (0 while it has
+// none): its picture as last made, made again on jobs when the material or its images are cooked
+// from other content.
+ImTextureID editor_material_preview(Editor *ed, const char *key);
 
 // gizmo_ui.c
 // Shows the gizmo on the primary selection and drags it. True when it has

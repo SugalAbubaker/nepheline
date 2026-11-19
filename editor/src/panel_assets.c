@@ -25,6 +25,8 @@
 // The folder is listed again this often while shown, to notice files that
 // change outside the editor.
 #define RELIST_NS (2ULL * NPH_TIME_NS_PER_S)
+// A material's row in the browser: its preview, this many lines of text tall.
+#define THUMBNAIL_LINES 2.0F
 
 // ---------------------------------------------------------------------------
 // The project
@@ -846,10 +848,40 @@ void editor_panel_assets(Editor *ed)
             char label[NPH_DIR_ENTRY_NAME_MAX + 2U];
             (void)snprintf(label, sizeof label, "%s%s", e->name, e->is_directory ? "/" : "");
             const bool selected = strcmp(a->selected, e->name) == 0;
-            if (igSelectable_Bool(label, selected,
-                                  ImGuiSelectableFlags_SpanAllColumns |
-                                      ImGuiSelectableFlags_AllowDoubleClick,
-                                  ui_vec2(0.0F, 0.0F))) {
+            const ImGuiSelectableFlags select =
+                ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick;
+            bool clicked = false;
+            // A material's row is a thumbnail tall, its texts in the middle of it.
+            const bool material = e->kind == (u32)COOKER_SOURCE_MATERIAL;
+            const f32 size = THUMBNAIL_LINES * igGetTextLineHeight();
+            const f32 pad = material ? 0.5F * (size - igGetTextLineHeight()) : 0.0F;
+            if (material) {
+                // The material's preview, then its name, over the row.
+                char key[EDITOR_PROJECT_PATH_MAX];
+                const ImTextureID preview =
+                    key_of(a, e->name, key, sizeof key) ? editor_material_preview(ed, key) : 0U;
+                const ImVec2_c at = igGetCursorScreenPos();
+                clicked = igSelectable_Bool("##row", selected, select, ui_vec2(0.0F, size));
+                ImDrawList *dl = igGetWindowDrawList();
+                if (preview != 0U) {
+                    ImDrawList_AddImage(dl, ui_texture_ref(preview), at,
+                                        ui_vec2(at.x + size, at.y + size), ui_vec2(0.0F, 0.0F),
+                                        ui_vec2(1.0F, 1.0F), 0xFFFFFFFFU);
+                    if (igIsItemHovered(ImGuiHoveredFlags_DelayNormal) &&
+                        igGetDragDropPayload() == NULL && igBeginTooltip()) {
+                        igImage(ui_texture_ref(preview),
+                                ui_vec2((f32)COOK_PREVIEW_SIZE, (f32)COOK_PREVIEW_SIZE),
+                                ui_vec2(0.0F, 0.0F), ui_vec2(1.0F, 1.0F));
+                        igEndTooltip();
+                    }
+                }
+                ImDrawList_AddText_Vec2(
+                    dl, ui_vec2(at.x + size + igGetStyle()->ItemSpacing.x, at.y + pad),
+                    igGetColorU32_Col(ImGuiCol_Text, 1.0F), label, NULL);
+            } else {
+                clicked = igSelectable_Bool(label, selected, select, ui_vec2(0.0F, 0.0F));
+            }
+            if (clicked) {
                 memcpy(a->selected, e->name, sizeof a->selected);
                 if (igIsMouseDoubleClicked_Nil(ImGuiMouseButton_Left)) {
                     action = double_click_action(e, playing);
@@ -863,9 +895,11 @@ void editor_panel_assets(Editor *ed)
                 target = i;
             }
             igTableNextColumn();
+            igSetCursorPosY(igGetCursorPosY() + pad);
             igTextUnformatted(kind_name(e), NULL);
             igTableNextColumn();
             if (e->kind != (u32)COOKER_SOURCE_NONE) {
+                igSetCursorPosY(igGetCursorPosY() + pad);
                 igTextUnformatted(e->cooked ? "yes" : "no", NULL);
             }
             igPopID();

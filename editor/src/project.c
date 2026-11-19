@@ -5,6 +5,7 @@
 
 #include <nepheline/asset/vfs.h>
 #include <nepheline/core/assert.h>
+#include <nepheline/core/hash.h>
 #include <nepheline/core/hashmap.h>
 #include <nepheline/core/string.h>
 #include <nepheline/platform/file.h>
@@ -779,6 +780,25 @@ bool editor_project_is_cooked(EditorProject *p, const char *key)
     const bool cooked = snapshot_source(p->snapshot, key) != NULL;
     nph_mutex_unlock(&p->lock);
     return cooked;
+}
+
+bool editor_project_content_key(EditorProject *p, const char *key, const char *sub, u64 *out)
+{
+    NPH_ASSERT(p != NULL && key != NULL && sub != NULL && out != NULL);
+    nph_mutex_lock(&p->lock);
+    const CookDb *db = p->snapshot != NULL ? &p->snapshot->db : NULL;
+    const CookDbEntry *e =
+        db != NULL ? cook_db_find(db, nph_str_from_cstr(key), nph_str_from_cstr(sub)) : NULL;
+    if (e != NULL) {
+        u64 h = e->content_hash;
+        for (u32 i = 0; i < e->dep_count; ++i) {
+            const CookDbEntry *d = cook_db_find_guid(db, e->deps[i]);
+            h = nph_hash_combine(h, d != NULL ? d->content_hash : 0U);
+        }
+        *out = h;
+    }
+    nph_mutex_unlock(&p->lock);
+    return e != NULL;
 }
 
 u64 editor_project_generation(EditorProject *p)

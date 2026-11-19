@@ -166,6 +166,19 @@ def mesh_slot_blobs():
     return mesh_blobs() + [("SLMT", 0, 0, 16, slots, slots)]
 
 
+def preview_blobs(lz):
+    """A material preview (tools/cook/preview.h; ADR-0105): a texture of one 128x128 RGBA8 sRGB
+    level (texture.h format 4, kind 2D), its pixels stored or LZ-coded."""
+    header = struct.pack("<7I", 128, 128, 1, 1, 4, 0, 0) + bytes(36)
+    assert len(header) == 64
+    pixels = bytes((i * 7) & 0xFF for i in range(128 * 128 * 4))
+    stored = lz_literals(pixels) if lz else pixels
+    return [
+        ("HEAD", 0, 0, 16, header, header),
+        ("MIP ", 0, 1 if lz else 0, 16, pixels, stored),
+    ]
+
+
 def mesh_lod_blobs():
     """The triangle with levels of detail (mesh.h version 2): its one meshlet
     as level 0 under a root group, the smallest hierarchy there is."""
@@ -522,6 +535,9 @@ def main():
           nph_file(fourcc("MESH"), 6, mesh_levels_head_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_rays"), nph_file(fourcc("MESH"), 7, mesh_ray_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_slots"), nph_file(fourcc("MESH"), 8, mesh_slot_blobs()))
+    # The material previews' cache (tools/cook/preview.h): read for their header's key.
+    write(os.path.join(CORPUS, "preview", "stored"), nph_file(fourcc("TEX "), 1, preview_blobs(False)))
+    write(os.path.join(CORPUS, "preview", "lz"), nph_file(fourcc("TEX "), 1, preview_blobs(True)))
     write(os.path.join(CORPUS, "nph", "texture"), nph_file(fourcc("TEX "), 1, texture_blobs()))
     write(os.path.join(CORPUS, "nph", "material"), nph_file(fourcc("MATL"), 1, material_blobs()))
     write(os.path.join(CORPUS, "nph", "material_keyed"),

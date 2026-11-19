@@ -46,6 +46,7 @@ set(cook_sources
     src/mesh_optimize.c
     src/mesh_tangent.c
     src/polymesh.c
+    src/preview.c
     src/ray_trim.c
     src/sound.c
     src/specgloss.c
@@ -110,6 +111,7 @@ nph_add_test(cook
         tests/test_material.c
         tests/test_mesh.c
         tests/test_polymesh.c
+        tests/test_preview.c
         tests/test_ray_trim.c
         tests/test_sound.c
         tests/test_specgloss.c

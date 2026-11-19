@@ -137,6 +137,12 @@ bool editor_project_source_of(EditorProject *p, NphGuid guid, char *out, u64 cap
 // Whether the source `key` has cooked assets.
 bool editor_project_is_cooked(EditorProject *p, const char *key);
 
+// A key of what the asset cooked from source `key` as sub-asset `sub` was cooked from: its
+// content hash with those of the assets it references (a material's textures), as the database
+// last recorded them; it changes when any of them is cooked from other content. False when the
+// database has no such asset.
+bool editor_project_content_key(EditorProject *p, const char *key, const char *sub, u64 *out);
+
 // Changes whenever the snapshot does: a panel showing cooked states looks
 // again.
 u64 editor_project_generation(EditorProject *p);

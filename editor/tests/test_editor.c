@@ -2244,3 +2244,109 @@ NTEST(Editor, a_material_dropped_on_a_face_names_a_slot_of_the_mesh)
     NTEST_EXPECT_EQ_UINT(editor_history_undo_count(ed->history), scene_steps);
     finish(&fx);
 }
+
+// ---------------------------------------------------------------------------
+// Material previews (ADR-0105 decision 7)
+// ---------------------------------------------------------------------------
+
+static EditorPreview *preview_of(Editor *ed, const char *key)
+{
+    for (u32 i = 0; ed->previews.items != NULL && i < EDITOR_PREVIEWS_MAX; ++i) {
+        if (strcmp(ed->previews.items[i].key, key) == 0) {
+            return &ed->previews.items[i];
+        }
+    }
+    return NULL;
+}
+
+// Runs frames, asking for the preview of `key` as the browser does, until its picture is up
+// for its content as it is now (and not for `before`).
+static EditorPreview *preview_made(EditorFixture *f, const char *key, u64 before)
+{
+    for (u32 i = 0; i < 600U; ++i) {
+        (void)editor_material_preview(f->editor, key);
+        frames(f, 1U);
+        EditorPreview *p = preview_of(f->editor, key);
+        if (p != NULL && p->job == NULL && p->made != 0U && p->made != before &&
+            p->made == p->wanted) {
+            return p;
+        }
+    }
+    NTEST_ASSERT_TRUE(false); // not made in 600 frames
+    return NULL;
+}
+
+// The cached picture of the preview of `key`, made for `made`, into `out`.
+static void cached_picture(EditorFixture *f, const char *key, u64 made, u8 *out)
+{
+    char path[1400];
+    (void)snprintf(path, sizeof path, "%s/previews/%s.nph",
+                   editor_project_cooked_dir(editor_project(f->editor)), key);
+    void *bytes = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(path, nph_allocator_system(), &bytes, &size),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_INT(cook_preview_read(bytes, size, made, out), NPH_RESULT_OK);
+    nph_file_free_all(nph_allocator_system(), bytes, size);
+}
+
+// The middle of a preview: red, green, or blue by far (`channel`).
+static bool middle_is(const u8 *picture, u32 channel)
+{
+    const u8 *p =
+        picture + ((u64)(COOK_PREVIEW_SIZE / 2U) * COOK_PREVIEW_SIZE + COOK_PREVIEW_SIZE / 2U) * 4U;
+    return p[3] == 255U && p[channel] > p[(channel + 1U) % 3U] + 40U &&
+           p[channel] > p[(channel + 2U) % 3U] + 40U;
+}
+
+NTEST(Editor, the_browser_shows_a_material_as_a_lit_sphere_made_on_jobs_and_cached)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    static const char key[] = "materials/paint.nmat";
+    paint(&fx, 1.0F, 0.0F, 0.0F);
+    editor_project_wait(editor_project(ed));
+    // The browser in the material's folder asks for its preview as it draws its row.
+    (void)snprintf(ed->assets.folder, sizeof ed->assets.folder, "materials");
+    ed->assets.stale = true;
+    NTEST_EXPECT_EQ_UINT(editor_material_preview(ed, key), 0U); // none yet
+    EditorPreview *p = preview_made(&fx, key, 0U);
+    NTEST_EXPECT_NE_UINT(editor_material_preview(ed, key), 0U);
+    NTEST_EXPECT_EQ_UINT(ed->previews.drawn, 1U);
+    NTEST_EXPECT_EQ_UINT(ed->previews.loaded, 0U);
+    static u8 picture[COOK_PREVIEW_BYTES];
+    cached_picture(&fx, key, p->made, picture);
+    NTEST_EXPECT_TRUE(middle_is(picture, 0U));
+    // Painted green and cooked: drawn again, the red one shown until it is.
+    const u64 red = p->made;
+    paint(&fx, 0.0F, 1.0F, 0.0F);
+    editor_project_wait(editor_project(ed));
+    p = preview_made(&fx, key, red);
+    NTEST_EXPECT_EQ_UINT(ed->previews.drawn, 2U);
+    cached_picture(&fx, key, p->made, picture);
+    NTEST_EXPECT_TRUE(middle_is(picture, 1U));
+    // Its panel shows it too.
+    NTEST_ASSERT_EQ_INT(editor_material_open(ed, key), NPH_RESULT_OK);
+    frames(&fx, 2U);
+    // Let go and asked for again (the editor started anew): read from the cache, not drawn.
+    editor_material_previews_free(ed);
+    editor_material_previews_init(ed);
+    (void)preview_made(&fx, key, 0U);
+    NTEST_EXPECT_EQ_UINT(ed->previews.loaded, 1U);
+    NTEST_EXPECT_EQ_UINT(ed->previews.drawn, 0U);
+    // A material that is not cooked has none, and nothing is made for it.
+    NTEST_EXPECT_EQ_UINT(editor_material_preview(ed, "materials/nothing.nmat"), 0U);
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_UINT(ed->previews.in_flight, 0U);
+    // The picture is a sampled image of its own, which the frames above drew in the browser
+    // and the panel under the validation gate.
+    p = preview_of(ed, key);
+    NTEST_ASSERT_NOT_NULL(p);
+    const NphGpuImageDesc *d = nph_gpu_image_desc(nph_engine_device(fx.engine), p->image);
+    NTEST_ASSERT_NOT_NULL(d);
+    NTEST_EXPECT_EQ_UINT(d->width, COOK_PREVIEW_SIZE);
+    NTEST_EXPECT_EQ_INT(d->format, NPH_GPU_FORMAT_R8G8B8A8_UNORM);
+    finish(&fx);
+}

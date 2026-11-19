@@ -663,6 +663,7 @@ static void hook_sync(NphEngine *e, void *user)
     editor_assets_update(ed);
     editor_mesh_edit_update(ed);
     editor_material_update(ed);
+    editor_material_previews_update(ed);
     const u64 now = nph_time_now_ns();
     editor_autosave_update(ed, now);
     ui_platform_new_frame(&ed->platform, nph_time_ns_to_s(now - ed->last_frame_ns));
@@ -825,6 +826,7 @@ NphResult editor_create(const EditorDesc *desc, Editor **out)
     nph_mutex_init(&ed->resolve_lock);
     editor_mesh_edit_init(ed);
     editor_material_init(ed);
+    editor_material_previews_init(ed);
     (void)snprintf(ed->shader_dir, sizeof ed->shader_dir, "%s",
                    desc->shader_dir != NULL ? desc->shader_dir : NPH_SHADER_DIR);
     editor_camera_default(&ed->camera);
@@ -1038,6 +1040,8 @@ void editor_detach(Editor *ed)
     editor_mesh_edit_init(ed);
     editor_material_free(ed); // a change being made is written: the project is still there
     editor_material_init(ed);
+    editor_material_previews_free(ed); // the pictures being made first: they read the project
+    editor_material_previews_init(ed);
     editor_assets_close(ed); // after the import in progress, if any
     editor_viewport_free(ed);
     editor_console_free(ed);

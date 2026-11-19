@@ -12,7 +12,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define DEGREE "\xC2\xB0"
+#define DEGREE        "\xC2\xB0"
+#define PANEL_PREVIEW 96.0F // the open material's preview, pixels a side
 
 static const char *const k_slot_names[NPH_MATERIAL_TEXTURE_COUNT] = {
     "Base colour", "Metallic-roughness", "Normal", "Occlusion", "Emissive"};
@@ -252,6 +253,13 @@ void editor_panel_material(Editor *ed)
         igEndDisabled();
         if (igIsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             igSetTooltip("Ctrl+Z and Ctrl+Y undo and redo here while this panel has the focus");
+        }
+        // Its preview as last cooked (ADR-0105 decision 7): drawn again once a change settles
+        // and is cooked; the viewport shows a change while it is being made.
+        const ImTextureID preview = editor_material_preview(ed, m->key);
+        if (preview != 0U) {
+            igImage(ui_texture_ref(preview), ui_vec2(PANEL_PREVIEW, PANEL_PREVIEW),
+                    ui_vec2(0.0F, 0.0F), ui_vec2(1.0F, 1.0F));
         }
         if (m->error[0] != '\0') {
             igTextColored(ui_vec4(1.0F, 0.45F, 0.4F, 1.0F), "%s", m->error);
