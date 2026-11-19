@@ -5,11 +5,13 @@
 #include <nepheline/audio/lossless.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/json.h>
+#include <nepheline/platform/file.h>
 
 #include <cook/cook.h>
 #include <cook/sound.h>
 #include <float.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 void cook_sound_settings_default(CookSoundSettings *out)
@@ -25,6 +27,9 @@ void cook_sound_settings_default(CookSoundSettings *out)
 // Per-source settings
 // ---------------------------------------------------------------------------
 
+static const char *const k_codecs[] = {"auto", "pcm", "lossless", "adpcm"};
+static const char *const k_streams[] = {"auto", "always", "never"};
+
 // The index of `s` among `names`, or -1.
 static i32 name_index(NphStr s, const char *const *names, u32 count)
 {
@@ -38,13 +43,11 @@ static i32 name_index(NphStr s, const char *const *names, u32 count)
 
 static NphResult apply_setting(const NphJsonValue *v, CookSoundSettings *s)
 {
-    static const char *const codecs[] = {"auto", "pcm", "lossless", "adpcm"};
-    static const char *const streams[] = {"auto", "always", "never"};
     NphStr text;
     if (nph_str_equals(v->key, NPH_STR("codec"))) {
         NPH_TRY(nph_json_as_str(v, &text) == NPH_RESULT_OK ? NPH_RESULT_OK
                                                            : NPH_RESULT_INVALID_ARGUMENT);
-        const i32 i = name_index(text, codecs, NPH_ARRAY_COUNT(codecs));
+        const i32 i = name_index(text, k_codecs, NPH_ARRAY_COUNT(k_codecs));
         if (i < 0) {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
@@ -54,7 +57,7 @@ static NphResult apply_setting(const NphJsonValue *v, CookSoundSettings *s)
     if (nph_str_equals(v->key, NPH_STR("stream"))) {
         NPH_TRY(nph_json_as_str(v, &text) == NPH_RESULT_OK ? NPH_RESULT_OK
                                                            : NPH_RESULT_INVALID_ARGUMENT);
-        const i32 i = name_index(text, streams, NPH_ARRAY_COUNT(streams));
+        const i32 i = name_index(text, k_streams, NPH_ARRAY_COUNT(k_streams));
         if (i < 0) {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
@@ -104,6 +107,75 @@ NphResult cook_sound_settings_parse(NphAllocator *alloc, const void *json, u64 s
     nph_json_doc_free(&doc);
     if (r == NPH_RESULT_OK) {
         *inout = s;
+    }
+    return r;
+}
+
+// The threshold the settings mean (0 is the default's).
+static f32 stream_seconds(const CookSoundSettings *s)
+{
+    return s->stream_seconds != 0.0F ? s->stream_seconds : COOK_SOUND_STREAM_SECONDS;
+}
+
+bool cook_sound_settings_equal(const CookSoundSettings *a, const CookSoundSettings *b)
+{
+    NPH_ASSERT(a != NULL && b != NULL);
+    return a->codec == b->codec && a->stream == b->stream &&
+           stream_seconds(a) == stream_seconds(b) && (a->exhaustive != 0) == (b->exhaustive != 0);
+}
+
+NphResult cook_sound_settings_write(const CookSoundSettings *s, NphStrBuilder *out)
+{
+    NPH_ASSERT(s != NULL && out != NULL);
+    const f32 seconds = stream_seconds(s);
+    if ((u32)s->codec >= NPH_ARRAY_COUNT(k_codecs) ||
+        (u32)s->stream >= NPH_ARRAY_COUNT(k_streams) || !(seconds > 0.0F) || seconds > 1.0e9F) {
+        return NPH_RESULT_CORRUPT;
+    }
+    NphJsonWriter w;
+    nph_json_writer_init(&w, out, true);
+    NPH_TRY(nph_json_writer_begin_object(&w));
+    if (s->codec != COOK_SOUND_CODEC_AUTO) {
+        NPH_TRY(nph_json_writer_key(&w, NPH_STR("codec")));
+        NPH_TRY(nph_json_writer_str(&w, nph_str_from_cstr(k_codecs[s->codec])));
+    }
+    if (s->stream != COOK_SOUND_STREAM_AUTO) {
+        NPH_TRY(nph_json_writer_key(&w, NPH_STR("stream")));
+        NPH_TRY(nph_json_writer_str(&w, nph_str_from_cstr(k_streams[s->stream])));
+    }
+    if (seconds != COOK_SOUND_STREAM_SECONDS) {
+        NPH_TRY(nph_json_writer_key(&w, NPH_STR("stream_seconds")));
+        NPH_TRY(nph_json_writer_f32_shortest(&w, seconds));
+    }
+    if (s->exhaustive != 0) {
+        NPH_TRY(nph_json_writer_key(&w, NPH_STR("exhaustive")));
+        NPH_TRY(nph_json_writer_bool(&w, true));
+    }
+    NPH_TRY(nph_json_writer_end_object(&w));
+    return nph_sb_append_cstr(out, "\n");
+}
+
+NphResult cook_sound_settings_save(const CookSoundSettings *s, NphAllocator *alloc,
+                                   const char *path)
+{
+    NPH_ASSERT(s != NULL && alloc != NULL && path != NULL);
+    char temp[4096];
+    const int n = snprintf(temp, sizeof temp, "%s.part", path);
+    if (n < 0 || (u64)n >= sizeof temp) {
+        return NPH_RESULT_OVERFLOW;
+    }
+    NphStrBuilder sb;
+    nph_sb_init(&sb, alloc);
+    NphResult r = cook_sound_settings_write(s, &sb);
+    if (r == NPH_RESULT_OK) {
+        r = nph_file_write_all(temp, sb.data, sb.len);
+    }
+    nph_sb_free(&sb);
+    if (r == NPH_RESULT_OK) {
+        r = nph_fs_rename(temp, path);
+    }
+    if (r != NPH_RESULT_OK) {
+        (void)nph_fs_remove_file(temp);
     }
     return r;
 }

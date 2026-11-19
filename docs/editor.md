@@ -560,6 +560,34 @@ within a second or two, in the project or wherever the file was imported from.
 The baseline of what was seen is taken before a request's result is handed over, so a change made
 after `editor_project_wait` returns is always a change.
 
+### Import settings
+
+A scene's, an image's, or a sound's settings file (`<source>.import.json`: [cook.md](cook.md)
+"Scene import settings", "Texture import settings", "Sounds") is edited in the **Import Settings**
+window (ADR-0107). Right-click the source in the Assets panel and choose Import Settings...
+(`editor_import_settings_open`).
+
+The window shows the file's settings, or the cooker's where there is no file. A setting the file
+leaves out shows as **Default**, with what the cooker does there.
+- **A scene:** the collision its meshes take where no proxy or object property says otherwise
+  ("Collision" in cook.md), the hulls' most points, levels of detail and voxels, and its images'
+  largest side, compression, and mip levels.
+- **An image:** its usage when it is cooked alone, its largest side, compression, mip levels, and
+  a normal map's green convention.
+- **A sound:** its codec, streaming, the length from which Auto streams, and the lossless
+  encoder's exhaustive search.
+
+The buttons:
+- **Save** writes the file and cooks the source again. What the cook writes is reloaded where it
+  is drawn, as an import's is.
+- **Revert** shows what the file holds again.
+- **Use the Cooker's** removes the file, so the source cooks again by the cooker's settings.
+
+A file that does not read is shown as the cooker's settings, with why, and Save replaces it.
+Closing the window drops changes not saved. The API the window is drawn over
+(`editor_import_settings_change_*`, `_save`, `_use_cooker`, `_revert`) is what the editor's
+tests drive.
+
 Refused or failing imports are logged, and the rest of the request still
 runs:
 - a folder that holds the sources themselves is not copied into them;

@@ -28,6 +28,7 @@ add_library(nph_editor_core STATIC
     src/panel_assets.c
     src/panel_console.c
     src/panel_inspector.c
+    src/panel_import.c
     src/panel_material.c
     src/panel_outliner.c
     src/panel_profiler.c

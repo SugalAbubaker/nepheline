@@ -43,6 +43,7 @@
 #define EDITOR_WINDOW_INSPECTOR "Inspector"
 #define EDITOR_WINDOW_ASSETS    "Assets"
 #define EDITOR_WINDOW_MATERIAL  "Material"
+#define EDITOR_WINDOW_IMPORT    "Import Settings"
 
 // Dear ImGui drag-and-drop payload types.
 #define EDITOR_DRAG_ENTITY   "nph.entity"   // an NphEntity
@@ -202,6 +203,23 @@ typedef struct EditorImageKey {
 } EditorImageKey;
 typedef NPH_ARRAY(EditorImageKey) EditorImageKeys;
 
+// The Import Settings window's source (panel_import.c; ADR-0107): a scene's, an image's, or a
+// sound's settings file, <source>.import.json, as it is edited, and what the file holds.
+typedef struct EditorImportSettings {
+    bool open;
+    bool reveal; // brought forward at the next frame
+    char key[EDITOR_PROJECT_PATH_MAX];
+    u32 kind;              // CookerSourceKind: SCENE, IMAGE, or SOUND
+    bool on_disk;          // the file was there when last read or written
+    CookSceneImport scene; // what the window shows, of its kind
+    CookTextureImport texture;
+    CookSoundSettings sound;
+    CookSceneImport scene_saved; // what the file holds (the cooker's settings without one)
+    CookTextureImport texture_saved;
+    CookSoundSettings sound_saved;
+    char error[256]; // why the file did not read or write, "" when nothing is wrong
+} EditorImportSettings;
+
 // The material panel (material_edit.c, panel_material.c; ADR-0105 decision 5):
 // one material's source, drawn as it is changed and written as each change
 // settles, with a history of its own while it is open.
@@ -263,6 +281,7 @@ typedef struct EditorPanels {
     bool inspector;
     bool assets;
     bool material;
+    bool import_settings;
     bool demo;    // Dear ImGui's demo window (development builds)
     bool metrics; // Dear ImGui's metrics window
 } EditorPanels;
@@ -349,6 +368,7 @@ struct Editor {
     EditorAssets assets;
     EditorMeshEdit mesh_edit;
     EditorMaterialEdit material;
+    EditorImportSettings import_settings;
     EditorPreviews previews;
     EditorAutosave autosave;
     EditorRecovery recovery;
@@ -501,6 +521,8 @@ void editor_material_list_images(Editor *ed);
 
 // panel_material.c
 void editor_panel_material(Editor *ed);
+// The Import Settings window (panel_import.c).
+void editor_panel_import_settings(Editor *ed);
 
 // material_preview.c (docs/editor.md "Assets")
 void editor_material_previews_init(Editor *ed);

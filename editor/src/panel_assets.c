@@ -656,18 +656,19 @@ static const char *kind_name(const EditorAssetEntry *e)
     if (e->is_directory) {
         return "folder";
     }
-    switch ((CookerSourceKind)e->kind) {
-    case COOKER_SOURCE_SCENE:
+    // On the stored number, not cast back: what the menus tested of it may leave no kind.
+    switch (e->kind) {
+    case (u32)COOKER_SOURCE_SCENE:
         return "scene";
-    case COOKER_SOURCE_MESH:
+    case (u32)COOKER_SOURCE_MESH:
         return "mesh";
-    case COOKER_SOURCE_IMAGE:
+    case (u32)COOKER_SOURCE_IMAGE:
         return "image";
-    case COOKER_SOURCE_SOUND:
+    case (u32)COOKER_SOURCE_SOUND:
         return "sound";
-    case COOKER_SOURCE_MATERIAL:
+    case (u32)COOKER_SOURCE_MATERIAL:
         return "material";
-    case COOKER_SOURCE_NONE:
+    default:
         break;
     }
     return "";
@@ -680,6 +681,7 @@ typedef enum BrowserAction {
     ACTION_COOK,       // cook it (a folder: its scenes)
     ACTION_COOK_AGAIN, // cook it even when current
     ACTION_EDIT,       // a material: open it in the material panel
+    ACTION_SETTINGS,   // a scene, an image, or a sound: its import settings (ADR-0107)
 } BrowserAction;
 
 static BrowserAction context_menu(const EditorAssetEntry *e, bool playing)
@@ -705,6 +707,12 @@ static BrowserAction context_menu(const EditorAssetEntry *e, bool playing)
         }
         if (igMenuItem_Bool("Cook Again", NULL, false, true)) {
             action = ACTION_COOK_AGAIN;
+        }
+    }
+    if (e->kind == (u32)COOKER_SOURCE_SCENE || e->kind == (u32)COOKER_SOURCE_IMAGE ||
+        e->kind == (u32)COOKER_SOURCE_SOUND) {
+        if (igMenuItem_Bool("Import Settings...", NULL, false, true)) {
+            action = ACTION_SETTINGS;
         }
     }
     igEndPopup();
@@ -754,6 +762,13 @@ static void act(Editor *ed, const EditorAssetEntry *e, BrowserAction action)
     case ACTION_EDIT:
         NPH_IGNORE_RESULT(editor_material_open(ed, key)); // logged
         break;
+    case ACTION_SETTINGS: {
+        const NphResult r = editor_import_settings_open(ed, key);
+        if (r != NPH_RESULT_OK) {
+            NPH_LOG_WARN(&LOG_EDITOR, "import settings of %s: %s", key, nph_result_string(r));
+        }
+        break;
+    }
     case ACTION_NONE:
         break;
     }

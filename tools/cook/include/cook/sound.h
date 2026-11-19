@@ -84,6 +84,18 @@ void cook_sound_settings_default(CookSoundSettings *out);
 NPH_MUST_USE NphResult cook_sound_settings_parse(NphAllocator *alloc, const void *json, u64 size,
                                                  CookSoundSettings *inout);
 
+// True when the two cook the same (a threshold of 0 is COOK_SOUND_STREAM_SECONDS).
+bool cook_sound_settings_equal(const CookSoundSettings *a, const CookSoundSettings *b);
+
+// Appends the settings as the JSON above, each key only where it is not the default, so what
+// cook_sound_settings_parse reads over the defaults is the same settings. NPH_RESULT_CORRUPT for
+// settings out of range (a codec or streaming past the enumerations, a threshold not in
+// [0, 1e9]).
+NPH_MUST_USE NphResult cook_sound_settings_write(const CookSoundSettings *s, NphStrBuilder *out);
+// Writes the settings to `path`, replacing it whole (`path` + ".part" renamed over it).
+NPH_MUST_USE NphResult cook_sound_settings_save(const CookSoundSettings *s, NphAllocator *alloc,
+                                                const char *path);
+
 // What cook_sound makes of a source: whether it streams, its codec, its
 // PCM format (NPH_SOUND_FORMAT_NONE for the other codecs), and its depth.
 typedef struct CookSoundPlan {

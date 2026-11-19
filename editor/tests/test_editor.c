@@ -4,6 +4,8 @@
 // mouse and key events on the viewport, Play hands the input to the game
 // and Escape takes it back, and the console panel receives the log. Skipped
 // without a Vulkan device.
+#include <nepheline/asset/texture.h>
+#include <nepheline/audio/wav.h>
 #include <nepheline/core/alloc_debug.h>
 #include <nepheline/core/guid.h>
 #include <nepheline/gpu/commands.h>
@@ -2058,6 +2060,195 @@ NTEST(Editor, a_material_is_drawn_as_it_changes_written_as_it_settles_and_undone
     s.roughness = 2.0F;
     NTEST_EXPECT_EQ_INT(editor_material_change(ed, &s, true), NPH_RESULT_INVALID_ARGUMENT);
     NTEST_EXPECT_NEAR_F32(editor_material_source(ed)->roughness, 1.0F, 1e-6F);
+    finish(&fx);
+}
+
+// ---------------------------------------------------------------------------
+// Import settings (ADR-0107)
+// ---------------------------------------------------------------------------
+
+// The width of the cooked texture at `relative` among the project's cooked files.
+static u32 cooked_texture_width(EditorFixture *f, const char *relative)
+{
+    char path[1400];
+    (void)snprintf(path, sizeof path, "%s/cooked/%s", f->project, relative);
+    TestAsset a;
+    test_asset_from_file(nph_allocator_system(), path, &a);
+    NphTextureView v;
+    NTEST_ASSERT_EQ_INT(nph_texture_view(&a.asset, &v), NPH_RESULT_OK);
+    const u32 width = v.header->width;
+    test_asset_free(&a);
+    return width;
+}
+
+// The file at `path`, as text the caller frees (nph_file_free_all with `size`).
+static char *file_text(const char *path, u64 *size)
+{
+    void *bytes = NULL;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(path, nph_allocator_system(), &bytes, size),
+                        NPH_RESULT_OK);
+    return (char *)bytes;
+}
+
+NTEST(Editor, import_settings_are_shown_changed_saved_and_cooked_by)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    // A scene among the sources, cooked: its base colour image is 8 texels wide.
+    TempDir models;
+    (void)snprintf(models.dir, sizeof models.dir, "%s/assets/models", fx.project);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(models.dir), NPH_RESULT_OK);
+    test_write_gltf(&models, "crate", false);
+    NTEST_ASSERT_EQ_INT(
+        editor_project_cook(editor_project(ed), "models/crate.gltf", false, 0U, NULL),
+        NPH_RESULT_OK);
+    settle(&fx);
+    static const char *const image = "models/crate_gltf/tex_0_checker_color.nph";
+    NTEST_EXPECT_EQ_UINT(cooked_texture_width(&fx, image), 8U);
+    // Opened: the cooker's settings, no file.
+    NTEST_ASSERT_EQ_INT(editor_import_settings_open(ed, "models/crate.gltf"), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(ed->show.import_settings);
+    NTEST_EXPECT_EQ_STR(editor_import_settings_key(ed), "models/crate.gltf");
+    NTEST_EXPECT_EQ_STR(editor_import_settings_error(ed), "");
+    NTEST_ASSERT_NOT_NULL(editor_import_settings_scene(ed));
+    NTEST_EXPECT_NULL(editor_import_settings_texture(ed));
+    NTEST_EXPECT_NULL(editor_import_settings_sound(ed));
+    NTEST_EXPECT_FALSE(editor_import_settings_changed(ed));
+    frames(&fx, 2U); // the window drawn
+    // Its images capped at 2 texels: changed, then saved, and cooked by.
+    CookSceneImport s = *editor_import_settings_scene(ed);
+    s.has_texture_max_extent = 1;
+    s.texture_max_extent = 2U;
+    NTEST_ASSERT_EQ_INT(editor_import_settings_change_scene(ed, &s), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(editor_import_settings_changed(ed));
+    NTEST_ASSERT_EQ_INT(editor_import_settings_save(ed), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(editor_import_settings_changed(ed));
+    settle(&fx);
+    NTEST_EXPECT_EQ_UINT(cooked_texture_width(&fx, image), 2U);
+    char path[1400];
+    (void)snprintf(path, sizeof path, "%s/assets/models/crate.gltf.import.json", fx.project);
+    u64 size = 0U;
+    char *text = file_text(path, &size);
+    CookSceneImport on_disk;
+    NTEST_ASSERT_EQ_INT(
+        cook_scene_import_read(nph_allocator_system(), nph_str(text, size), &on_disk),
+        NPH_RESULT_OK);
+    nph_file_free_all(nph_allocator_system(), text, size);
+    NTEST_EXPECT_TRUE(cook_scene_import_equal(&on_disk, &s));
+    // Out of range, or of another kind: refused, nothing shown changes.
+    CookSceneImport bad = s;
+    bad.has_hull_vertices = 1;
+    bad.hull_vertices = 3U;
+    NTEST_EXPECT_EQ_INT(editor_import_settings_change_scene(ed, &bad), NPH_RESULT_INVALID_ARGUMENT);
+    CookTextureImport texture;
+    cook_texture_import_default(&texture);
+    NTEST_EXPECT_EQ_INT(editor_import_settings_change_texture(ed, &texture),
+                        NPH_RESULT_INVALID_STATE);
+    NTEST_EXPECT_FALSE(editor_import_settings_changed(ed));
+    // Changed and reverted: what the file holds again.
+    s.texture_max_extent = 4U;
+    NTEST_ASSERT_EQ_INT(editor_import_settings_change_scene(ed, &s), NPH_RESULT_OK);
+    editor_import_settings_revert(ed);
+    NTEST_EXPECT_EQ_UINT(editor_import_settings_scene(ed)->texture_max_extent, 2U);
+    // The cooker's again: the file goes, and the image is whole.
+    NTEST_ASSERT_EQ_INT(editor_import_settings_use_cooker(ed), NPH_RESULT_OK);
+    NTEST_EXPECT_FALSE(nph_fs_exists(path));
+    NTEST_EXPECT_EQ_UINT(editor_import_settings_scene(ed)->has_texture_max_extent, 0U);
+    settle(&fx);
+    NTEST_EXPECT_EQ_UINT(cooked_texture_width(&fx, image), 8U);
+    // Only scenes, images and sounds have import settings; a source not there is not found.
+    paint(&fx, 1.0F, 0.0F, 0.0F);
+    NTEST_EXPECT_EQ_INT(editor_import_settings_open(ed, "materials/paint.nmat"),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(editor_import_settings_open(ed, "models/none.gltf"), NPH_RESULT_NOT_FOUND);
+    NTEST_EXPECT_EQ_STR(editor_import_settings_key(ed), "models/crate.gltf"); // still shown
+    editor_import_settings_close(ed);
+    NTEST_EXPECT_EQ_STR(editor_import_settings_key(ed), "");
+    NTEST_EXPECT_EQ_INT(editor_import_settings_save(ed), NPH_RESULT_INVALID_STATE);
+    settle(&fx);
+    finish(&fx);
+}
+
+NTEST(Editor, an_image_or_a_sounds_settings_are_read_shown_and_written)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 3U);
+    // An image whose settings file does not read: the cooker's settings shown, and why.
+    char dir[1100];
+    (void)snprintf(dir, sizeof dir, "%s/assets/textures", fx.project);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(dir), NPH_RESULT_OK);
+    u8 rgba[4 * 4 * 4];
+    memset(rgba, 200, sizeof rgba);
+    u8 tga[18 + sizeof rgba];
+    const u64 tga_size = test_write_tga(rgba, 4U, 4U, tga);
+    char path[1300];
+    (void)snprintf(path, sizeof path, "%s/lone.tga", dir);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, tga, tga_size), NPH_RESULT_OK);
+    char settings[1400];
+    (void)snprintf(settings, sizeof settings, "%s.import.json", path);
+    static const char junk[] = "{\"texture\": 1, \"usage\": \"bumpy\"}";
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(settings, junk, sizeof junk - 1U), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_import_settings_open(ed, "textures/lone.tga"), NPH_RESULT_OK);
+    NTEST_EXPECT_NE_STR(editor_import_settings_error(ed), "");
+    NTEST_ASSERT_NOT_NULL(editor_import_settings_texture(ed));
+    NTEST_EXPECT_EQ_UINT(editor_import_settings_texture(ed)->has_usage, 0U);
+    frames(&fx, 2U);
+    // A normal map in DirectX's convention, saved: the file reads, and nothing is wrong.
+    CookTextureImport t = *editor_import_settings_texture(ed);
+    t.has_usage = 1;
+    t.usage = COOK_TEXTURE_NORMAL;
+    t.green_down = 1;
+    NTEST_ASSERT_EQ_INT(editor_import_settings_change_texture(ed, &t), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_import_settings_save(ed), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(editor_import_settings_error(ed), "");
+    u64 size = 0U;
+    char *text = file_text(settings, &size);
+    CookTextureImport back;
+    NTEST_ASSERT_EQ_INT(
+        cook_texture_import_read(nph_allocator_system(), nph_str(text, size), &back),
+        NPH_RESULT_OK);
+    nph_file_free_all(nph_allocator_system(), text, size);
+    NTEST_EXPECT_TRUE(cook_texture_import_equal(&back, &t));
+    settle(&fx);
+    // A sound: its codec chosen, written as the cooker reads it.
+    (void)snprintf(dir, sizeof dir, "%s/assets/sounds", fx.project);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(dir), NPH_RESULT_OK);
+    f32 x[800];
+    for (u32 i = 0U; i < 800U; ++i) {
+        x[i] = (f32)(i % 40U) / 40.0F - 0.5F;
+    }
+    const f32 *planes[1] = {x};
+    const u64 wav_size = nph_wav_size(NPH_WAV_PCM_S16, 1U, 800U);
+    void *wav = NPH_ALLOC(nph_allocator_system(), wav_size, 16U);
+    NTEST_ASSERT_NOT_NULL(wav);
+    NTEST_ASSERT_EQ_INT(nph_wav_write(NPH_WAV_PCM_S16, 1U, 8000U, planes, 800U, wav),
+                        NPH_RESULT_OK);
+    (void)snprintf(path, sizeof path, "%s/hit.wav", dir);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, wav, wav_size), NPH_RESULT_OK);
+    NPH_FREE(nph_allocator_system(), wav, wav_size, 16U);
+    NTEST_ASSERT_EQ_INT(editor_import_settings_open(ed, "sounds/hit.wav"), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(editor_import_settings_sound(ed));
+    NTEST_EXPECT_NULL(editor_import_settings_texture(ed));
+    frames(&fx, 2U);
+    CookSoundSettings snd = *editor_import_settings_sound(ed);
+    snd.codec = COOK_SOUND_CODEC_ADPCM;
+    snd.stream = COOK_SOUND_STREAM_NEVER;
+    NTEST_ASSERT_EQ_INT(editor_import_settings_change_sound(ed, &snd), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_import_settings_save(ed), NPH_RESULT_OK);
+    (void)snprintf(settings, sizeof settings, "%s.import.json", path);
+    text = file_text(settings, &size);
+    CookSoundSettings read;
+    cook_sound_settings_default(&read);
+    NTEST_ASSERT_EQ_INT(cook_sound_settings_parse(nph_allocator_system(), text, size, &read),
+                        NPH_RESULT_OK);
+    nph_file_free_all(nph_allocator_system(), text, size);
+    NTEST_EXPECT_TRUE(cook_sound_settings_equal(&read, &snd));
+    settle(&fx);
+    NTEST_EXPECT_TRUE(editor_project_is_cooked(editor_project(ed), "sounds/hit.wav"));
     finish(&fx);
 }
 

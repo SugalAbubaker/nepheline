@@ -179,6 +179,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         s.exhaustive = (b32)((data[0] >> 4U) & 1U);
         const u32 tenths = (u32)data[0] >> 5U;
         s.stream_seconds = tenths != 0U ? (f32)tenths * 0.1F : 0.0F;
+        // Written, the settings read back the same (the editor's import settings save them).
+        NphStrBuilder text;
+        nph_sb_init(&text, alloc);
+        CookSoundSettings back;
+        cook_sound_settings_default(&back);
+        if (cook_sound_settings_write(&s, &text) != NPH_RESULT_OK ||
+            cook_sound_settings_parse(alloc, text.data, text.len, &back) != NPH_RESULT_OK ||
+            !cook_sound_settings_equal(&back, &s)) {
+            abort();
+        }
+        nph_sb_free(&text);
         NphAssetWriter w;
         nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_SOUND, NPH_SOUND_TYPE_VERSION,
                               nph_guid_from_cstr("fuzz"), 0U);
