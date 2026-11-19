@@ -23,6 +23,7 @@
 #define EDITOR_DEFAULT_COOKED            "cooked"
 #define EDITOR_DEFAULT_AUTOSAVE_DIR      "autosave"
 #define EDITOR_DEFAULT_AUTOSAVE_INTERVAL 60
+#define EDITOR_DEFAULT_WATCH_MS          1000
 
 // ---------------------------------------------------------------------------
 // Dear ImGui's memory, through a tracked allocator (CLAUDE.md §1.4: all
@@ -892,11 +893,23 @@ static NphResult register_cvars(Editor *ed)
         .min_int = 0,
         .max_int = 3600,
     };
+    const NphCvar watch = {
+        .name = "editor.watch",
+        .description = "milliseconds between looks for sources changed on disk, which are "
+                       "imported and cooked again (0: never; ADR-0107)",
+        .type = NPH_CVAR_TYPE_INT,
+        .flags = NPH_CVAR_FLAG_LATCHED,
+        .value_int = EDITOR_DEFAULT_WATCH_MS,
+        .default_int = EDITOR_DEFAULT_WATCH_MS,
+        .min_int = 0,
+        .max_int = 60000,
+    };
     ed->cv_layout = layout;
     ed->cv_assets = assets;
     ed->cv_cooked = cooked;
     ed->cv_autosave_dir = autosave_dir;
     ed->cv_autosave_interval = autosave_interval;
+    ed->cv_watch = watch;
     NphCvarRegistry *cvars = nph_engine_cvars(ed->engine);
     NPH_TRY(nph_cvar_register(cvars, &ed->cv_layout));
     ed->cvars_registered = true; // detach unregisters what is there
@@ -904,6 +917,7 @@ static NphResult register_cvars(Editor *ed)
     NPH_TRY(nph_cvar_register(cvars, &ed->cv_cooked));
     NPH_TRY(nph_cvar_register(cvars, &ed->cv_autosave_dir));
     NPH_TRY(nph_cvar_register(cvars, &ed->cv_autosave_interval));
+    NPH_TRY(nph_cvar_register(cvars, &ed->cv_watch));
     return NPH_RESULT_OK;
 }
 
@@ -1057,6 +1071,7 @@ void editor_detach(Editor *ed)
         (void)nph_cvar_unregister(cvars, &ed->cv_cooked);
         (void)nph_cvar_unregister(cvars, &ed->cv_autosave_dir);
         (void)nph_cvar_unregister(cvars, &ed->cv_autosave_interval);
+        (void)nph_cvar_unregister(cvars, &ed->cv_watch);
         ed->cvars_registered = false;
     }
     ed->engine = NULL;

@@ -524,6 +524,42 @@ into a scratch world with the edited world's components, sized from the
 scene's counts. Then `editor_edit_paste` copies it into the edited world as
 one step.
 
+### Re-import on change
+
+The import thread watches what the project cooked (ADR-0107). This happens while it has nothing
+queued, every `editor.watch` milliseconds (1000 by default; 0 turns it off; latched, so it takes
+effect with the next project). What it watches:
+- every source in the database;
+- its settings file (`<source>.import.json`), there or not;
+- the files a scene names;
+- where each source was copied from: its **origin**, recorded by every import, with the
+  origin's settings and, for a scene, the files beside it.
+
+What the watch keeps, the origins and what it last saw of every file, is in `watch.json` beside
+the database. It is written after each request and when the project closes, and the next session
+compares against it at its first look: an export made while the editor was closed is taken when
+it opens. A change seen but not yet taken when the project closes is kept as waiting.
+
+**How a change is taken.** A file whose size or modification time changed is taken once it has
+stayed the same for 300 ms, so the program writing it has finished.
+- A changed origin is copied over its source, as an import is, with what it names.
+- The source is then cooked again. A source changed in the project is only cooked again.
+- The cook's result arrives like a request's, tagged `EDITOR_PROJECT_TAG_WATCH`, and what it wrote
+  is reloaded where it is drawn (step 4 above).
+
+So exporting again from Blender, or saving a texture in an image editor, updates the open scene
+within a second or two, in the project or wherever the file was imported from.
+
+**What is not taken.**
+- A cook that writes nothing is not logged. Examples are the editor's own save of a material it has
+  already cooked, or a manual import again.
+- An origin that disappears changes nothing: the project keeps its copy.
+- A source removed from the project keeps its cooked assets.
+- A `watch.json` that does not read is logged and replaced by the next save.
+
+The baseline of what was seen is taken before a request's result is handed over, so a change made
+after `editor_project_wait` returns is always a change.
+
 Refused or failing imports are logged, and the rest of the request still
 runs:
 - a folder that holds the sources themselves is not copied into them;

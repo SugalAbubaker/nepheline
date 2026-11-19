@@ -20,6 +20,20 @@
 // and swaps in a new snapshot. The main thread takes finished requests
 // with editor_project_poll and places the scenes they cooked.
 //
+// The import thread also watches what the project cooked (ADR-0107), when
+// asked to (EditorProjectDesc.watch_interval_ns): every source in the
+// database, its settings file, the files a scene names, and where each was
+// copied from (its origin, kept in watch.json beside the database). It
+// looks at them while it has nothing queued, and a file whose size or time
+// changed is taken once it has stayed so for the settle time: a changed
+// origin is copied over its source as an import is, and the source is
+// cooked again. The result comes like a request's, tagged
+// EDITOR_PROJECT_TAG_WATCH, and what it wrote is reloaded with the rest.
+// What it last saw of each file is kept in watch.json too, written after
+// each request and when the project is destroyed, and the next project's
+// first look compares against it: what changed while none was open is a
+// change.
+//
 // Thread-safety: NPH_MAIN_THREAD_ONLY, except editor_project_resolve,
 // which is NPH_THREADSAFE: the loader calls it from whichever thread loads
 // by GUID. The project's lock is held for one lookup, one swap, or one
@@ -41,11 +55,22 @@ typedef struct EditorProject EditorProject;
 #define EDITOR_IMPORT_NAME_MAX   64U
 #define EDITOR_PROJECT_PATH_MAX  1024U
 
+// How often the import thread looks for changed sources, and how long a change must hold
+// before it is taken (its writer has finished).
+#define EDITOR_PROJECT_WATCH_INTERVAL_NS 1000000000ULL
+#define EDITOR_PROJECT_WATCH_SETTLE_NS   300000000ULL
+// The tag of the results of the cooks the project starts itself, for what changed on disk.
+#define EDITOR_PROJECT_TAG_WATCH NPH_U64_MAX
+
 typedef struct EditorProjectDesc {
     NphAllocator *alloc;    // required and thread-safe: the import thread allocates too
     const char *assets_dir; // required: the sources
     const char *cooked_dir; // required: the cooker's output
     NphJobSystem *jobs;     // optional: textures encode in parallel
+    // Between looks for changed sources (above); 0: never.
+    u64 watch_interval_ns;
+    // How long a change must hold before it is taken; 0: EDITOR_PROJECT_WATCH_SETTLE_NS.
+    u64 watch_settle_ns;
 } EditorProjectDesc;
 
 typedef struct EditorImportResult {

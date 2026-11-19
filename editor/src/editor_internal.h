@@ -338,6 +338,7 @@ struct Editor {
     NphCvar cv_cooked;
     NphCvar cv_autosave_dir;
     NphCvar cv_autosave_interval;
+    NphCvar cv_watch; // editor.watch: milliseconds between looks for changed sources
     bool cvars_registered;
     f32 mouse[2]; // the cursor, display units, from the window's events
 
