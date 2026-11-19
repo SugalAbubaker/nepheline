@@ -17,6 +17,7 @@
 #include <cook/material.h>
 #include <cook/polymesh.h>
 #include <cook/ray_trim.h>
+#include <cook/scene_import.h>
 #include <cook/texture_import.h>
 #include <cook/voxel.h>
 #include <stdio.h>
@@ -649,6 +650,39 @@ static NphResult read_texture_import(Cooker *c, const char *source_path, CookTex
                       r == NPH_RESULT_VERSION_MISMATCH
                           ? "another version of the settings"
                           : "not texture settings (docs/cook.md \"Texture import settings\")");
+    }
+    return r;
+}
+
+// The settings file beside a scene (cook/scene_import.h; ADR-0107): its settings in `*out` (none
+// when there is no file), and its bytes into `*inout_hash`.
+static NphResult read_scene_import(Cooker *c, const char *source_path, CookSceneImport *out,
+                                   u64 *inout_hash)
+{
+    cook_scene_import_default(out);
+    char path[COOKER_PATH_MAX + 16U];
+    if ((u64)snprintf(path, sizeof path, "%s.import.json", source_path) >= sizeof path) {
+        return NPH_RESULT_OVERFLOW;
+    }
+    if (!nph_fs_exists(path)) {
+        return NPH_RESULT_OK;
+    }
+    void *json = NULL;
+    u64 size = 0U;
+    NphResult r = nph_file_read_all(path, c->alloc, &json, &size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", path, nph_result_string(r));
+        return r;
+    }
+    *inout_hash = nph_hash_combine(*inout_hash, nph_hash64(json, size, NPH_HASH_DEFAULT_SEED));
+    *inout_hash = nph_hash_combine(*inout_hash, size);
+    r = cook_scene_import_read(c->alloc, nph_str((const char *)json, size), out);
+    nph_file_free_all(c->alloc, json, size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", path,
+                      r == NPH_RESULT_VERSION_MISMATCH
+                          ? "another version of the settings"
+                          : "not scene settings (docs/cook.md \"Scene import settings\")");
     }
     return r;
 }
@@ -2384,6 +2418,19 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         c->stats.failed += 1U;
         return r;
     }
+    // Its import settings (cook/scene_import.h; ADR-0107), in its content hash and over the
+    // cooker's mesh and texture settings for this cook alone.
+    CookSceneImport settings;
+    r = read_scene_import(c, source_path, &settings, &scene.content_hash);
+    if (r != NPH_RESULT_OK) {
+        cook_gltf_free(&scene);
+        c->stats.failed += 1U;
+        return r;
+    }
+    const CookMeshSettings mesh_settings = c->mesh;
+    const CookTextureSettings texture_settings = c->texture;
+    c->mesh = cook_scene_import_mesh(&settings, &mesh_settings);
+    c->texture = cook_scene_import_texture(&settings, &texture_settings);
     NphAllocator *alloc = c->alloc;
     GuidArray produced; // every asset this cook stands for, cooked or current
     NPH_ARRAY_INIT(&produced, alloc);
@@ -2640,6 +2687,8 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         NPH_LOG_WARN(&NPH_LOG_COOK, "%s: %u features skipped (see above)", key, scene.warnings);
     }
     cook_gltf_free(&scene);
+    c->mesh = mesh_settings;
+    c->texture = texture_settings;
     if (r != NPH_RESULT_OK) {
         c->stats.failed += 1U;
         NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", source_path, nph_result_string(r));

@@ -489,10 +489,11 @@ Files dropped on the window, or given to `editor_import`, are imported
 into the folder the asset browser shows:
 1. A file outside the sources is **copied** in, replacing a file of the
    same name (re-importing an edited file updates it). A `.gltf` or `.glb`
-   brings the files it names with it (`cook_gltf_files`), a `.wav` or an
-   image its settings file (`<name>.import.json`, [cook.md](cook.md)
-   "Sounds" and "Texture import settings"), and a folder everything under
-   it. A file already inside the sources is
+   brings the files it names with it (`cook_gltf_files`), a scene, a
+   `.wav` or an image its settings file (`<name>.import.json`,
+   [cook.md](cook.md) "Scene import settings", "Sounds" and "Texture
+   import settings"), and a folder everything under it. A file already
+   inside the sources is
    used where it is.
 2. Each scene, editable mesh (`.nmesh`), sound (`.wav`), material
    (`.nmat`), and image is **cooked**, and the scenes, editable meshes,

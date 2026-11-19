@@ -613,6 +613,22 @@ def texture_import_seeds():
     }
 
 
+def scene_import_seeds():
+    """Scenes' import settings (tools/cook/scene_import.h; ADR-0107)."""
+    import json
+
+    def doc(d):
+        return json.dumps(d, separators=(",", ":")).encode("utf-8")
+
+    return {
+        "version_only": doc({"scene": 1}),
+        "props": doc({"scene": 1, "collision": "hull", "hull_vertices": 24}),
+        "every_key": doc({"scene": 1, "collision": "mesh", "hull_vertices": 32, "lods": True,
+                          "voxels": False, "texture_max_extent": 2048,
+                          "texture_uncompressed": False, "texture_mips": True}),
+    }
+
+
 def write_cook_seeds(write, corpus):
     import os
     for name, data in image_seeds().items():
@@ -625,3 +641,5 @@ def write_cook_seeds(write, corpus):
         write(os.path.join(corpus, "nmat", name), data)
     for name, data in texture_import_seeds().items():
         write(os.path.join(corpus, "texture_import", name), data)
+    for name, data in scene_import_seeds().items():
+        write(os.path.join(corpus, "scene_import", name), data)

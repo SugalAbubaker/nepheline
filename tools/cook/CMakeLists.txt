@@ -48,6 +48,7 @@ set(cook_sources
     src/polymesh.c
     src/preview.c
     src/ray_trim.c
+    src/scene_import.c
     src/sound.c
     src/specgloss.c
     src/texture.c
@@ -113,6 +114,7 @@ nph_add_test(cook
         tests/test_polymesh.c
         tests/test_preview.c
         tests/test_ray_trim.c
+        tests/test_scene_import.c
         tests/test_sound.c
         tests/test_specgloss.c
         tests/test_texture.c

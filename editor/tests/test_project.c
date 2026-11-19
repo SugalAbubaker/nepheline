@@ -5,6 +5,7 @@
 // that the resolver reads, also while other imports run. Failures arrive
 // in the results, and the requests in flight are bounded.
 #include <nepheline/asset/sound.h>
+#include <nepheline/asset/texture.h>
 #include <nepheline/audio/wav.h>
 #include <nepheline/core/alloc_debug.h>
 #include <nepheline/core/atomic.h>
@@ -290,6 +291,39 @@ NTEST_F(ProjectFixture, a_sound_comes_with_its_settings_and_cooks)
                          (u32)NPH_SOUND_CODEC_ADPCM);
     NTEST_EXPECT_EQ_UINT(cooked_codec(f->cooked, "sounds/hum_wav/sound.nph"),
                          (u32)NPH_SOUND_CODEC_PCM);
+}
+
+// The width of the cooked texture at `cooked`/`output`.
+static u32 cooked_width(const char *cooked, const char *output)
+{
+    char path[1600];
+    (void)snprintf(path, sizeof path, "%s/%s", cooked, output);
+    TestAsset a;
+    test_asset_from_file(nph_allocator_system(), path, &a);
+    NphTextureView v;
+    NTEST_ASSERT_EQ_INT(nph_texture_view(&a.asset, &v), NPH_RESULT_OK);
+    const u32 width = v.header->width;
+    test_asset_free(&a);
+    return width;
+}
+
+NTEST_F(ProjectFixture, a_scene_comes_with_its_settings_and_cooks_by_them)
+{
+    // A scene dropped with its settings file beside it (cook/scene_import.h; ADR-0107) brings
+    // the file along, and its images cook as the file says.
+    test_write_gltf(&f->src, "street", false);
+    char scene[1200];
+    char settings[1300];
+    test_path_in(&f->src, "street.gltf", scene, sizeof scene);
+    (void)snprintf(settings, sizeof settings, "%s.import.json", scene);
+    static const char json[] = "{\"scene\": 1, \"texture_max_extent\": 2}";
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(settings, json, sizeof json - 1U), NPH_RESULT_OK);
+    const char *paths[1] = {scene};
+    const EditorImportResult res = import_now(f, paths, 1U, "models");
+    NTEST_ASSERT_EQ_INT(res.result, NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(exists_in(f->assets, "models/street.gltf.import.json"));
+    NTEST_EXPECT_TRUE(editor_project_is_cooked(f->p, "models/street.gltf"));
+    NTEST_EXPECT_EQ_UINT(cooked_width(f->cooked, "models/street_gltf/tex_0_checker_color.nph"), 2U);
 }
 
 NTEST_F(ProjectFixture, what_an_import_refuses_and_how_failures_arrive)

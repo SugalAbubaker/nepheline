@@ -245,10 +245,10 @@ static NphResult copy_source(EditorProject *p, const char *from, const char *to)
 {
     NPH_TRY(nph_fs_copy_file(from, to));
     const CookerSourceKind kind = cooker_source_kind(from);
-    if (kind == COOKER_SOURCE_SOUND || kind == COOKER_SOURCE_IMAGE) {
-        // A sound's or an image's settings file comes with it (cook/sound.h,
-        // cook/texture_import.h); one already in the project stays when the
-        // file comes without.
+    if (kind == COOKER_SOURCE_SOUND || kind == COOKER_SOURCE_IMAGE || kind == COOKER_SOURCE_SCENE) {
+        // A sound's, an image's or a scene's settings file comes with it (cook/sound.h,
+        // cook/texture_import.h, cook/scene_import.h); one already in the project stays when
+        // the file comes without.
         char settings_from[EDITOR_PROJECT_PATH_MAX + 16U];
         char settings_to[EDITOR_PROJECT_PATH_MAX + 16U];
         if ((u64)snprintf(settings_from, sizeof settings_from, "%s.import.json", from) >=
@@ -257,8 +257,9 @@ static NphResult copy_source(EditorProject *p, const char *from, const char *to)
                 sizeof settings_to) {
             return NPH_RESULT_OVERFLOW;
         }
-        return nph_fs_exists(settings_from) ? nph_fs_copy_file(settings_from, settings_to)
-                                            : NPH_RESULT_OK;
+        if (nph_fs_exists(settings_from)) {
+            NPH_TRY(nph_fs_copy_file(settings_from, settings_to));
+        }
     }
     if (kind != COOKER_SOURCE_SCENE) {
         return NPH_RESULT_OK;
