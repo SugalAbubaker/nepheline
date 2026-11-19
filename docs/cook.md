@@ -190,6 +190,30 @@ with a scheme, an absolute path, or one above the document's directory is
 refused, since a copy could not keep it beside the document. The editor's
 import copies a dropped `.gltf` with these files.
 
+### Scene import settings (`scene_import.h`)
+
+A `.gltf` or `.glb` may have a settings file beside it, `<file>.import.json` (ADR-0107), which the
+cooker reads when it cooks the document:
+
+    {"scene": 1, "collision": "mesh", "hull_vertices": 32, "lods": true, "voxels": false,
+     "texture_max_extent": 2048, "texture_uncompressed": false, "texture_mips": true}
+
+Every key but `"scene"` may be left out, and the cooker's setting then holds:
+- `collision` is what the scene's meshes collide as where nothing on an object says otherwise:
+  `"none"` (the default), `"mesh"` (their triangles, for the static world) or `"hull"` (a convex
+  hull of at most `hull_vertices` points, 4 to 256, by default 32, for props).
+- `lods` and `voxels` turn the mesh pipeline's levels of detail and voxel levels (below) on or off
+  for this scene's meshes.
+- `texture_max_extent`, `texture_uncompressed` and `texture_mips` set the scene's images as an
+  image's own settings set an image cooked alone ("Texture import settings"); each image keeps
+  the usage its material slot gives it.
+
+The settings hold for the document's cook alone: the cooker's own are back once it ends. The
+file's bytes join the document's content hash, so a change cooks the scene again. Reading is
+strict, as for the images' and sounds' settings: another version is `NPH_RESULT_VERSION_MISMATCH`,
+an unknown or repeated key or a value out of range `NPH_RESULT_PARSE_ERROR`, and either fails the
+scene's cook.
+
 ## Rays
 
 A glTF mesh's extras can say `{"no_rays": true}`: the cooked mesh is flagged
@@ -725,7 +749,7 @@ Every key but `"texture"` may be left out, and the cooker's setting then holds:
   or `down` (DirectX's), whose green the cooker flips before the normals are renormalised.
 
 The file's bytes join the image's content hash, so a change cooks the image again. A glTF's images
-keep the cooker's settings.
+take the cooker's settings, with the scene's import settings over them (below).
 
 ## Sounds (`sound.h`)
 
@@ -798,6 +822,9 @@ input must never crash"):
   a header and a texture transform that `nph_material_view` takes.
 - `tests/fuzz/fuzz_texture_import.c`: images' import settings, read and
   written back to the same settings.
+- `tests/fuzz/fuzz_scene_import.c`: scenes' import settings, read, written
+  back to the same settings, and applied within what the mesh and texture
+  pipelines take.
 - `tests/fuzz/fuzz_preview.c`: material previews' cache files, read for the
   key their header names; one that reads must not read for another key,
   nor from memory off its alignment.

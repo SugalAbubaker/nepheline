@@ -35,6 +35,7 @@ nph_add_fuzzer(nmesh SOURCES fuzz_nmesh.c fuzz_mesh_check.h DEPS nph::cook)
 # viewed as the runtime views it.
 nph_add_fuzzer(nmat SOURCES fuzz_nmat.c DEPS nph::cook)
 nph_add_fuzzer(texture_import SOURCES fuzz_texture_import.c DEPS nph::cook)
+nph_add_fuzzer(scene_import SOURCES fuzz_scene_import.c DEPS nph::cook)
 # The material previews' cache files (tools/cook/preview.h; ADR-0105): read for the key
 # their header names, and refused for another, or off their alignment.
 nph_add_fuzzer(preview SOURCES fuzz_preview.c DEPS nph::cook)
