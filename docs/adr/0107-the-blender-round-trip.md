@@ -108,7 +108,10 @@ What there is today:
      buffers and images), their settings files and the origins (`nph_fs_stat`);
    - a file whose size or time changed is taken once it has stayed the same for 300 ms (its writer has finished);
    - a changed origin is copied over its source as an import is; then the source is cooked, and the cook's reload
-     (`nph_scene_renderer_reload`) brings it into the open scene, placed entities and all.
+     (`nph_scene_renderer_reload`) brings it into the open scene, placed entities and all;
+   - what the watch last saw of every file is kept between sessions with the origins (`watch.json` beside the
+     database), so an export made while the editor was closed is taken when it opens, and a change seen but not yet
+     taken when it closes still waits.
    So exporting from Blender, into the project or anywhere it was imported from, updates the editor.
 
 6. **A guide to exporting from Blender** (`docs/blender.md`): the glTF exporter's settings (binary `.glb`, +Y up,

@@ -11,6 +11,7 @@
 #include <nepheline/core/atomic.h>
 #include <nepheline/core/guid.h>
 #include <nepheline/jobs/jobs.h>
+#include <nepheline/platform/file.h>
 #include <nepheline/platform/thread.h>
 
 #include "project.h"
@@ -324,6 +325,182 @@ NTEST_F(ProjectFixture, a_scene_comes_with_its_settings_and_cooks_by_them)
     NTEST_EXPECT_TRUE(exists_in(f->assets, "models/street.gltf.import.json"));
     NTEST_EXPECT_TRUE(editor_project_is_cooked(f->p, "models/street.gltf"));
     NTEST_EXPECT_EQ_UINT(cooked_width(f->cooked, "models/street_gltf/tex_0_checker_color.nph"), 2U);
+}
+
+// ---------------------------------------------------------------------------
+// Watching (ADR-0107)
+// ---------------------------------------------------------------------------
+
+// The project again, watching its sources: a look every 20 ms, a change taken after 40.
+static void open_watching(ProjectFixture *f)
+{
+    editor_project_destroy(f->p);
+    f->p = NULL;
+    EditorProjectDesc d;
+    memset(&d, 0, sizeof d);
+    d.alloc = nph_debug_allocator_allocator(&f->da);
+    d.assets_dir = f->assets;
+    d.cooked_dir = f->cooked;
+    d.watch_interval_ns = 20000000ULL;
+    d.watch_settle_ns = 40000000ULL;
+    NTEST_ASSERT_EQ_INT(editor_project_create(&d, &f->p), NPH_RESULT_OK);
+}
+
+// The result of the cook the project starts for a change on disk, within 20 seconds.
+static EditorImportResult watched(ProjectFixture *f)
+{
+    EditorImportResult res;
+    memset(&res, 0, sizeof res);
+    for (u32 i = 0; i < 2000U; ++i) {
+        if (editor_project_poll(f->p, &res)) {
+            NTEST_EXPECT_TRUE(res.tag == EDITOR_PROJECT_TAG_WATCH);
+            NTEST_EXPECT_EQ_UINT(res.written_count, res.cooked);
+            editor_project_result_free(f->p, &res); // the counts stay; the list goes
+            return res;
+        }
+        nph_thread_sleep_ns(10000000ULL);
+    }
+    NTEST_FAIL("no cook for the change within 20 s");
+    return res;
+}
+
+// Nothing more comes for a while: what the project did itself was no change to take.
+static void nothing_more(ProjectFixture *f)
+{
+    nph_thread_sleep_ns(250000000ULL);
+    editor_project_wait(f->p);
+    EditorImportResult none;
+    NTEST_EXPECT_FALSE(editor_project_poll(f->p, &none));
+}
+
+// A TGA `side` texels a side at `path`.
+static void write_square_tga(const char *path, u32 side)
+{
+    const u64 texels = (u64)side * side;
+    u8 rgba[16 * 16 * 4];
+    u8 tga[18 + 16 * 16 * 4];
+    NTEST_ASSERT_LE_UINT(side, 16U);
+    for (u64 i = 0; i < texels; ++i) {
+        rgba[i * 4U] = (u8)(i * 7U);
+        rgba[i * 4U + 1U] = 90U;
+        rgba[i * 4U + 2U] = (u8)(255U - i);
+        rgba[i * 4U + 3U] = 255U;
+    }
+    const u64 n = test_write_tga(rgba, side, side, tga);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, tga, n), NPH_RESULT_OK);
+}
+
+NTEST_F(ProjectFixture, what_changes_on_disk_is_imported_and_cooked_again)
+{
+    open_watching(f);
+    char origin[1200];
+    test_path_in(&f->src, "lone.tga", origin, sizeof origin);
+    write_square_tga(origin, 8U);
+    const char *one[1] = {origin};
+    const EditorImportResult first = import_now(f, one, 1U, "textures");
+    NTEST_ASSERT_EQ_INT(first.result, NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooked_width(f->cooked, "textures/lone_tga/tex_color.nph"), 8U);
+    NTEST_EXPECT_TRUE(exists_in(f->cooked, "watch.json"));
+    nothing_more(f);
+    // Where it came from changes: copied in again, and cooked.
+    write_square_tga(origin, 16U);
+    EditorImportResult res = watched(f);
+    NTEST_EXPECT_EQ_INT(res.result, NPH_RESULT_OK);
+    NTEST_EXPECT_GT_UINT(res.cooked, 0U);
+    NTEST_EXPECT_EQ_UINT(cooked_width(f->cooked, "textures/lone_tga/tex_color.nph"), 16U);
+    nothing_more(f);
+    // The project's copy changes: cooked again, its origin left as it is.
+    char copy[1300];
+    (void)snprintf(copy, sizeof copy, "%s/textures/lone.tga", f->assets);
+    write_square_tga(copy, 4U);
+    res = watched(f);
+    NTEST_EXPECT_EQ_INT(res.result, NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooked_width(f->cooked, "textures/lone_tga/tex_color.nph"), 4U);
+    // Settings appear beside the copy: cooked again by them.
+    char settings[1400];
+    (void)snprintf(settings, sizeof settings, "%s.import.json", copy);
+    static const char json[] = "{\"texture\": 1, \"max_extent\": 2}";
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(settings, json, sizeof json - 1U), NPH_RESULT_OK);
+    res = watched(f);
+    NTEST_EXPECT_EQ_INT(res.result, NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooked_width(f->cooked, "textures/lone_tga/tex_color.nph"), 2U);
+    nothing_more(f);
+    // Its origin gone: nothing to take, and the copy stays.
+    NTEST_ASSERT_EQ_INT(nph_fs_remove_file(origin), NPH_RESULT_OK);
+    nothing_more(f);
+    NTEST_EXPECT_TRUE(exists_in(f->assets, "textures/lone.tga"));
+}
+
+NTEST_F(ProjectFixture, a_scenes_origin_and_the_files_beside_it_are_watched_across_sessions)
+{
+    open_watching(f);
+    test_write_gltf(&f->src, "crate", true); // crate.gltf, crate.bin, crate_base.tga
+    char scene[1200];
+    test_path_in(&f->src, "crate.gltf", scene, sizeof scene);
+    const char *one[1] = {scene};
+    NTEST_ASSERT_EQ_INT(import_now(f, one, 1U, "models").result, NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooked_width(f->cooked, "models/crate_gltf/tex_0_checker_color.nph"), 8U);
+    // A project opened again remembers where its sources came from.
+    open_watching(f);
+    nothing_more(f);
+    // The image beside the origin changes: the scene is imported again, the image with it.
+    char image[1200];
+    test_path_in(&f->src, "crate_base.tga", image, sizeof image);
+    write_square_tga(image, 2U);
+    const EditorImportResult res = watched(f);
+    NTEST_EXPECT_EQ_INT(res.result, NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooked_width(f->cooked, "models/crate_gltf/tex_0_checker_color.nph"), 2U);
+    NphFileInfo origin_info;
+    NphFileInfo copy_info;
+    char copy[1300];
+    (void)snprintf(copy, sizeof copy, "%s/models/crate_base.tga", f->assets);
+    NTEST_ASSERT_EQ_INT(nph_fs_stat(image, &origin_info), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_fs_stat(copy, &copy_info), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(copy_info.size, origin_info.size);
+    nothing_more(f);
+}
+
+NTEST_F(ProjectFixture, what_changed_while_the_project_was_closed_is_taken_when_it_opens)
+{
+    // A project whose watch.json is not the editor's opens, and keeps importing.
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(f->cooked), NPH_RESULT_OK);
+    char path[1300];
+    (void)snprintf(path, sizeof path, "%s/watch.json", f->cooked);
+    static const char junk[] = "{\"watch\": 9}";
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, junk, sizeof junk - 1U), NPH_RESULT_OK);
+    open_watching(f);
+    char lone[1200];
+    test_path_in(&f->src, "lone.tga", lone, sizeof lone);
+    write_square_tga(lone, 4U);
+    const char *one[1] = {lone};
+    NTEST_ASSERT_EQ_INT(import_now(f, one, 1U, "").result, NPH_RESULT_OK);
+    // Closed, its origin changes; opened again (the file written afresh reads), the change is
+    // taken at the first look.
+    editor_project_destroy(f->p);
+    f->p = NULL;
+    write_square_tga(lone, 8U);
+    open_watching(f);
+    NTEST_EXPECT_EQ_INT(watched(f).result, NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooked_width(f->cooked, "lone_tga/tex_color.nph"), 8U);
+    nothing_more(f);
+    // A change seen but not yet taken when the project closes waits for the next session: the
+    // settle time outlasts this one.
+    editor_project_destroy(f->p);
+    f->p = NULL;
+    EditorProjectDesc d;
+    memset(&d, 0, sizeof d);
+    d.alloc = nph_debug_allocator_allocator(&f->da);
+    d.assets_dir = f->assets;
+    d.cooked_dir = f->cooked;
+    d.watch_interval_ns = 20000000ULL;
+    d.watch_settle_ns = 60000000000ULL; // a minute: nothing is taken in this session
+    NTEST_ASSERT_EQ_INT(editor_project_create(&d, &f->p), NPH_RESULT_OK);
+    nph_thread_sleep_ns(100000000ULL); // the first sync and a look or two
+    write_square_tga(lone, 2U);
+    nph_thread_sleep_ns(200000000ULL); // seen, waiting
+    open_watching(f);                  // closes that session, opens one that settles quickly
+    NTEST_EXPECT_EQ_INT(watched(f).result, NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooked_width(f->cooked, "lone_tga/tex_color.nph"), 2U);
 }
 
 NTEST_F(ProjectFixture, what_an_import_refuses_and_how_failures_arrive)

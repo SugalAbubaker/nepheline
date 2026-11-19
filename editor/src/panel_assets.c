@@ -58,6 +58,7 @@ NphResult editor_assets_open(Editor *ed)
     d.assets_dir = assets;
     d.cooked_dir = cooked;
     d.jobs = nph_engine_jobs(ed->engine);
+    d.watch_interval_ns = (u64)nph_cvar_get_int(&ed->cv_watch) * 1000000ULL;
     EditorProject *p = NULL;
     NphResult r = editor_project_create(&d, &p);
     if (r != NPH_RESULT_OK) {
@@ -351,10 +352,13 @@ static NphResult place_mesh(Editor *ed, NphGuid mesh, const char *name, NphDVec3
 static void finished(Editor *ed, const EditorImportResult *res)
 {
     ed->assets.stale = true;
+    // A change on disk that cooked to what was there (the editor's own save of a source it had
+    // cooked already) has nothing to say.
+    const bool quiet = res->tag == EDITOR_PROJECT_TAG_WATCH && res->written_count == 0U;
     if (res->result != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&LOG_EDITOR, "import failed: %s (%u assets cooked, %u sources failed)",
                       nph_result_string(res->result), res->cooked, res->failed);
-    } else {
+    } else if (!quiet) {
         NPH_LOG_INFO(&LOG_EDITOR, "import done: %u assets cooked, %u already current", res->cooked,
                      res->skipped);
     }
