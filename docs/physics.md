@@ -558,11 +558,17 @@ friction coefficient, a restitution, a filter, and event switches. Two
 shapes meet when their filters allow: shapes of the same positive group
 always do, of the same negative group never do, and otherwise each's
 category must be in the other's mask (Box2D's rule). Shapes of one body
-never meet, and neither do two bodies that are not dynamic. A pair's
-friction is the geometric mean of the two coefficients and its restitution
-the larger, so a frictionless surface makes every contact on it
-frictionless and a bouncy ball bounces on any floor. A sensor or a ghost
-touches nothing ("Sensors and ghosts" below).
+never meet, and neither do two bodies that are not dynamic. By default a
+pair's friction is the geometric mean of the two coefficients and its
+restitution the larger, so a frictionless surface makes every contact on it
+frictionless and a bouncy ball bounces on any floor. A shape may instead
+combine its friction, or its restitution, by the average, the minimum, the
+product, or the maximum (`NphPhysicsCombine`; ADR-0108). Of a pair's two
+modes the higher decides, in that order (PhysX's), so ice (the minimum) is
+slippery against every shape of the default and the average modes; either
+order of the two shapes gives the same bits. Pairs of default shapes pay
+one test for it. A sensor or a ghost touches nothing ("Sensors and ghosts"
+below).
 
 **Compounds** are bodies with several shapes (ADR-0046 §11, as PhysX and
 Box2D do it): each shape is placed by its pose on the body, the body's
@@ -1409,7 +1415,7 @@ reference CPU class.
 
 ## Testing
 
-`physics_tests` (246 tests):
+`physics_tests` (251 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -1598,6 +1604,13 @@ reference CPU class.
   pushing a box ahead of it; pushed out of a wall and a floor it starts in;
   the same path 10 000 km out; a box and a ball walking and climbing too;
   and descriptions refused.
+- Combine modes (`test_combine.c`, ADR-0108): each mode's value; the
+  higher of two modes deciding, either order giving the same bits; the
+  defaults as contacts always had them; an icy box sliding at its
+  friction's rate on a ramp where the default holds it, held again by the
+  ramp's maximum; a ball's bounce set by its restitution's minimum and
+  outranked by the floor's product; modes changed between steps; and modes
+  out of range refused.
 - Sensors and ghosts (`test_sensor.c`, ADR-0108): a ball falling through
   a sensor, beginning and ending once each with both shapes' user data;
   what a sensor sees (moving shapes its mask meets, their own masks not

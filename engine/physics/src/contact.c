@@ -424,8 +424,9 @@ static void mesh_update(NphPhysicsWorld *w, u32 contact)
     }
     WarmStart ws = {old, old_normals, old_count, 0U};
     u32 unmatched = 0U; // bit 4i + j: point j of manifold i
-    const f32 friction = nph_f32_sqrt(sa->friction * sb->friction);
-    const f32 restitution = nph_f32_max(sa->restitution, sb->restitution);
+    f32 friction = 0.0F;
+    f32 restitution = 0.0F;
+    phys_pair_surface(sa, sb, &friction, &restitution);
     bool children_changed = false;
     u32 rec = contact;
     for (u32 i = 0U; rec != PHYS_NULL; ++i) {
@@ -566,8 +567,7 @@ void phys_contact_update(NphPhysicsWorld *w, u32 contact)
     c->point_count = m.point_count;
     memcpy(c->points, points, (size_t)m.point_count * sizeof(PhysContactPoint));
     // Surfaces may change between steps (shape.h).
-    c->friction = nph_f32_sqrt(sa->friction * sb->friction);
-    c->restitution = nph_f32_max(sa->restitution, sb->restitution);
+    phys_pair_surface(sa, sb, &c->friction, &c->restitution);
     const bool touching = m.point_count > 0U;
     if (touching && !was_touching) {
         c->change = PHYS_CHANGE_STARTED;

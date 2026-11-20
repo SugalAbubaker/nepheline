@@ -38,12 +38,32 @@ NphPhysicsFilter nph_physics_filter_default(void);
 // True when shapes with these filters may touch.
 bool nph_physics_filter_should_collide(NphPhysicsFilter a, NphPhysicsFilter b);
 
+// How two touching shapes' friction, or their restitution, combine (ADR-0108). The higher of the
+// two shapes' modes decides (PhysX's order), so a shape of MIN (ice) is slippery against every
+// shape of the default and the average modes. Two defaults combine as they always have.
+typedef enum NphPhysicsCombine {
+    NPH_PHYSICS_COMBINE_DEFAULT = 0,  // friction: the geometric mean; restitution: the larger
+    NPH_PHYSICS_COMBINE_AVERAGE = 1,  // the arithmetic mean
+    NPH_PHYSICS_COMBINE_MIN = 2,      // the smaller
+    NPH_PHYSICS_COMBINE_MULTIPLY = 3, // the product
+    NPH_PHYSICS_COMBINE_MAX = 4,      // the larger
+    NPH_PHYSICS_COMBINE_COUNT
+} NphPhysicsCombine;
+
+// The friction, and the restitution, of two shapes with these values and modes (valid values and
+// modes; asserted). Either order gives the same bits. Pure: any thread.
+f32 nph_physics_combine_friction(f32 a, NphPhysicsCombine mode_a, f32 b, NphPhysicsCombine mode_b);
+f32 nph_physics_combine_restitution(f32 a, NphPhysicsCombine mode_a, f32 b,
+                                    NphPhysicsCombine mode_b);
+
 typedef struct NphPhysicsShapeDesc {
     NphPhysicsGeometry geometry; // valid (geometry.h)
     NphPhysicsPose pose;         // in the body's frame
     f32 density;                 // kg/m^3, >= 0 (0: no mass of its own)
     f32 friction;                // >= 0
     f32 restitution;             // in [0, 1]
+    NphPhysicsCombine friction_combine;
+    NphPhysicsCombine restitution_combine;
     NphPhysicsFilter filter;
     b32 contact_events; // report begin and end touching (world.h)
     b32 hit_events;     // report hits above the world's threshold
@@ -61,14 +81,16 @@ typedef struct NphPhysicsShapeDesc {
 } NphPhysicsShapeDesc;
 
 // `geometry` at the body's origin: density 1000 (water), friction 0.6,
-// restitution 0, the default filter, contact events on, hit events off, a
-// solid shape (neither a sensor nor a ghost) that sensors see.
+// restitution 0, both combined by default, the default filter, contact
+// events on, hit events off, a solid shape (neither a sensor nor a ghost)
+// that sensors see.
 NphPhysicsShapeDesc nph_physics_shape_desc_default(NphPhysicsGeometry geometry);
 
 // Attaches a shape and updates the body's mass properties (unless they are
 // set explicitly). NPH_RESULT_INVALID_ARGUMENT for invalid geometry, a mesh
 // on a dynamic body, a bad pose, a negative density, friction, or
-// restitution, a sensor that is not convex, or a shape both sensor and ghost;
+// restitution, a combine mode out of range, a sensor that is not convex, or
+// a shape both sensor and ghost;
 // NPH_RESULT_NOT_FOUND for a stale body; NPH_RESULT_FULL past
 // NPH_PHYSICS_MAX_OBJECTS; NPH_RESULT_OUT_OF_MEMORY.
 NPH_MUST_USE NphResult nph_physics_shape_create(NphPhysicsWorld *world, NphPhysicsBody body,
@@ -86,10 +108,19 @@ NphPhysicsPose nph_physics_shape_pose(const NphPhysicsWorld *world, NphPhysicsSh
 
 f32 nph_physics_shape_friction(const NphPhysicsWorld *world, NphPhysicsShape shape);
 f32 nph_physics_shape_restitution(const NphPhysicsWorld *world, NphPhysicsShape shape);
-// New surface properties apply to contacts from the next step.
+NphPhysicsCombine nph_physics_shape_friction_combine(const NphPhysicsWorld *world,
+                                                     NphPhysicsShape shape);
+NphPhysicsCombine nph_physics_shape_restitution_combine(const NphPhysicsWorld *world,
+                                                        NphPhysicsShape shape);
+// New surface properties apply to contacts from the next step. Values and modes out of range are
+// asserted, and ignored in shipping builds.
 void nph_physics_shape_set_friction(NphPhysicsWorld *world, NphPhysicsShape shape, f32 friction);
 void nph_physics_shape_set_restitution(NphPhysicsWorld *world, NphPhysicsShape shape,
                                        f32 restitution);
+void nph_physics_shape_set_friction_combine(NphPhysicsWorld *world, NphPhysicsShape shape,
+                                            NphPhysicsCombine mode);
+void nph_physics_shape_set_restitution_combine(NphPhysicsWorld *world, NphPhysicsShape shape,
+                                               NphPhysicsCombine mode);
 
 NphPhysicsFilter nph_physics_shape_filter(const NphPhysicsWorld *world, NphPhysicsShape shape);
 // A new filter drops contacts it no longer allows and lets new pairs form at

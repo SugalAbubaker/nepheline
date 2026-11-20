@@ -119,6 +119,23 @@ enum {
 // What touches nothing: no contacts, no mass (ADR-0108).
 #define PHYS_SHAPE_UNTOUCHABLE ((u32)PHYS_SHAPE_SENSOR | (u32)PHYS_SHAPE_GHOST)
 
+// How a pair's surfaces combine (shape.h NphPhysicsCombine; ADR-0108): the higher mode decides.
+NPH_INLINE f32 phys_combine(f32 a, u32 mode_a, f32 b, u32 mode_b, bool restitution)
+{
+    switch (mode_a > mode_b ? mode_a : mode_b) {
+    case NPH_PHYSICS_COMBINE_AVERAGE:
+        return 0.5F * (a + b);
+    case NPH_PHYSICS_COMBINE_MIN:
+        return nph_f32_min(a, b);
+    case NPH_PHYSICS_COMBINE_MULTIPLY:
+        return a * b;
+    case NPH_PHYSICS_COMBINE_MAX:
+        return nph_f32_max(a, b);
+    default:
+        return restitution ? nph_f32_max(a, b) : nph_f32_sqrt(a * b);
+    }
+}
+
 // A sensor (sensor.c): its shape's slot; its visitors of the last step that succeeded, `count`
 // entries of the world's sensor_visitors from `first`, sorted by handle; and its room in the
 // step's buffer (a power of two, from PHYS_SENSOR_FIRST_ROOM, never shrinking).
@@ -146,6 +163,9 @@ typedef struct PhysShape {
     f32 density;
     f32 friction;
     f32 restitution;
+    u8 friction_combine;    // NphPhysicsCombine
+    u8 restitution_combine; // NphPhysicsCombine
+    u8 pad[2];
     NphPhysicsFilter filter;
     u32 tree;         // PHYS_TREE_*
     u32 proxy;        // in its tree
@@ -153,6 +173,25 @@ typedef struct PhysShape {
     NphAABB fat_aabb; // the proxy's box
     u64 user_data;
 } PhysShape;
+
+// A contact's friction and restitution, every step (surfaces may change between steps). Pairs
+// of default shapes, nearly all, take the arithmetic contacts always had after one test: through
+// the switch alone the resting pyramid stepped 0.6 % slower on one thread, with this test within
+// the noise.
+NPH_INLINE void phys_pair_surface(const PhysShape *a, const PhysShape *b, f32 *out_friction,
+                                  f32 *out_restitution)
+{
+    if (NPH_LIKELY((a->friction_combine | a->restitution_combine | b->friction_combine |
+                    b->restitution_combine) == 0U)) {
+        *out_friction = nph_f32_sqrt(a->friction * b->friction);
+        *out_restitution = nph_f32_max(a->restitution, b->restitution);
+        return;
+    }
+    *out_friction =
+        phys_combine(a->friction, a->friction_combine, b->friction, b->friction_combine, false);
+    *out_restitution = phys_combine(a->restitution, a->restitution_combine, b->restitution,
+                                    b->restitution_combine, true);
+}
 
 typedef struct PhysContactPoint {
     NphVec3 anchor_a; // from A's centre of mass, world axes
