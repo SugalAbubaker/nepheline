@@ -344,7 +344,13 @@ world_ragdolls_32_mt_xpbd16    6600000
 
 # audio_bench (docs/audio.md "Performance"): per sample, per output frame
 # for the resampler and the codecs, per block for the mixer.
-mix_ramp_scalar                0.8
+# The scalar ramp is the plain reference the SIMD kernels are tested against
+# (x86 always runs SSE4 or AVX2). GCC converts its unsigned index to float a
+# sample at a time, since SSE4.2 has no unsigned conversion, while Clang
+# vectorizes around it: 0.75 ns on the hosted Xeon 6975P-C against Clang's
+# 0.24, and 0.96 on the slower Xeon 8573C (the nightly of 2026-11-20). Its
+# budget follows GCC's, with a third to spare.
+mix_ramp_scalar                1.3
 mix_ramp_sse4                  0.5
 mix_ramp_avx2                  0.26
 resample_mono_scalar           96
