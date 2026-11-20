@@ -662,6 +662,43 @@ NTEST(mesh, a_mesh_without_triangles_writes_an_empty_asset)
     cook_mesh_free(&m);
 }
 
+// A mesh whose slots read the second set but which is left without vertices (its every
+// triangle degenerate) writes no second set: its view refuses the flag on a mesh without
+// vertices, the stream holding a value a vertex (ADR-0107). A mutation of the fuzz corpus's
+// second-set seed found it (corpus/gltf/regression_uv1_no_vertices).
+NTEST(mesh, a_mesh_left_without_vertices_writes_no_second_set)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    CookMesh m;
+    cook_mesh_init(&m, alloc);
+    CookVertex v[3];
+    memset(v, 0, sizeof v); // every position the same: the triangle is degenerate
+    v[1].uv1 = nph_vec2(1.0F, 0.0F);
+    v[2].uv1 = nph_vec2(0.0F, 1.0F);
+    const u32 tri[3] = {0U, 1U, 2U};
+    NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(&m, v, 3U, tri, 3U, 0U), NPH_RESULT_OK);
+    m.flags |= (u32)COOK_MESH_HAS_UV0 | (u32)COOK_MESH_HAS_UV1;
+    CookMeshSettings s;
+    cook_mesh_settings_default(&s);
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, alloc, NPH_ASSET_TYPE_MESH, NPH_MESH_TYPE_VERSION,
+                          nph_guid_from_cstr("empty_uv1"), 1U);
+    CookMeshStats st;
+    NTEST_ASSERT_EQ_INT(cook_mesh_process(&m, &s, NULL, NULL, &w, &st), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(st.triangles, 0U);
+    TestAsset ta;
+    test_asset_from_writer(alloc, &w, &ta);
+    nph_asset_writer_free(&w);
+    NphMeshView view;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ta.asset, &view), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(view.header->vertex_count, 0U);
+    NTEST_EXPECT_EQ_UINT(view.header->flags & (u32)NPH_MESH_FLAG_HAS_UV1, 0U);
+    NTEST_EXPECT_NULL(view.uv1);
+    NTEST_EXPECT_NULL(nph_asset_blob(&ta.asset, NPH_MESH_TAG_UV1, 0U));
+    test_asset_free(&ta);
+    cook_mesh_free(&m);
+}
+
 // A source normal of zero is invalid glTF but finite, so it reaches the
 // pipeline; tangent generation treats it as +Z instead of asserting (a
 // mutation of the fuzz corpus found the assertion).

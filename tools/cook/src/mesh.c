@@ -585,6 +585,10 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     }
     const NphVec3 extent = nph_aabb_size(box);
 
+    // The second set (f16x2), its own stream (NPH_MESH_TAG_UV1), where a slot reads one and
+    // vertices are left to hold it: a mesh left with none (its every triangle degenerate, or voxels
+    // alone) carries no second set, which its view refuses on a mesh without vertices (views.c).
+    const bool with_uv1 = (mesh->flags & (u32)COOK_MESH_HAS_UV1) != 0U && vn != 0U;
     NphMeshHeader h;
     memset(&h, 0, sizeof h);
     h.vertex_count = vn;
@@ -596,7 +600,7 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     h.flags =
         ((mesh->flags & (u32)COOK_MESH_HAS_TANGENTS) != 0U ? (u32)NPH_MESH_FLAG_HAS_TANGENTS : 0U) |
         ((mesh->flags & (u32)COOK_MESH_HAS_UV0) != 0U ? (u32)NPH_MESH_FLAG_HAS_UV0 : 0U) |
-        ((mesh->flags & (u32)COOK_MESH_HAS_UV1) != 0U ? (u32)NPH_MESH_FLAG_HAS_UV1 : 0U) |
+        (with_uv1 ? (u32)NPH_MESH_FLAG_HAS_UV1 : 0U) |
         ((mesh->flags & (u32)COOK_MESH_NO_RAYS) != 0U ? (u32)NPH_MESH_FLAG_NO_RAYS : 0U) |
         ((mesh->flags & (u32)COOK_MESH_HAS_COLORS) != 0U ? (u32)NPH_MESH_FLAG_HAS_COLORS : 0U);
     h.position_offset = box.min;
@@ -605,8 +609,6 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     NphVec3 *positions = NPH_ALLOC_ARRAY(alloc, NphVec3, nph_max_u32(vn, 1U));
     NphMeshPosition *posn = NPH_ALLOC_ARRAY(alloc, NphMeshPosition, nph_max_u32(vn, 1U));
     NphMeshAttrib *attr = NPH_ALLOC_ARRAY(alloc, NphMeshAttrib, nph_max_u32(vn, 1U));
-    // The second set (f16x2), its own stream (NPH_MESH_TAG_UV1), where a slot reads one.
-    const bool with_uv1 = (mesh->flags & (u32)COOK_MESH_HAS_UV1) != 0U;
     u32 *uv1 = with_uv1 ? NPH_ALLOC_ARRAY(alloc, u32, nph_max_u32(vn, 1U)) : NULL;
     NphSubmesh *subs = NPH_ALLOC_ARRAY_ZEROED(alloc, NphSubmesh, nph_max_u32(sn, 1U));
     NphMeshletBounds *mbounds = NPH_ALLOC_ARRAY(alloc, NphMeshletBounds, nph_max_u32(mn, 1U));
