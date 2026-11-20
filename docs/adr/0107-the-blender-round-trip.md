@@ -1,7 +1,7 @@
 # 0107. The Blender round trip: collision cooked from glTF, a second UV set, glass, re-import on change
 
 - **Date:** 2026-11-19
-- **Status:** Proposed (Phase 15's third step, ADR-0102 §1.3)
+- **Status:** Accepted 2026-11-20 (Phase 15's third step, ADR-0102 §1.3)
 
 ## Context
 

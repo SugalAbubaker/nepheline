@@ -112,7 +112,7 @@ supersedes it and both link to each other.
 | [0104](0104-autosave.md) | Autosave: a session directory under a lock the system lets go of, and the work offered back | Accepted |
 | [0105](0105-materials-made-in-the-editor.md) | Materials made in the editor: a `.nmat` source, tiled by the material, edited live | Accepted |
 | [0106](0106-crash-dumps-from-a-separate-process.md) | Crash dumps from a separate process: the dumper beside the executable | Accepted (the user's decision) |
-| [0107](0107-the-blender-round-trip.md) | The Blender round trip: collision cooked from glTF, a second UV set, glass, re-import on change | Proposed |
+| [0107](0107-the-blender-round-trip.md) | The Blender round trip: collision cooked from glTF, a second UV set, glass, re-import on change | Accepted |
 
 ## Template
 
