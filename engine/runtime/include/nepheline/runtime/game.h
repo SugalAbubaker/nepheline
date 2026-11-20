@@ -186,6 +186,34 @@ NphPhysicsBody nph_game_physics_body(const NphGame *game, NphEntity entity);
 // nph_engine_physics_entity): what a hit or a contact names.
 NphEntity nph_game_physics_entity(const NphGame *game, NphPhysicsBody body);
 
+// A Collider that began or stopped overlapping a trigger (components.h
+// Collider `trigger`; ADR-0108): the trigger's entity, the visitor's (its
+// Collider's), and the entity whose body the visitor's shapes are on (the
+// visitor's own, or the compound's above it).
+typedef struct NphTriggerEvent {
+    NphEntity trigger;
+    NphEntity visitor;
+    NphEntity body;
+} NphTriggerEvent;
+
+typedef struct NphTriggerEvents {
+    const NphTriggerEvent *entered;
+    u32 entered_count;
+    const NphTriggerEvent *left;
+    u32 left_count;
+} NphTriggerEvents;
+
+// What entered and left the world's triggers at the last physics step, while
+// playing (none otherwise; engine.h nph_engine_physics_triggers). A Collider
+// enters with the first of its shapes to overlap the trigger's and leaves
+// with the last, so a step that changes nothing between them reports
+// nothing (a trigger or a visitor made again in place). In the physics
+// step's order, deterministic. Valid until the next step: from systems after
+// the physics system, or between steps. A visitor despawned inside leaves
+// with its (stale) entity. Bodies of the game's own are not reported here
+// (physics/world.h sensor events have them).
+NphTriggerEvents nph_game_physics_triggers(const NphGame *game);
+
 // Draws `entity` and its descendants where they are from the next frame,
 // not between where they were and where they are: a teleport, a respawn
 // (engine.h nph_engine_reset_interpolation). NPH_THREADSAFE.

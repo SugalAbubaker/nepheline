@@ -549,7 +549,7 @@ after the game's systems and before the transform system:
 | Component | |
 |---|---|
 | `RigidBody` | the body: static, kinematic, or dynamic; its mass (0: the Collider's), velocities, damping, gravity scale, locks, `bullet` (swept against moving bodies too), `can_sleep` |
-| `Collider` | its shape: a sphere, a capsule along Y, or a box, at a centre and rotation in the entity's frame, scaled by the entity's world scale (a box per axis, a sphere by the largest, a capsule's core by Y and its radius by the larger of X and Z); or every shape of a collision asset (`ASSET`, `collision`: below); its density, friction, restitution; its filter (category, mask, group); hit events |
+| `Collider` | its shape: a sphere, a capsule along Y, or a box, at a centre and rotation in the entity's frame, scaled by the entity's world scale (a box per axis, a sphere by the largest, a capsule's core by Y and its radius by the larger of X and Z); or every shape of a collision asset (`ASSET`, `collision`: below); its density, friction, restitution; its filter (category, mask, group); hit events; `trigger` (below) |
 
 A Collider alone is a static body (the level); a RigidBody alone, a point
 of 1 kg (or of its `mass`).
@@ -572,6 +572,20 @@ shapes come. A missing or damaged asset makes no shapes (logged). Cooked
 scenes bring their collision: `nph_scene_import_cooked` gives each node
 the scene's `COLS` names an `ASSET` Collider and no RigidBody, a static
 shape until a designer adds one.
+
+**Triggers** ([ADR-0108](adr/0108-physics-in-levels.md)). A Collider
+with `trigger` makes sensors (physics.md "Sensors and ghosts"): shapes
+that touch nothing and see the moving shapes whose category meets their
+mask (convex only, so an `ASSET` trigger leaves its meshes out). After
+each step the bridge turns the sensors' events into Collider-level ones
+(`nph_game_physics_triggers`, `nph_engine_physics_triggers`): a trigger, a
+visitor (its Collider's entity), and the visitor's body's entity (its own,
+or its compound's). A Collider enters with the first of its shapes to
+overlap the trigger and leaves with the last, counted per pair over the
+step, so a trigger or a visitor made again in place reports nothing, and a
+visitor despawned inside leaves with its stale entity. The events hold
+until the next step, in the step's order; the game's own bodies and
+sensors report through the physics world's events.
 
 **Compounds** ([ADR-0108](adr/0108-physics-in-levels.md)). A Collider
 without a RigidBody below an entity with one, no closer one between them,

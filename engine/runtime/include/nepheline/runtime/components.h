@@ -275,7 +275,11 @@ typedef enum NphColliderShape {
 // and `restitution`. Its filter (physics/shape.h NphPhysicsFilter): two
 // shapes touch when each one's category bits meet the other's mask, unless
 // they share a group (negative: never; positive: always). `hit_events`:
-// report hits above the world's threshold (physics/world.h).
+// report hits above the world's threshold (physics/world.h). `trigger`
+// (ADR-0108): its shapes touch nothing and report what enters and leaves
+// them (game.h nph_game_physics_triggers): sensors (physics/shape.h), which
+// see moving shapes whose category meets their mask; convex only, so an
+// ASSET trigger leaves its meshes out.
 #define NPH_COLLIDER_FIELDS(F)                                                                     \
     F(U32, shape, NPH_FIELD_RANGE(0.0F, 3.0F))                                                     \
     F(F32, radius, NPH_FIELD_RANGE(0.001F, 100.0F))                                                \
@@ -290,12 +294,13 @@ typedef enum NphColliderShape {
     F(U64, mask, NPH_FIELD_NO_HINTS)                                                               \
     F(I32, group, NPH_FIELD_NO_HINTS)                                                              \
     F(BOOL, hit_events, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, collision, NPH_FIELD_NO_HINTS)
+    F(GUID, collision, NPH_FIELD_NO_HINTS)                                                         \
+    F(BOOL, trigger, NPH_FIELD_NO_HINTS)
 NPH_COMPONENT_STRUCT(NphCollider, NPH_COLLIDER_FIELDS);
 NPH_COMPONENT_DECLARE(NphCollider);
 
 NPH_STATIC_ASSERT(sizeof(NphRigidBody) == 56U, "RigidBody is 56 bytes");
-NPH_STATIC_ASSERT(sizeof(NphCollider) == 104U, "Collider is 104 bytes");
+NPH_STATIC_ASSERT(sizeof(NphCollider) == 112U, "Collider is 112 bytes");
 
 // ---------------------------------------------------------------------------
 // Audio (docs/runtime.md "Audio"; docs/adr/0058-audio-in-the-engine.md)

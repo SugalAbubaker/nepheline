@@ -224,6 +224,8 @@ NphEntity physics_bridge_entity(const PhysicsBridge *b, NphPhysicsBody body);
 // The physics world's statistics after the last step (zeroed when not
 // playing).
 const NphPhysicsStats *physics_bridge_stats(const PhysicsBridge *b);
+// The last step's trigger events (game.h nph_game_physics_triggers).
+NphTriggerEvents physics_bridge_triggers(const PhysicsBridge *b);
 
 // ---------------------------------------------------------------------------
 // The audio bridge (audio_bridge.c): the mixer, the streamer, and the device,

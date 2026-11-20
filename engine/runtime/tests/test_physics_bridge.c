@@ -685,6 +685,108 @@ NTEST(Physics, compounds_colliders_turn_parts_as_bodies_come_and_go)
     finish(&fx);
 }
 
+static NphCollider trigger_box(NphVec3 half)
+{
+    NphCollider c = box_collider(half);
+    c.trigger = 1;
+    return c;
+}
+
+typedef struct TriggerLog {
+    u32 entered;
+    u32 left;
+    NphTriggerEvent first_entered;
+    NphTriggerEvent first_left;
+} TriggerLog;
+
+static void log_triggers(PhysFixture *f, TriggerLog *log)
+{
+    const NphTriggerEvents t = nph_engine_physics_triggers(f->engine);
+    if (t.entered_count > 0U && log->entered == 0U) {
+        log->first_entered = t.entered[0];
+    }
+    if (t.left_count > 0U && log->left == 0U) {
+        log->first_left = t.left[0];
+    }
+    log->entered += t.entered_count;
+    log->left += t.left_count;
+}
+
+// A ball falls through a trigger, which it does not touch: it enters once and leaves once, named
+// with its body. Nothing is reported before play.
+NTEST(Physics, triggers_report_what_enters_and_leaves)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    NTEST_EXPECT_EQ_UINT(nph_engine_physics_triggers(e).entered_count, 0U);
+    const NphCollider zone_shape = trigger_box(nph_vec3(2.0F, 0.5F, 2.0F));
+    const NphEntity zone = spawn(&fx, nph_dvec3_zero(), NO_RIGID_BODY, &zone_shape);
+    const NphCollider ball_shape = sphere_collider(0.25F);
+    const NphEntity ball =
+        spawn(&fx, nph_dvec3(0.0, 3.0, 0.0), NPH_RIGID_BODY_DYNAMIC, &ball_shape);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    TriggerLog log;
+    memset(&log, 0, sizeof log);
+    for (u32 i = 0U; i < 480U; ++i) {
+        frames(&fx, 1U);
+        log_triggers(&fx, &log);
+    }
+    NTEST_EXPECT_EQ_UINT(log.entered, 1U);
+    NTEST_EXPECT_EQ_UINT(log.left, 1U);
+    NTEST_EXPECT_EQ_UINT(log.first_entered.trigger.value, zone.value);
+    NTEST_EXPECT_EQ_UINT(log.first_entered.visitor.value, ball.value);
+    NTEST_EXPECT_EQ_UINT(log.first_entered.body.value, ball.value);
+    NTEST_EXPECT_EQ_UINT(log.first_left.visitor.value, ball.value);
+    NTEST_EXPECT_TRUE(local_of(&fx, ball)->translation.y < -2.0); // straight through
+    nph_engine_play_end(e);
+    NTEST_EXPECT_EQ_UINT(nph_engine_physics_triggers(e).entered_count, 0U);
+    finish(&fx);
+}
+
+// A chair's parts enter a trigger each, named with the chair's body; a trigger made again around
+// them reports nothing; a part despawned inside leaves.
+NTEST(Physics, triggers_name_compound_bodies_and_ignore_remakes)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    const NphCollider zone_shape = trigger_box(nph_vec3(3.0F, 3.0F, 3.0F));
+    const NphEntity zone = spawn(&fx, nph_dvec3_zero(), NO_RIGID_BODY, &zone_shape);
+    const NphEntity chair = spawn(&fx, nph_dvec3_zero(), NPH_RIGID_BODY_DYNAMIC, NULL);
+    rigid(&fx, chair)->gravity_scale = 0.0F;
+    const NphCollider cube = box_collider(nph_vec3(0.25F, 0.25F, 0.25F));
+    const NphEntity seat = spawn_under(&fx, chair, nph_dvec3(0.5, 0.0, 0.0), NO_RIGID_BODY, &cube);
+    (void)spawn_under(&fx, chair, nph_dvec3(-0.5, 0.0, 0.0), NO_RIGID_BODY, &cube);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    frames(&fx, 1U);
+    NphTriggerEvents t = nph_engine_physics_triggers(e);
+    NTEST_ASSERT_EQ_UINT(t.entered_count, 2U);
+    for (u32 i = 0U; i < 2U; ++i) {
+        NTEST_EXPECT_EQ_UINT(t.entered[i].trigger.value, zone.value);
+        NTEST_EXPECT_EQ_UINT(t.entered[i].body.value, chair.value);
+    }
+    // The trigger made again larger: its sensor's overlaps end and begin in one step, nothing net.
+    NPH_WORLD_GET_MUT(nph_engine_world(e), zone, fx.ids.collider, NphCollider)->half_extents =
+        nph_vec3(4.0F, 4.0F, 4.0F);
+    frames(&fx, 1U);
+    t = nph_engine_physics_triggers(e);
+    NTEST_EXPECT_EQ_UINT(t.entered_count, 0U);
+    NTEST_EXPECT_EQ_UINT(t.left_count, 0U);
+    // The seat despawned inside: it leaves, named still.
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(nph_engine_world(e), seat), NPH_RESULT_OK);
+    frames(&fx, 1U);
+    t = nph_engine_physics_triggers(e);
+    NTEST_EXPECT_EQ_UINT(t.entered_count, 0U);
+    NTEST_ASSERT_EQ_UINT(t.left_count, 1U);
+    NTEST_EXPECT_EQ_UINT(t.left[0].visitor.value, seat.value);
+    NTEST_EXPECT_EQ_UINT(t.left[0].body.value, chair.value);
+    frames(&fx, 1U);
+    NTEST_EXPECT_EQ_UINT(nph_engine_physics_triggers(e).left_count, 0U);
+    nph_engine_play_end(e);
+    finish(&fx);
+}
+
 NTEST(Physics, a_flood_of_world_events_is_recovered)
 {
     static PhysFixture fx;

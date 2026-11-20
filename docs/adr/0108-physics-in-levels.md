@@ -114,6 +114,12 @@ What there is today:
    - `Collider`'s `trigger` makes its shapes sensors.
    - After each step the runtime reports the entities that entered and left each trigger (the trigger's entity and the
      visitor's), for games and for the editor's play.
+   - **Built:** `nph_game_physics_triggers`, beside `nph_engine_physics_triggers`.
+     - Each event names the trigger, the visitor's Collider entity, and the visitor's body's entity (its compound's
+       for a part).
+     - Shapes are counted per pair over the step, so a Collider enters with its first shape and leaves with its last.
+       A trigger made again around what it holds reports nothing.
+     - Only the bridge's own shapes count; the game's own sensors and bodies report through the physics world.
 6. **Joints as components.** A `Joint` on an entity links its body (its own `RigidBody`'s, or that of its nearest body
    above it) to the body of `other`, an entity reference; none means the world.
    - **Kinds:** ball, hinge, fixed, slider or distance.
