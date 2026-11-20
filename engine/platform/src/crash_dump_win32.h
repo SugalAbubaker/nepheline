@@ -30,10 +30,14 @@
 #define CRASH_DUMPER_NAME L"nph_crash_dumper.exe"
 
 #define CRASH_DUMPER_MAGIC   0x4448504EU // "NPHD"
-#define CRASH_DUMPER_VERSION 1U
+#define CRASH_DUMPER_VERSION 2U
 // UTF-16 units of the executable's directory the block holds: platform_internal.h's
 // NPH_WIN32_PATH_MAX, which crash_win32.c checks it against.
 #define CRASH_DUMPER_DIR_MAX 4096U
+// The bytes the block keeps for the exception's context, as InitializeContext lays one out for
+// the processor's extended state (CONTEXT_ALL | CONTEXT_XSTATE): about 12 KiB where the state
+// holds AMX's tiles, a context of more is not copied.
+#define CRASH_DUMPER_CONTEXT_MAX (64U * 1024U)
 
 // The dumper's exit codes, besides 0 (its process ended, or the handler let it go).
 #define CRASH_DUMPER_EXIT_USAGE   2 // the command line does not name four handles
@@ -70,10 +74,24 @@ typedef struct CrashDumperShared {
     u32 stage;     // a CrashDumpStage
     u64 pointers;  // its EXCEPTION_POINTERS: an address in the handler's process, 0 for none
     u64 file;      // the dump's file: a handle the handler duplicated into the dumper
+    // The exception itself, which the handler copies here for each request, so that dbghelp
+    // reads it from the dumper's own memory (ClientPointers FALSE), as a context InitializeContext
+    // laid out for the processor. A context the failure captured itself (RtlCaptureContext) has no
+    // extended state, and dbghelp failed to read one across processes on processors whose state
+    // is large (ADR-0106's amendment). 0: not copied, and the dumper reads `pointers`.
+    u32 copied;
+    u32 context_offset; // the CONTEXT's, from the block's start, in its context area
+    u32 context_length; // the bytes from the context area's start that its layout takes
+    u32 pad0;
+    EXCEPTION_RECORD record; // the exception's, its chain cut (ExceptionRecord NULL)
     // The answer.
     u32 error;    // ERROR_SUCCESS, or why the attempt failed
     u32 answered; // requests answered: 0 when the dumper says it is ready
 } CrashDumperShared;
+
+// The block's bytes: its fields, then, from the next page, the context's area.
+#define CRASH_DUMPER_CONTEXT_AT  ((((u32)sizeof(CrashDumperShared)) + 4095U) & ~4095U)
+#define CRASH_DUMPER_BLOCK_BYTES (CRASH_DUMPER_CONTEXT_AT + CRASH_DUMPER_CONTEXT_MAX)
 
 // What a dump keeps (the callback's parameter): the global data of the modules beside the
 // executable only, unless the dump is of the whole process.

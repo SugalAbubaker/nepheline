@@ -34,8 +34,9 @@
 #endif
 
 #if NPH_PLATFORM_WINDOWS
-// Bytes reserved below a fiber's stack on Windows: its guard page, the pages
-// an overflow grows into, and the system's stack guarantee (nph_fiber_create).
+// Bytes reserved below a fiber's stack on Windows: its guard page and the pages
+// an overflow grows into (nph_fiber_create), and below them the thread's stack
+// guarantee, which leaves an overflow room to be reported from.
 #define FIBER_WIN32_BELOW_STACK NPH_KIB(64)
 #endif
 
@@ -129,8 +130,12 @@ NphResult nph_fiber_create(NphFiber *fiber, const NphFiberDesc *desc)
     // raises EXCEPTION_STACK_OVERFLOW with its guarantee left to report from
     // (crash.h). The switch keeps the thread information block's stack
     // bounds per fiber, so the system treats this stack as the thread's. A
-    // guard of no access alone leaves an overflow no room to be reported.
-    const u64 below = FIBER_WIN32_BELOW_STACK;
+    // guard of no access alone leaves an overflow no room to be reported. The
+    // thread's guarantee (nph_fiber_init_thread) is kept below that, so the
+    // stack an overflow grows into is the same whatever the processor's
+    // exception frame takes (ADR-0106's amendment).
+    const u64 below =
+        FIBER_WIN32_BELOW_STACK + nph_align_up_u64(crash_win32_stack_guarantee(), page);
 #else
     const u64 below = page; // one guard page below the stack
 #endif
@@ -191,6 +196,12 @@ void nph_fiber_init_thread(NphFiber *fiber)
     fiber->name = "thread";
 #if NPH_TSAN_ENABLED
     fiber->sanitizer_fiber = __tsan_get_current_fiber();
+#endif
+#if NPH_PLATFORM_WINDOWS
+    // The switch keeps the stack bounds per fiber but not the guarantee, so the
+    // thread's covers its fibers: room for an overflow's exception frame and
+    // the handler's, whatever the processor's extended state (crash_internal.h).
+    crash_win32_guarantee_stack();
 #endif
     t_current = fiber;
 }

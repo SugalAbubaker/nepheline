@@ -7,6 +7,7 @@
 #include <nepheline/platform/crash.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/platform.h>
+#include <nepheline/platform/vmem.h>
 
 #include "crash_internal.h"
 #include "test_platform_support.h"
@@ -705,6 +706,8 @@ NTEST_F(CrashDir, a_report_and_its_dump_are_written_for_an_exception)
     NTEST_EXPECT_TRUE(contains(text, "shadow stacks; dbghelp") ||
                       contains(text, "no shadow stacks; dbghelp"));
     NTEST_EXPECT_TRUE(contains(text, "; user shadow stacks "));
+    NTEST_EXPECT_TRUE(contains(text, "; extended context "));
+    NTEST_EXPECT_FALSE(contains(text, "(layout unknown)"));
     NTEST_EXPECT_TRUE(contains(text, "memory:    "));
     NTEST_EXPECT_TRUE(contains(text, " MB physical free, "));
     NTEST_EXPECT_TRUE(contains(text, " MB commit free; the process "));
@@ -718,6 +721,131 @@ NTEST_F(CrashDir, a_report_and_its_dump_are_written_for_an_exception)
     char sig[8];
     NTEST_ASSERT_GE_INT(read_text(dump, sig, sizeof sig), 4);
     NTEST_EXPECT_EQ_MEM(sig, "MDMP", 4U);
+}
+
+// ---------------------------------------------------------------------------
+// The exception's copy and the stack's guarantee (ADR-0106's amendment)
+// ---------------------------------------------------------------------------
+
+// The bytes the tests' copies are made in: the block's context area's.
+#define TEST_CONTEXT_AREA (64U * 1024U)
+
+// A context captured as the handler captures one for a failure that is no exception
+// (RtlCaptureContext), with a chained record: copied into a CONTEXT that InitializeContext laid
+// out in the area, aligned, with the capture's registers and flags and no flag the capture lacks,
+// and the record whole but for its chain.
+NTEST(crash_win32, a_captured_exception_is_copied_into_a_context_laid_out_for_the_processor)
+{
+    const u32 bytes = crash_win32_context_bytes();
+    NTEST_LOG("this processor's exception context: %u bytes", bytes);
+    NTEST_ASSERT_GE_UINT(bytes, (u32)sizeof(CONTEXT));
+    NTEST_ASSERT_LE_UINT(bytes, TEST_CONTEXT_AREA);
+    CONTEXT ctx;
+    memset(&ctx, 0, sizeof ctx);
+    RtlCaptureContext(&ctx);
+    EXCEPTION_RECORD inner;
+    memset(&inner, 0, sizeof inner);
+    inner.ExceptionCode = EXCEPTION_BREAKPOINT;
+    EXCEPTION_RECORD rec;
+    memset(&rec, 0, sizeof rec);
+    rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+    rec.ExceptionRecord = &inner;
+    rec.NumberParameters = 2U;
+    rec.ExceptionInformation[0] = 1U;
+    rec.ExceptionInformation[1] = 0x10U;
+    EXCEPTION_POINTERS source = {&rec, &ctx};
+    static u8 area[TEST_CONTEXT_AREA];
+    EXCEPTION_RECORD record;
+    EXCEPTION_POINTERS out;
+    memset(&out, 0, sizeof out);
+    NTEST_ASSERT_TRUE(crash_win32_exception_copy(area, (u32)sizeof area, &source, &record, &out));
+    const uptr at = (uptr)out.ContextRecord;
+    NTEST_EXPECT_TRUE(at >= (uptr)area && at + sizeof(CONTEXT) <= (uptr)area + sizeof area);
+    NTEST_EXPECT_EQ_UINT(at % 16U, 0U);
+    NTEST_EXPECT_TRUE(out.ExceptionRecord == &record);
+    NTEST_EXPECT_NULL(record.ExceptionRecord); // the chain is the failing process's
+    NTEST_EXPECT_EQ_UINT(record.ExceptionCode, (u32)EXCEPTION_ACCESS_VIOLATION);
+    NTEST_EXPECT_EQ_UINT(record.NumberParameters, 2U);
+    NTEST_EXPECT_EQ_UINT(record.ExceptionInformation[1], 0x10U);
+    const CONTEXT *copy = out.ContextRecord;
+    NTEST_EXPECT_EQ_UINT(copy->ContextFlags & ~ctx.ContextFlags, 0U);
+    NTEST_EXPECT_EQ_UINT(copy->ContextFlags, ctx.ContextFlags);
+    NTEST_EXPECT_EQ_UINT(copy->Rip, ctx.Rip);
+    NTEST_EXPECT_EQ_UINT(copy->Rsp, ctx.Rsp);
+    NTEST_EXPECT_EQ_UINT(copy->Rbp, ctx.Rbp);
+    NTEST_EXPECT_EQ_UINT(copy->Rbx, ctx.Rbx);
+    NTEST_EXPECT_EQ_MEM(&copy->Xmm6, &ctx.Xmm6, sizeof ctx.Xmm6);
+    // An area too small for the layout is refused, the pointers untouched.
+    EXCEPTION_POINTERS none = {NULL, NULL};
+    NTEST_EXPECT_FALSE(crash_win32_exception_copy(area, 64U, &source, &record, &none));
+    NTEST_EXPECT_NULL(none.ContextRecord);
+}
+
+// A breakpoint's context, as the kernel hands an exception's to its filter: copied with the
+// extended state it holds, where the layout holds some too.
+static EXCEPTION_RECORD g_trap_record;
+static EXCEPTION_POINTERS g_trap_copy;
+static u8 g_trap_area[TEST_CONTEXT_AREA];
+static DWORD g_trap_flags;
+static u64 g_trap_rip;
+static bool g_trap_copied;
+
+static LONG trap_filter(EXCEPTION_POINTERS *pointers)
+{
+    g_trap_flags = pointers->ContextRecord->ContextFlags;
+    g_trap_rip = pointers->ContextRecord->Rip;
+    g_trap_copied = crash_win32_exception_copy(g_trap_area, (u32)sizeof g_trap_area, pointers,
+                                               &g_trap_record, &g_trap_copy);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+NTEST(crash_win32, a_trapped_exceptions_extended_state_is_copied_with_it)
+{
+    (void)crash_win32_context_bytes();
+    g_trap_copied = false;
+#if NPH_COMPILER_CLANG
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlanguage-extension-token"
+#endif
+    __try {
+        __debugbreak();
+    } __except (trap_filter(GetExceptionInformation())) {
+    }
+#if NPH_COMPILER_CLANG
+#pragma clang diagnostic pop
+#endif
+    NTEST_ASSERT_TRUE(g_trap_copied);
+    const CONTEXT *copy = g_trap_copy.ContextRecord;
+    NTEST_LOG("the breakpoint's context flags 0x%08lx, the copy's 0x%08lx",
+              (unsigned long)g_trap_flags, (unsigned long)copy->ContextFlags);
+    NTEST_EXPECT_EQ_UINT(copy->ContextFlags & ~g_trap_flags, 0U);
+    NTEST_EXPECT_EQ_UINT(copy->Rip, g_trap_rip);
+    NTEST_EXPECT_EQ_UINT(g_trap_record.ExceptionCode, (u32)EXCEPTION_BREAKPOINT);
+    // The extended state goes with it where the system enables any: the kernel's frame has it.
+    const DWORD xstate = (DWORD)CONTEXT_XSTATE & ~(DWORD)CONTEXT_AMD64;
+    if ((g_trap_flags & xstate) != 0U && GetEnabledXStateFeatures() != 0U) {
+        NTEST_EXPECT_TRUE((copy->ContextFlags & xstate) != 0U);
+        DWORD64 got = 0U;
+        NTEST_EXPECT_TRUE(GetXStateFeaturesMask(g_trap_copy.ContextRecord, &got));
+        NTEST_LOG("the copy's extended state features 0x%llx", (unsigned long long)got);
+    }
+}
+
+// The stack an overflow's report needs: the processor's exception frame and the handler's
+// frames, in whole pages, and an installed handler raises its thread's guarantee to it.
+NTEST(crash_win32, the_stack_guarantee_holds_the_processors_exception_frame)
+{
+    const u32 bytes = crash_win32_context_bytes();
+    const u32 guarantee = crash_win32_stack_guarantee();
+    NTEST_LOG("guarantee %u bytes for a %u-byte exception context", guarantee, bytes);
+    NTEST_EXPECT_GE_UINT(guarantee, bytes + CRASH_OVERFLOW_HANDLER_BYTES);
+    NTEST_EXPECT_EQ_UINT(guarantee % (u32)nph_vmem_page_size(), 0U);
+    NTEST_EXPECT_LT_UINT(guarantee,
+                         bytes + CRASH_OVERFLOW_HANDLER_BYTES + (u32)nph_vmem_page_size());
+    crash_win32_guarantee_stack();
+    ULONG now = 0U;
+    NTEST_ASSERT_TRUE(SetThreadStackGuarantee(&now)); // 0 asks: `now` is the thread's
+    NTEST_EXPECT_GE_UINT((u32)now, guarantee);
 }
 
 #else

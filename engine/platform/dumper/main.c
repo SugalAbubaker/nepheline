@@ -53,7 +53,7 @@ int main(int argc, char **argv)
         return CRASH_DUMPER_EXIT_USAGE;
     }
     CrashDumperShared *shared = (CrashDumperShared *)MapViewOfFile(
-        mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0U, 0U, sizeof(CrashDumperShared));
+        mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0U, 0U, CRASH_DUMPER_BLOCK_BYTES);
     if (shared == NULL || shared->magic != CRASH_DUMPER_MAGIC ||
         shared->version != CRASH_DUMPER_VERSION || shared->exe_dir_len >= CRASH_DUMPER_DIR_MAX) {
         return CRASH_DUMPER_EXIT_BLOCK;
@@ -81,7 +81,19 @@ int main(int argc, char **argv)
         mei.ThreadId = shared->thread_id;
         // NOLINTNEXTLINE(performance-no-int-to-ptr): an address in the dumped process...
         mei.ExceptionPointers = (PEXCEPTION_POINTERS)(uptr)shared->pointers;
-        mei.ClientPointers = TRUE;                              // ...which dbghelp reads there
+        mei.ClientPointers = TRUE; // ...which dbghelp reads there
+        // Or the copy the handler made into the block, read here (ADR-0106's amendment), where
+        // its context lies whole in the block's context area, aligned as a CONTEXT must be.
+        EXCEPTION_POINTERS copied;
+        const u32 at = shared->context_offset;
+        if (shared->copied != 0U && at >= CRASH_DUMPER_CONTEXT_AT &&
+            at < CRASH_DUMPER_BLOCK_BYTES && at % 16U == 0U &&
+            shared->context_length <= CRASH_DUMPER_BLOCK_BYTES - at) {
+            copied.ExceptionRecord = &shared->record;
+            copied.ContextRecord = (PCONTEXT)((u8 *)shared + at); // 16-aligned, checked above
+            mei.ExceptionPointers = &copied;
+            mei.ClientPointers = FALSE;
+        }
         const MINIDUMP_TYPE type = (MINIDUMP_TYPE)shared->type; // flags, as dbghelp takes them
         shared->error = crash_win32_dump_attempt(write_dump, process, pid, file, type,
                                                  shared->pointers != 0U ? &mei : NULL, &scope,

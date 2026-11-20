@@ -12,10 +12,12 @@
 // dumper, the thread writes the dump itself, as it did before ADR-0106. The
 // failing thread then ends the process itself, with the exception's code, so
 // that no other handler and no error-reporting dialog runs.
+#include <nepheline/core/base.h>
 #include <nepheline/core/log.h>
 #include <nepheline/platform/cpu.h>
 #include <nepheline/platform/crash.h>
 #include <nepheline/platform/thread.h>
+#include <nepheline/platform/vmem.h>
 
 #include "crash_dump_win32.h"
 #include "crash_internal.h"
@@ -83,6 +85,26 @@ static DWORD g_dumper_pid;
 static HANDLE g_dumper_request;
 static HANDLE g_dumper_done;
 static CrashDumperShared *g_shared;
+// CONTEXT_XSTATE's own bit (the flag holds the architecture's too), and the flags a context
+// with extended state is laid out with: x64's; none elsewhere.
+#if NPH_ARCH_X64
+#define CRASH_XSTATE_BIT     ((DWORD)CONTEXT_XSTATE & ~(DWORD)CONTEXT_AMD64)
+#define CRASH_CONTEXT_XSTATE ((DWORD)CONTEXT_XSTATE)
+#else
+#define CRASH_XSTATE_BIT     0U
+#define CRASH_CONTEXT_XSTATE 0U
+#endif
+// The exception's context as InitializeContext lays one out on this processor (ADR-0106's
+// amendment): CONTEXT_ALL, with CONTEXT_XSTATE where the system enables extended state, and the
+// bytes the layout takes; 0 bytes while unknown, and the exception is then handed on as the
+// failure left it. Found at install, or by the first fiber's guarantee (crash_internal.h).
+static DWORD g_context_flags;
+static DWORD g_context_bytes;
+static LONG g_context_found;
+// The attempts this process makes itself copy the exception here (the dumper's copy is in the
+// block): the handler's thread makes them one at a time.
+static EXCEPTION_RECORD g_local_record;
+static u8 g_local_context[CRASH_DUMPER_CONTEXT_MAX];
 static b32 g_dumper_ok;
 static char g_in_process_why[192];
 
@@ -380,6 +402,96 @@ static void describe_system(void)
         system_add_dec(&at, (u32)GetLastError());
         system_add(&at, ")");
     }
+    // The bytes an exception's context takes with the processor's extended state (ADR-0106's
+    // amendment): about 12 KiB where it holds AMX's tiles, where dumps once failed.
+    system_add(&at, "; extended context ");
+    if (g_context_bytes != 0U) {
+        system_add_dec(&at, (u32)g_context_bytes);
+        system_add(&at, (g_context_flags & CRASH_XSTATE_BIT) != 0U
+                            ? " bytes"
+                            : " bytes, without extended state");
+    } else {
+        system_add(&at, "(layout unknown)");
+    }
+}
+
+// The exception context's layout on this processor (g_context_flags, g_context_bytes): the
+// extended state where the system enables any, and the bytes InitializeContext asks for it;
+// without the state where its layout is refused. Once: what it finds never changes.
+static void find_context_layout(void)
+{
+    if (InterlockedCompareExchange(&g_context_found, 0, 0) != 0) {
+        return;
+    }
+    DWORD flags = 0U;
+    DWORD bytes = 0U;
+    const DWORD tries[2] = {(DWORD)CONTEXT_ALL | CRASH_CONTEXT_XSTATE, (DWORD)CONTEXT_ALL};
+    const bool xstate = CRASH_CONTEXT_XSTATE != 0U && GetEnabledXStateFeatures() != 0U;
+    for (u32 i = xstate ? 0U : 1U; i < 2U && bytes == 0U; ++i) {
+        DWORD length = 0U;
+        if (!InitializeContext(NULL, tries[i], NULL, &length) &&
+            GetLastError() == ERROR_INSUFFICIENT_BUFFER && length != 0U &&
+            length <= CRASH_DUMPER_CONTEXT_MAX) {
+            flags = tries[i];
+            bytes = length;
+        }
+    }
+    g_context_flags = flags;
+    g_context_bytes = bytes;
+    InterlockedExchange(&g_context_found, 1);
+}
+
+bool crash_win32_exception_copy(void *area, u32 cap, const EXCEPTION_POINTERS *source,
+                                EXCEPTION_RECORD *record, EXCEPTION_POINTERS *out)
+{
+    if (g_context_bytes == 0U || cap < g_context_bytes || source == NULL ||
+        source->ExceptionRecord == NULL || source->ContextRecord == NULL) {
+        return false;
+    }
+    DWORD length = (DWORD)cap;
+    PCONTEXT ctx = NULL;
+    if (!InitializeContext(area, g_context_flags, &ctx, &length) || ctx == NULL) {
+        return false;
+    }
+    // The parts both hold (InitializeContext may drop flags the system lacks), and the copy's
+    // flags say which: a flag may be taken from a context's, never added.
+    DWORD flags = source->ContextRecord->ContextFlags & ctx->ContextFlags;
+    if (!CopyContext(ctx, flags, source->ContextRecord)) {
+        // Its base alone, the layout's extended part left as the layout made it.
+        memcpy(ctx, source->ContextRecord, sizeof(CONTEXT));
+        flags &= ~CRASH_XSTATE_BIT;
+    }
+    ctx->ContextFlags = flags;
+    *record = *source->ExceptionRecord;
+    record->ExceptionRecord = NULL; // the chain is the failing process's
+    if (record->NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS) {
+        record->NumberParameters = EXCEPTION_MAXIMUM_PARAMETERS;
+    }
+    out->ExceptionRecord = record;
+    out->ContextRecord = ctx;
+    return true;
+}
+
+u32 crash_win32_context_bytes(void)
+{
+    find_context_layout();
+    return (u32)g_context_bytes;
+}
+
+u32 crash_win32_stack_guarantee(void)
+{
+    find_context_layout();
+    // A layout not known stands in at the largest the block takes.
+    const u64 frame =
+        g_context_bytes != 0U ? (u64)g_context_bytes : (u64)(CRASH_DUMPER_CONTEXT_MAX);
+    return (u32)nph_align_up_u64(frame + (u64)(CRASH_OVERFLOW_HANDLER_BYTES), nph_vmem_page_size());
+}
+
+void crash_win32_guarantee_stack(void)
+{
+    ULONG bytes = (ULONG)crash_win32_stack_guarantee();
+    // It only grows; one more than the stack reserves is refused, and the stack keeps its own.
+    (void)SetThreadStackGuarantee(&bytes);
 }
 
 // The report's "memory:" line: the machine's physical memory and commit charge, free of their
@@ -490,6 +602,18 @@ static DWORD dumper_attempt(HANDLE file, MINIDUMP_TYPE type,
     g_shared->stage = (u32)stage;
     g_shared->pointers = (u64)(uptr)mei->ExceptionPointers;
     g_shared->file = (u64)(uptr)remote;
+    // The exception, copied into the block for the dumper to read as its own (ADR-0106's
+    // amendment); the address above stays for when it cannot be.
+    EXCEPTION_POINTERS copied;
+    g_shared->copied = 0U;
+    if (mei->ExceptionPointers != NULL &&
+        crash_win32_exception_copy((u8 *)g_shared + CRASH_DUMPER_CONTEXT_AT,
+                                   CRASH_DUMPER_CONTEXT_MAX, mei->ExceptionPointers,
+                                   &g_shared->record, &copied)) {
+        g_shared->context_offset = (u32)((uptr)copied.ContextRecord - (uptr)g_shared);
+        g_shared->context_length = (u32)g_context_bytes;
+        g_shared->copied = 1U;
+    }
     (void)SetEvent(g_dumper_request);
     const HANDLE waits[2] = {g_dumper_done, g_dumper};
     const DWORD w = WaitForMultipleObjects(2U, waits, FALSE,
@@ -530,8 +654,16 @@ static DWORD attempt(HANDLE file, MINIDUMP_TYPE type, MINIDUMP_EXCEPTION_INFORMA
     }
     *in_process = true;
     const CrashDumpScope scope = {g_exe_dir, g_exe_dir_len, g_crash.full_dump};
+    // A copy of the exception here too, as the dumper reads it (ADR-0106's amendment).
+    MINIDUMP_EXCEPTION_INFORMATION local = *mei;
+    EXCEPTION_POINTERS copied;
+    if (mei->ExceptionPointers != NULL &&
+        crash_win32_exception_copy(g_local_context, (u32)sizeof g_local_context,
+                                   mei->ExceptionPointers, &g_local_record, &copied)) {
+        local.ExceptionPointers = &copied;
+    }
     return crash_win32_dump_attempt(g_write_dump, GetCurrentProcess(), GetCurrentProcessId(), file,
-                                    type, mei, &scope, stage, CRASH_DUMP_BY_PROCESS);
+                                    type, &local, &scope, stage, CRASH_DUMP_BY_PROCESS);
 }
 
 // Opens `<stem><ext>` for writing, creating it; INVALID_HANDLE_VALUE when it
@@ -982,10 +1114,10 @@ static bool dumper_start(void)
     inherit.nLength = (DWORD)sizeof inherit;
     inherit.bInheritHandle = TRUE;
     HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &inherit, PAGE_READWRITE, 0U,
-                                        (DWORD)sizeof(CrashDumperShared), NULL);
+                                        CRASH_DUMPER_BLOCK_BYTES, NULL);
     if (mapping != NULL) {
         g_shared = (CrashDumperShared *)MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0U,
-                                                      0U, sizeof(CrashDumperShared));
+                                                      0U, CRASH_DUMPER_BLOCK_BYTES);
     }
     g_dumper_request = CreateEventW(&inherit, FALSE, FALSE, NULL);
     g_dumper_done = CreateEventW(&inherit, FALSE, FALSE, NULL);
@@ -1114,6 +1246,10 @@ NphResult crash_os_install(void)
     if (loaded != ERROR_SUCCESS) {
         return nph_win32_fail("loading dbghelp.dll's MiniDumpWriteDump", loaded);
     }
+    // The exception context's layout, for the copies and the system line, and room on the
+    // installing thread's stack to report an overflow from (ADR-0106's amendment).
+    find_context_layout();
+    crash_win32_guarantee_stack();
     describe_system();
     // The executable's directory, for the dump's callback.
     const DWORD exe_len = GetModuleFileNameW(NULL, g_exe_dir, (DWORD)NPH_ARRAY_COUNT(g_exe_dir));

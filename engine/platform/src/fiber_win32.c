@@ -18,6 +18,9 @@ static NPH_THREAD_LOCAL NphFiber *t_current;
 static void CALLBACK fiber_proc(void *param)
 {
     NphFiber *fiber = (NphFiber *)param;
+    // A Win32 fiber keeps a guarantee of its own: room for an overflow's exception frame and
+    // the handler's (crash_internal.h), set on the fiber.
+    crash_win32_guarantee_stack();
     // An exception no handler on the fiber takes is reported from here, as
     // in fiber.c, whatever the OS's fiber start does with it (crash.h).
 #if NPH_COMPILER_CLANG
@@ -55,11 +58,14 @@ NphResult nph_fiber_create(NphFiber *fiber, const NphFiberDesc *desc)
     fiber->user = desc->user;
     fiber->name = desc->name != NULL ? desc->name : "fiber";
     fiber->stack_size = size;
-    fiber->reserved_size = size + page;
     // Commit the whole stack up front, as the assembly backend does, so the
     // two behave the same under memory pressure; the OS adds its guard page.
-    fiber->context = CreateFiberEx((SIZE_T)size, (SIZE_T)(size + page), FIBER_FLAG_FLOAT_SWITCH,
-                                   fiber_proc, fiber);
+    // The reservation also holds the guarantee the fiber sets (fiber_proc), so
+    // what is left of the stack is the same whatever it takes.
+    const u64 guarantee = nph_align_up_u64(crash_win32_stack_guarantee(), page);
+    fiber->reserved_size = size + page + guarantee;
+    fiber->context = CreateFiberEx((SIZE_T)size, (SIZE_T)fiber->reserved_size,
+                                   FIBER_FLAG_FLOAT_SWITCH, fiber_proc, fiber);
     if (fiber->context == NULL) {
         const NphResult r = nph_win32_fail("CreateFiberEx", GetLastError());
         memset(fiber, 0, sizeof *fiber);
@@ -93,6 +99,8 @@ void nph_fiber_init_thread(NphFiber *fiber)
     fiber->context = context;
     fiber->is_thread = 1;
     fiber->name = "thread";
+    // The thread's own fiber: room to report an overflow on its stack (crash_internal.h).
+    crash_win32_guarantee_stack();
     t_current = fiber;
 }
 

@@ -100,6 +100,17 @@ the stack switches. A stack is a `vmem.h` reservation, committed whole.
   bounds per fiber, so the system grows an overflowing fiber's stack into
   that reserve, then raises `EXCEPTION_STACK_OVERFLOW` with its guarantee
   left for the crash handler to report from (ADR-0103).
+- That guarantee is the thread's (`SetThreadStackGuarantee`), raised for
+  every thread that runs fibers, and for each Win32 fiber, which keeps its
+  own: the bytes an exception's context takes with the processor's extended
+  state (1.6 KiB on the development machine, about 12 KiB where the state
+  holds AMX's tiles), and 16 KiB for the dispatch and the handler, in whole
+  pages: 20 KiB on the development machine. The kernel's
+  exception frame holds the extended state, and on processors with AMX one
+  frame did not fit the room a guard page left, so the process ended
+  unreported (ADR-0106's amendment). The reserve below the stack holds the
+  guarantee besides, so the stack an overflow grows into is the same on
+  every processor.
 
 On Windows, `nph_fiber_entry` also runs the fiber's function inside a
 `__try` whose filter is the crash handler's. A fiber's stack ends at the
@@ -305,7 +316,8 @@ given:
     thread, by the name `nph_thread_set_current_name` gave it;
   - on Windows, the machine (`system:`): the system's version, the
     processor and whether it has shadow stacks (CET), dbghelp's version,
-    and whether the process runs with user shadow stacks. It is made when
+    whether the process runs with user shadow stacks, and the bytes an
+    exception's context takes with the processor's extended state. It is made when
     the handler installs, so writing it takes no lock, and the install's
     log line says it too. Then the memory (`memory:`): the machine's
     physical memory and commit charge free, and the process's working set
@@ -352,9 +364,17 @@ no console and no standard handles, so a reader of the process's pipes does
 not wait for it too. Install waits up to 10 s for it to be ready, and its
 log line says which process writes the dumps.
 - For each attempt at a dump, the handler's thread hands the dumper the
-  file, the failing thread, and the address of the exception, and waits.
-  dbghelp in the dumper reads the failing process's memory into buffers of
-  its own, so nothing the failure left of that process can fail the dump.
+  file, the failing thread, and the exception itself, and waits: its
+  record, and its context copied into the block (`CopyContext`) as
+  `InitializeContext` lays one out for the processor, with the extended
+  state the context holds. dbghelp in the dumper reads the exception there,
+  in its own memory, and the failing process's memory into buffers of its
+  own, so nothing the failure left of that process can fail the dump. A
+  failure that is no exception (`abort`, a failed assertion, a pure call, an
+  invalid parameter) captures its own context, with no extended state after
+  it: dbghelp failed to read such a context across processes on processors
+  with AMX (ADR-0106's amendment). The failing process's own attempts copy
+  the exception the same way.
 - The dumper ends with its process, crashed or not, since it waits on the
   process's handle too. Uninstall asks it to end, and after 5 s makes it.
 - Without it, the failing process writes the dump, and the `dump:` line
