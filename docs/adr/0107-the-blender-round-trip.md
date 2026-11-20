@@ -172,8 +172,16 @@ in one window.
 - **Their cost**, on the RTX 3060 Ti over the 18 reference views at 1440p against 59ad17c, four rounds in
   alternating order: the frame -0.005 ms on average (-0.018 to +0.005 ms). Bistro's blended pass, drawn with the
   dual-source blend while its lamps are tinted, +0.009 to +0.012 ms a view (5 to 7.5 %); the other scenes' blended
-  passes unchanged (-0.3 to -1.7 %). F0 costs nothing measurable. DRAM: no new passes or buffers; the material
-  record is 16 bytes longer (Bistro's 254 materials, 4 KB, through L2).
+  passes unchanged (-0.3 to -1.7 %). F0 costs nothing measurable there. DRAM: no new passes or buffers; the
+  material record is 16 bytes longer (Bistro's 254 materials, 4 KB, through L2).
+- **A read F0 cost the blended pass where its surfaces lie many deep**, which the reference views do not show and
+  the GPU runner's synthetic wall of glass did: `glass_4k_production`'s blended pass 0.243 to 0.272 ms (+12 %),
+  over its budget, `glass_1k_production`'s +10 %. The forward passes therefore read F0 only in variants (`k_f0`,
+  and the tint variants) drawn while a live material's F0 is another, and shade with 0.04, which the compiler
+  folds, in the others; their `forward_blended` keeps its old form, the tint's work in a function of its own over
+  it. Against E and F, four rounds: the wall of glass's blended pass back to 59ad17c's (+0.1 to +0.6 %); over the
+  18 reference views the frame -0.007 ms on average (-0.017 to +0.002 ms), the blended pass +0.001 to +0.004 ms a
+  view, back where 59ad17c had it.
 - **The second set costs the reference scenes nothing measurable.** On the RTX 3060 Ti over the 18 reference views at
   1440p, against 7c87711, four rounds in alternating order: the frame −0.005 ms on average (−0.018 to +0.009 ms), the
   CPU +0.0001 ms. All but three of the pipelines `render_perf` reports (70 in Bistro and the interior) have the base's

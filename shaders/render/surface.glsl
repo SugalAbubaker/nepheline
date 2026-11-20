@@ -113,6 +113,12 @@ struct NphSurface {
 
 // Whether a slot's set is tested: the includer may compile it out where no material reads
 // the second set (vis_resolve.glsl k_uv).
+// The material's F0 (ADR-0107), as its includer reads it: from the record by default. The
+// forward passes read it only in the variants drawn while a material needs it, and 0.04 in the
+// others, which the compiler folds (forward_frag.glsl k_f0).
+#ifndef NPH_SURFACE_F0
+#define NPH_SURFACE_F0(m) ((m).emissive.w)
+#endif
 #ifndef NPH_SURFACE_UV1_ACTIVE
 #define NPH_SURFACE_UV1_ACTIVE true
 #endif
@@ -822,8 +828,9 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
 
     const vec3 v = normalize(-s.position); // the camera is at the origin
     const float nov = max(dot(n, v), 1e-4);
-    // The dielectric part's reflectance head on: the material's (ADR-0107; 0.04 by default).
-    const vec3 f0 = mix(vec3(m.emissive.w), base.rgb, metallic);
+    // The dielectric part's reflectance head on: the material's (ADR-0107; 0.04 by default),
+    // where the includer reads it (NPH_SURFACE_F0).
+    const vec3 f0 = mix(vec3(NPH_SURFACE_F0(m)), base.rgb, metallic);
     const vec3 diffuse_color = base.rgb * (1.0 - metallic);
     const float a = roughness * roughness;
 

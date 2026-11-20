@@ -818,6 +818,45 @@ NTEST_F(Frame, tinted_glass_pipelines_draw_while_tinted_glass_is_live)
     NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 0U);
 }
 
+// Materials of another F0 than 0.04 are drawn by the variants that read it (ADR-0107), so others
+// shade with a constant the compiler folds: opaque and alpha-tested ones by the k_f0 variants,
+// made the first time a reference frame is drawn while one is live, and blended ones by the tint
+// variants, which read it too.
+NTEST_F(Frame, materials_of_another_f0_draw_by_the_variants_that_read_it)
+{
+    REQUIRE_RENDERER(f);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    NTEST_EXPECT_NEAR_F32(md.f0, NPH_RENDER_F0_DEFAULT, 0.0F);
+    md.f0 = 0.2F;
+    NphRenderMaterial opaque = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &opaque), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->f0_materials, 1U);
+    NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 0U);
+    md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+    NphRenderMaterial blended = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &blended), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->f0_materials, 1U);
+    NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 1U);
+    NTEST_EXPECT_EQ_UINT(f->renderer->forward_f0[0][0][0].value, 0U);
+    const NphRenderMesh mesh = facing_plane(f);
+    const NphRenderInstance inst = add_instance(f, mesh, opaque, facing_transform());
+    NphRenderView v;
+    plain_view(&v);
+    v.pipeline = NPH_RENDER_PIPELINE_REFERENCE;
+    test_render_read(f, &v);
+    NTEST_EXPECT_TRUE(f->renderer->forward_f0[0][0][0].value != 0U);
+    md.alpha_mode = NPH_RENDER_ALPHA_OPAQUE;
+    md.f0 = NPH_RENDER_F0_DEFAULT;
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, opaque, &md), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->f0_materials, 0U);
+    nph_render_instance_destroy(f->renderer, inst);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    nph_render_material_destroy(f->renderer, blended);
+    NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 0U);
+    nph_render_material_destroy(f->renderer, opaque);
+}
+
 NTEST_F(Frame, debug_views_show_material_channels)
 {
     REQUIRE_RENDERER(f);

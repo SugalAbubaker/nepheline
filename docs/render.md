@@ -366,8 +366,14 @@ of glTF 2.0:
   (`NphRenderMaterialDesc.f0`, the record's `emissive.w`; glTF's
   `KHR_materials_ior` and the factor of `KHR_materials_specular`; ADR-0107),
   0.04 by default, an index of refraction of 1.5: a metal's F0 is its base
-  colour, mixed by metalness as before. The forward pass and the resolve read
-  it; the voxel far field keeps 0.04, its format holding no room for it.
+  colour, mixed by metalness as before. The resolve reads it; the forward
+  pass reads it only in variants (`k_f0`, and the `k_tint` variants, which
+  read it too) drawn while a live material's F0 is another
+  (`NphRenderer.f0_materials` and `tinted_materials`), and shades with 0.04,
+  which the compiler folds, in the others. A read F0 had cost the blended pass
+  a tenth of its time where blended surfaces lie many deep (render_perf's
+  `glass_4k_production`). The voxel far field keeps 0.04, its format holding
+  no room for it.
 - **Occlusion** applies to indirect light only (glTF), and also drives
   specular occlusion (Lagarde & de Rousiers 2014). On the production path
   the screen's ambient occlusion multiplies it, the diffuse light's with

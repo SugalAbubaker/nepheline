@@ -448,7 +448,7 @@ NphResult render_vis_create(NphRenderer *r)
                     NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND,
                                                     (u32)RENDER_CULL_BACK_CCW, v->hdr_format,
                                                     rt != 0U, map != 0U, true, g, false, false,
-                                                    &v->blend_pipelines[g][rt][map]));
+                                                    false, &v->blend_pipelines[g][rt][map]));
                 }
             }
         }
@@ -1699,7 +1699,7 @@ static NphResult select_blend_pipeline(NphRenderer *r, NphGpuPipeline *out)
     if (p->value == 0U) {
         NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, (u32)RENDER_CULL_BACK_CCW,
                                         v->hdr_format, rt != 0U, vsm != 0U, true, gi, uv1, tint,
-                                        p));
+                                        false, p));
     }
     *out = *p;
     return NPH_RESULT_OK;
