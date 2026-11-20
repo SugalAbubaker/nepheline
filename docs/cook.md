@@ -134,6 +134,9 @@ removed. `--force` cooks everything.
 
 ## glTF import (`gltf.h`)
 
+How to export from Blender so this importer reads what was made is in
+[blender.md](blender.md).
+
 cgltf parses and validates the document; the importer reads every
 accessor through `cgltf_accessor_unpack_floats`, so every component type
 the specification allows works, normalised integers and

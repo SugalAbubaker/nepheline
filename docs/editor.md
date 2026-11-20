@@ -548,7 +548,8 @@ stayed the same for 300 ms, so the program writing it has finished.
   is reloaded where it is drawn (step 4 above).
 
 So exporting again from Blender, or saving a texture in an image editor, updates the open scene
-within a second or two, in the project or wherever the file was imported from.
+within a second or two, in the project or wherever the file was imported from. The export's
+settings, and what Blender's objects and materials become, are in [blender.md](blender.md).
 
 **What is not taken.**
 - A cook that writes nothing is not logged. Examples are the editor's own save of a material it has
