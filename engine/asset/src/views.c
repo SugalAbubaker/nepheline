@@ -421,6 +421,18 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
     NPH_TRY(
         typed_blob(asset, NPH_MESH_TAG_ATTRIBS, 0U, sizeof(NphMeshAttrib), h->vertex_count, &p));
     const NphMeshAttrib *attribs = (const NphMeshAttrib *)p;
+    // The second set from version 9: a value a vertex where the flag says, else no blob.
+    const bool has_uv1 = (h->flags & (u32)NPH_MESH_FLAG_HAS_UV1) != 0U;
+    const u32 *uv1 = NULL;
+    if (has_uv1 && (asset->header.type_version < 9U || h->vertex_count == 0U)) {
+        return NPH_RESULT_CORRUPT;
+    }
+    if (has_uv1) {
+        NPH_TRY(typed_blob(asset, NPH_MESH_TAG_UV1, 0U, sizeof(u32), h->vertex_count, &p));
+        uv1 = (const u32 *)p;
+    } else if (nph_asset_blob(asset, NPH_MESH_TAG_UV1, 0U) != NULL) {
+        return NPH_RESULT_CORRUPT;
+    }
     NPH_TRY(typed_blob(asset, NPH_MESH_TAG_INDICES, 0U, sizeof(u32), h->index_count, &p));
     const u32 *indices = (const u32 *)p;
     NPH_TRY(
@@ -499,6 +511,7 @@ NphResult nph_mesh_view(const NphAsset *asset, NphMeshView *out)
     out->header = h;
     out->positions = positions;
     out->attribs = attribs;
+    out->uv1 = uv1;
     out->indices = indices;
     out->submeshes = submeshes;
     out->meshlets = meshlets;
@@ -609,8 +622,9 @@ NphResult nph_material_view(const NphAsset *asset, NphMaterialView *out)
     }
     for (u32 i = 0; i < NPH_MATERIAL_TEXTURE_COUNT; ++i) {
         const NphMaterialTextureRef *t = &h->textures[i];
+        // Its texture coordinates: the second set from version 4 (ADR-0107).
         if (t->wrap_u > (u8)NPH_MATERIAL_WRAP_MIRROR || t->wrap_v > (u8)NPH_MATERIAL_WRAP_MIRROR ||
-            t->nearest > 1U) {
+            t->nearest > 1U || t->texcoord > (asset->header.type_version >= 4U ? 1U : 0U)) {
             return NPH_RESULT_CORRUPT;
         }
     }

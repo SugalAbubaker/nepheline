@@ -288,6 +288,14 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, 
                  (d->unlit ? (u32)NPH_RENDER_MATERIAL_UNLIT : 0U) |
                  (d->transmissive ? (u32)NPH_RENDER_MATERIAL_TRANSMISSIVE : 0U) |
                  (nph_render_uv_is_identity(&d->uv) ? 0U : (u32)NPH_RENDER_MATERIAL_UV_TRANSFORM);
+    // The slots on the second set (ADR-0107): a bit each in `wrap`, and the flag the shaders
+    // test before they read any of them.
+    for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
+        if (d->textures[s].texture.value != 0U && d->textures[s].texcoord == 1U) {
+            out->wrap |= 1U << ((u32)NPH_RENDER_MATERIAL_SET1_SHIFT + s);
+            out->flags |= (u32)NPH_RENDER_MATERIAL_UV1;
+        }
+    }
     out->uv_u = nph_vec4(d->uv.m00, d->uv.m01, d->uv.m02, 0.0F);
     out->uv_v = nph_vec4(d->uv.m10, d->uv.m11, d->uv.m12, 0.0F);
     for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
@@ -587,8 +595,7 @@ static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, DrawL
         d->attribs_address = mesh->attribs_address;
         d->material_index = material_index;
         d->instance_index = i;
-        d->pad0 = 0U;
-        d->pad1 = 0U;
+        d->uv1_address = mesh->uv1_address;
         RenderDrawCmd *c = &r->draw_cmds[rec];
         memset(c, 0, sizeof *c);
         c->record = rec;
@@ -597,12 +604,14 @@ static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, DrawL
         c->index_count = sm->index_count;
         c->alpha_mode = (u8)alpha;
         c->cull = (u8)cull_of(double_sided, mirrored);
+        c->uv1 = md != NULL && render_material_reads_uv1(md) ? 1U : 0U;
         if (alpha == (u32)NPH_RENDER_ALPHA_BLEND) {
             c->key = depth_key(view_depth, rec);
             list->blend_count += 1U;
         } else {
-            // Pipeline (alpha mode, culling), then mesh, then record.
-            c->key = ((u64)alpha << 61U) | ((u64)c->cull << 59U) | ((u64)c->mesh << 32U) | rec;
+            // Pipeline (alpha mode, culling, the second set), then mesh, then record.
+            c->key = ((u64)alpha << 61U) | ((u64)c->cull << 59U) | ((u64)c->uv1 << 58U) |
+                     ((u64)c->mesh << 32U) | rec;
         }
         stats->triangles += sm->index_count / 3U;
         list->count += 1U;
@@ -652,8 +661,12 @@ static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count,
     const u32 rt = r->rt.frame_shadows != 0 ? 1U : 0U;
     for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
-        const NphGpuPipeline p =
-            rt != 0U ? r->forward_rt[c->alpha_mode][c->cull] : r->forward[c->alpha_mode][c->cull];
+        // A draw whose material reads the second set by the pipelines that do (ADR-0107).
+        const NphGpuPipeline p = c->uv1 != 0U
+                                     ? (rt != 0U ? r->forward_rt_uv1[c->alpha_mode][c->cull]
+                                                 : r->forward_uv1[c->alpha_mode][c->cull])
+                                 : rt != 0U ? r->forward_rt[c->alpha_mode][c->cull]
+                                            : r->forward[c->alpha_mode][c->cull];
         if (p.value != bound->value) {
             nph_gpu_cmd_bind_pipeline(cmd, p);
             *bound = p;
@@ -806,6 +819,12 @@ static NphResult declare_reference(NphRenderer *r, NphGpuRenderGraph *graph, u32
     if (r->rt.frame_active) {
         NPH_TRY(render_rt_declare(r, graph, NPH_GPU_RG_BUFFER_NULL, NPH_GPU_RG_BUFFER_NULL,
                                   NPH_GPU_RG_BUFFER_NULL, &tlas));
+    }
+
+    // The pipelines that read the second texture coordinate set, the first frame a material
+    // does (ADR-0107).
+    if (r->uv1_materials != 0U) {
+        NPH_TRY(render_forward_uv1_pipelines(r));
     }
 
     NphGpuRgPassDesc pd;

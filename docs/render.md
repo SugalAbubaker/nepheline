@@ -131,6 +131,39 @@ most compile it in only where it can be taken:
   requests test the flag where they run: there the test costs about what
   the rows did, and the variants would multiply pipelines for little.
 
+**A second texture coordinate set** ([ADR-0107](adr/0107-the-blender-round-trip.md)):
+each texture slot of a material reads its mesh's first set or its second
+(`NphRenderTextureBinding.texcoord`). The record marks a slot on the second
+by a bit of `wrap` (`NPH_RENDER_MATERIAL_SET1_SHIFT` + the slot, above the
+slots' wrap modes) and the material by `NPH_RENDER_MATERIAL_UV1`. A mesh
+holds the set as its own stream (`NphRenderMeshDesc.uv1`, a half-float pair
+a vertex), its address in the mesh record (`NphVisMesh.uv1`, the record 240
+bytes) and the forward draw's (`NphRenderDrawData.uv1_address`); a mesh
+without one has 0 there, and a slot on the second set then reads its first.
+The material's transform applies to either set. Each site takes a slot's
+set as it takes the transform:
+- the resolve interpolates the second set, with its derivatives, only in its
+  `k_uv` variants and for a material with the flag; `NphRenderer.uv_materials`
+  counts the materials with a transform or a slot on the second set, so a
+  frame without them runs the variants without either, as before;
+- the forward pair passes the second set and samples each slot through its
+  own (`nph_surface_sample`) only in its `k_uv1` variants (`forward.vert`,
+  `forward_frag.glsl`): they draw a reference frame's draw whose material
+  reads the set, and the production path's blended surfaces while a material
+  does (`NphRenderer.uv1_materials`), each made the first time a frame needs
+  it. Passing the set always cost the blended surfaces 7 %;
+- the page requests ask for each slot's pages at its own set's coordinates;
+- the alpha tests (both rasterizers, the shadow maps', and the rays') read the
+  base colour's set; an alpha key (ADR-0096) is the first set's, so a material
+  whose base colour is on the second has none, and its cards' rays take the
+  test in full (no trim);
+- the radiance cache's and reflections' hits read the base colour and the
+  emissive each through its own set, at the texture level that set's area
+  gives.
+The CPU voxel bake samples each slot through its set, and the levels of detail
+keep the second set's seams as the first's (docs/cook.md). The reference
+scenes read no second set; what it costs where it is read is in ADR-0107.
+
 `render` sits left of `asset` in the module order (CLAUDE.md §4), so it
 cannot read cooked assets itself. `samples/common/cooked_scene.c` is the
 bridge: it loads a cooked scene and its dependencies through the asset
@@ -3737,8 +3770,8 @@ path and logs what the GPU culled.
   4K); the second rebuilds its coarser mips in full.
 - The software raster gives a cluster of a dozen triangles a whole
   32-thread workgroup.
-- `KHR_texture_transform`, `TEXCOORD_1`, skinning, morph targets, and
-  the PBR extension materials (clearcoat, transmission, ...) are not
-  rendered (the cooker skips them, docs/cook.md).
+- Skinning, morph targets, texture coordinate sets past the second, and
+  the PBR extension materials but transmission (clearcoat, sheen, ...) are
+  not rendered (the cooker skips them, docs/cook.md).
 - Draw records are built on the main thread: at reference-scene sizes this
   costs microseconds, and the production path moves it to the GPU.

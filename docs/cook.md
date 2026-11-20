@@ -153,14 +153,15 @@ directory.
 | KHR_materials_pbrSpecularGlossiness | converted to metallic-roughness (below); takes precedence where a material has both |
 | KHR_materials_unlit, KHR_materials_emissive_strength | |
 | MSFT_texture_dds | a texture's DDS source replaces its `source`, which is then a fallback the importer does not read |
-| KHR_texture_transform | baked into each primitive's TEXCOORD_0 from its material's transform (offset, rotation, scale, composed as the extension does); authored tangents turn with the texture's u axis, and a mirroring transform flips their handedness. Where a material's textures differ, its base colour's is baked, with a warning (a baked transform is one per material); a `texCoord` override is warned about and TEXCOORD_0 used |
+| KHR_texture_transform | baked into each primitive's coordinates from its material's transform (offset, rotation, scale, composed as the extension does), into the set its textures read; authored tangents turn with TEXCOORD_0's u axis, and a mirroring transform flips their handedness. Where a material's textures on one set differ, the first's on it is baked (the base colour's on its set), with a warning: a baked transform is one per material and set. A `texCoord` override names the texture's set, as a texture info's `texCoord` does |
+| TEXCOORD_1 | read for a primitive whose material has a texture on it (a texture info's `texCoord` 1, or KHR_texture_transform's override; [ADR-0107](adr/0107-the-blender-round-trip.md)), and stored as the mesh's second set (`UV1 `, [asset.md](asset.md) mesh version 9). A mesh whose materials read none stores none. A primitive whose material reads it but that has none gets its first set there, with a warning. A normal map on it is read in TEXCOORD_0's tangent frame (tangents are the first set's), with a warning. A set past the second is warned about, and TEXCOORD_0 read |
 | node TRS or matrices | parent-before-child order, iterative traversal; a node reached twice is warned about and kept once |
 | cameras, KHR_lights_punctual | instanced at every node that uses them |
 | the default scene | else the first scene, else every root node |
 
 Of the images, only those the materials use are read: an image no slot
 takes (the fallback of a DDS source, or one nothing references) may be
-missing. Skins, morph targets, animations, points and lines, TEXCOORD_1
+missing. Skins, morph targets, animations, points and lines, TEXCOORD_2
 and above, and other extensions are skipped with a warning when the
 document merely uses them; a document that *requires*
 an extension the importer does not implement is refused with
@@ -561,7 +562,9 @@ matches the renderer's only roughly.
    written in place of level 0's (level 0's first and unchanged), with the
    levels' blobs. The vertices the levels add at corners of seams (ADR-0069)
    are written after the mesh's own: each stands where a vertex stands, with
-   a vertex's attributes and texture coordinates of its own. A mesh whose
+   a vertex's attributes and texture coordinates of its own (both sets, where
+   the mesh has a second: its values at a position are a seam as the first's
+   are, ADR-0107). A mesh whose
    levels stop at once (one meshlet, or nothing to simplify) is written
    without them. Each level's groups are built as jobs (docs/render.md "The
    build at once"). Bistro's 1.75 million triangles in 551 meshes take about a
@@ -1102,11 +1105,11 @@ What the numbers say:
 - Sounds: WAV only (no FLAC, Ogg, or AIFF); settings per source only, not
   per folder; floats that are not 24-bit integers stay 32-bit PCM, with no
   option yet to quantise them for the lossless codec.
-- glTF: no skins, morph targets, or animations (Phase 9+ needs them); no
-  TEXCOORD_1, no texture transform per texture (a material's one is
-  baked), and no PBR extension materials but specular-glossiness
-  (KHR_materials_transmission and the others are skipped with a
-  warning).
+- glTF: no skins, morph targets, or animations (Phase 9+ needs them); two
+  texture coordinate sets at most, one texture transform a set (a
+  material's first on each set is baked), and no PBR extension materials
+  but specular-glossiness and transmission's factor ("Glass"):
+  KHR_materials_clearcoat and the others are skipped with a warning.
 - DDS sources are decoded and encoded again even where their blocks
   already are what the runtime would store (a BC7 colour texture), which
   costs the BC7 encoder's time.

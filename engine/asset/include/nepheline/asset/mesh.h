@@ -97,6 +97,12 @@
 //
 //     SLMT  NphGuid[slot]  slot 0 first, up to NPH_MESH_SLOT_MATERIALS_MAX; a null GUID names none
 //
+// From version 9, a mesh whose materials read a second texture coordinate set (ADR-0107;
+// asset/material.h NphMaterialTextureRef.texcoord) has it as a stream of its own, beside the
+// attributes, so a mesh without one reads what it did:
+//
+//     UV1   u32[vertex]  f16x2 (NPH_MESH_FLAG_HAS_UV1), the levels' added vertices too
+//
 // Positions are separate from the other attributes (§10.3 "bandwidth
 // discipline"): the visibility-buffer pass of §8.6.4 reads positions only.
 // Each position is three 16-bit unorm values across the mesh bounds
@@ -124,9 +130,9 @@ extern "C" {
 // 2: the levels of detail (LODS, LODC, LODG, LODM, LODN). 3: voxel clusters
 // in the levels (VOXB, VOXA). 4: meshes of voxels alone. 5: the voxels
 // compact (VOXC). 6: levels apart (LVLS, LODK). 7: triangles for the rays
-// alone (RAYS, RAYR, RAYT). 8: the slots' materials (SLMT). Earlier versions
-// without voxels still read.
-#define NPH_MESH_TYPE_VERSION 8U
+// alone (RAYS, RAYR, RAYT). 8: the slots' materials (SLMT). 9: the second texture
+// coordinate set (UV1). Earlier versions without voxels still read.
+#define NPH_MESH_TYPE_VERSION 9U
 
 // Slots a mesh names materials for (SLMT): an editable mesh's (cook/polymesh.h
 // COOK_POLYMESH_MATERIALS), and a MeshRenderer's own.
@@ -155,6 +161,7 @@ extern "C" {
 #define NPH_MESH_TAG_RAY_RANGES       NPH_FOURCC('R', 'A', 'Y', 'R')
 #define NPH_MESH_TAG_RAY_TRIANGLES    NPH_FOURCC('R', 'A', 'Y', 'T')
 #define NPH_MESH_TAG_SLOT_MATERIALS   NPH_FOURCC('S', 'L', 'M', 'T')
+#define NPH_MESH_TAG_UV1              NPH_FOURCC('U', 'V', '1', ' ')
 
 #define NPH_MESHLET_MAX_VERTICES  64U
 #define NPH_MESHLET_MAX_TRIANGLES 124U
@@ -170,6 +177,8 @@ typedef enum NphMeshFlags {
     // Rays pass it by (render/renderer.h NphRenderMeshDesc.no_rays); the source says
     // so in its glTF mesh's extras, {"no_rays": true}.
     NPH_MESH_FLAG_NO_RAYS = 1U << 5U,
+    // Version 9: a second texture coordinate set (UV1), which some material slot reads.
+    NPH_MESH_FLAG_HAS_UV1 = 1U << 6U,
 } NphMeshFlags;
 
 typedef struct NphMeshHeader {
@@ -373,6 +382,7 @@ typedef struct NphMeshView {
     const NphMeshHeader *header;
     const NphMeshPosition *positions;
     const NphMeshAttrib *attribs;
+    const u32 *uv1; // the second set (f16x2) per vertex, NULL without one (version 9)
     const u32 *indices;
     const NphSubmesh *submeshes;
     const NphMeshlet *meshlets;

@@ -96,6 +96,7 @@ typedef struct LodSimplifyInput {
     // such corners collapse onto (NphRenderClusterLods.added; their indices
     // LOD_ADDED_BASE up).
     const NphVec2 *uvs;
+    const NphVec2 *uvs1;    // the second set per vertex, or NULL (NphRenderClusterLodInput's)
     const NphVec3 *normals; // per vertex of the mesh, or NULL (NphRenderClusterLodInput's)
     NphRenderLodAddedVertexArray *added;
     NphArrayU32 *orphans;  // NULL, or takes the classes left without a triangle

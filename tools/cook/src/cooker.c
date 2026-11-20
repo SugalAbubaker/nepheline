@@ -1833,6 +1833,7 @@ static CookVoxelSlot voxel_slot(const CookVoxelImage *image, const NphMaterialHe
     s.image = image;
     s.wrap_u = h->textures[slot].wrap_u;
     s.wrap_v = h->textures[slot].wrap_v;
+    s.set = h->textures[slot].texcoord;
     return s;
 }
 
@@ -2278,7 +2279,8 @@ static NphResult hlod_build(Cooker *c, const char *key, const CookGltfScene *sce
         materials[m].slots = hs->slots[m];
         materials[m].slot_count = hs->slot_counts[m];
         cook_voxel_sampler_init(&cvs[m], &src->slots, &materials[m], src->positions.data,
-                                src->attribs.data, surfaces[m], &samplers[m]);
+                                src->attribs.data, src->uv1.len != 0U ? src->uv1.data : NULL,
+                                surfaces[m], &samplers[m]);
         meshes[m].sampler = &samplers[m];
     }
     CookCellProxyInput base;

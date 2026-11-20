@@ -16,6 +16,9 @@
 layout(push_constant, scalar) uniform Push { NphRenderPush pc; };
 
 layout(constant_id = 4) const bool k_indirect = false;
+// Whether a material reads the second texture coordinate set (ADR-0107; renderer.c
+// render_forward_pipeline's `uv1`): only then is it passed on (the fragment stage's k_uv1).
+layout(constant_id = 5) const bool k_uv1 = false;
 
 layout(location = 0) out vec3 out_position; // camera-relative world space
 layout(location = 1) out vec3 out_normal;
@@ -26,6 +29,9 @@ layout(location = 4) out vec4 out_color;
 // k_indirect): x its material; y bit 0: its transform mirrors, bit 1: it has
 // one side (NphRenderDrawData.position_offset.w).
 layout(location = 5) flat out uvec2 out_draw;
+// The second texture coordinate set (ADR-0107): the mesh's, else the first; through the
+// material's transform as the first is. Zero without k_uv1, and not read.
+layout(location = 6) out vec2 out_uv1;
 
 void main()
 {
@@ -54,6 +60,12 @@ void main()
     MaterialsRef materials = MaterialsRef(view.v.materials_address);
     out_uv = nph_material_uv(materials.m[draw.material_index].uv_u,
                              materials.m[draw.material_index].uv_v, unpackHalf2x16(attr.z));
+    out_uv1 = vec2(0.0);
+    if (k_uv1) {
+        out_uv1 = nph_material_uv(
+            materials.m[draw.material_index].uv_u, materials.m[draw.material_index].uv_v,
+            nph_uv1(draw.uv1_address, gl_VertexIndex, unpackHalf2x16(attr.z)));
+    }
     out_color = unpackUnorm4x8(attr.w);
     out_position = world;
     out_draw = uvec2(draw.material_index, (draw.position_scale.w < 0.0 ? 1u : 0u) |

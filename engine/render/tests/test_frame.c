@@ -664,6 +664,93 @@ NTEST_F(Frame, a_materials_transform_moves_its_texture_in_both_pipelines)
     nph_render_texture_destroy(f->renderer, tex);
 }
 
+// The forward pipelines that read the second texture coordinate set (k_uv1; ADR-0107): counted by
+// the materials that have a texture on it, made the first time a frame is drawn while one is, and
+// the production path's blended surfaces drawn by them only then. A slot on the second set without
+// a texture reads nothing and counts for nothing.
+NTEST_F(Frame, the_second_sets_pipelines_draw_while_a_material_reads_it)
+{
+    REQUIRE_RENDERER(f);
+    static const u8 texels[4] = {255, 255, 255, 128};
+    const void *mips[1] = {texels};
+    const u64 sizes[1] = {sizeof texels};
+    NphRenderTextureDesc td;
+    memset(&td, 0, sizeof td);
+    td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+    td.width = 1U;
+    td.height = 1U;
+    td.mip_count = 1U;
+    td.mips = mips;
+    td.mip_sizes = sizes;
+    NphRenderTexture tex = NPH_RENDER_TEXTURE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex), NPH_RESULT_OK);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+    md.textures[NPH_RENDER_SLOT_OCCLUSION].texcoord = 1U; // no texture: nothing read
+    NphRenderMaterial mat = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &mat), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->uv1_materials, 0U);
+    NTEST_EXPECT_EQ_UINT(f->renderer->uv_materials, 0U);
+    const NphRenderMesh mesh = facing_plane(f);
+    const NphRenderInstance inst = add_instance(f, mesh, mat, facing_transform());
+    const NphRenderPipeline pipelines[2] = {NPH_RENDER_PIPELINE_REFERENCE,
+                                            NPH_RENDER_PIPELINE_PRODUCTION};
+    const u32 count = nph_renderer_production_supported(f->renderer) ? 2U : 1U;
+    const RenderVis *vis = &f->renderer->vis;
+    for (u32 step = 0; step < 3U; ++step) {
+        // 0: no material on the second set; 1: the base colour on it; 2: back on the first.
+        const bool second = step == 1U;
+        if (step != 0U) {
+            md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex;
+            md.textures[NPH_RENDER_SLOT_BASE_COLOR].texcoord = second ? 1U : 0U;
+            NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, mat, &md), NPH_RESULT_OK);
+        }
+        NTEST_EXPECT_EQ_UINT(f->renderer->uv1_materials, second ? 1U : 0U);
+        NTEST_EXPECT_EQ_UINT(f->renderer->uv_materials, second ? 1U : 0U);
+        for (u32 p = 0; p < count; ++p) {
+            NphRenderView v;
+            plain_view(&v);
+            v.pipeline = pipelines[p];
+            test_render_read(f, &v);
+            if (pipelines[p] != NPH_RENDER_PIPELINE_PRODUCTION) {
+                continue;
+            }
+            // The blended pass's pipeline: one of the second set's exactly while it is read.
+            bool found_uv1 = false;
+            bool found_plain = false;
+            for (u32 g = 0; g < 3U; ++g) {
+                for (u32 rt = 0; rt < 2U; ++rt) {
+                    for (u32 map = 0; map < 2U; ++map) {
+                        const u64 chosen = vis->frame.blend_pipeline.value;
+                        found_uv1 =
+                            found_uv1 ||
+                            (chosen != 0U && chosen == vis->blend_pipelines_uv1[g][rt][map].value);
+                        found_plain =
+                            found_plain ||
+                            (chosen != 0U && chosen == vis->blend_pipelines[g][rt][map].value);
+                    }
+                }
+            }
+            NTEST_EXPECT_TRUE(found_uv1 == second);
+            NTEST_EXPECT_TRUE(found_plain == !second);
+        }
+        // The reference renderer's, made the first frame drawn while a material reads the set,
+        // and kept.
+        NTEST_EXPECT_TRUE((f->renderer->forward_uv1[NPH_RENDER_ALPHA_BLEND][0].value != 0U) ==
+                          (step != 0U));
+    }
+    nph_render_instance_destroy(f->renderer, inst);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].texcoord = 1U;
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, mat, &md), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->uv1_materials, 1U);
+    nph_render_material_destroy(f->renderer, mat);
+    NTEST_EXPECT_EQ_UINT(f->renderer->uv1_materials, 0U);
+    NTEST_EXPECT_EQ_UINT(f->renderer->uv_materials, 0U);
+    nph_render_texture_destroy(f->renderer, tex);
+}
+
 NTEST_F(Frame, debug_views_show_material_channels)
 {
     REQUIRE_RENDERER(f);

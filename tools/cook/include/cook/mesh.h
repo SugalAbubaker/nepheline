@@ -78,6 +78,7 @@ typedef struct CookVertex {
     NphVec3 normal;
     NphVec4 tangent; // xyz and handedness in w (+1 or -1)
     NphVec2 uv0;
+    NphVec2 uv1;   // the second set (COOK_MESH_HAS_UV1; ADR-0107), zero without one
     NphVec4 color; // linear RGBA (glTF COLOR_0 is linear)
 } CookVertex;
 
@@ -93,6 +94,9 @@ typedef enum CookMeshFlags {
     COOK_MESH_HAS_UV0 = 1U << 2U,
     COOK_MESH_HAS_COLORS = 1U << 3U,
     COOK_MESH_NO_RAYS = 1U << 4U, // NPH_MESH_FLAG_NO_RAYS
+    // A second texture coordinate set, which a material slot reads (NPH_MESH_FLAG_HAS_UV1):
+    // written as its own stream, and carried by the levels of detail with its seams.
+    COOK_MESH_HAS_UV1 = 1U << 5U,
 } CookMeshFlags;
 
 typedef NPH_ARRAY(CookVertex) CookVertexArray;
@@ -248,7 +252,7 @@ struct CookVoxelMaterials; // cook/voxel.h
 // the mesh's allocator must then be NPH_THREADSAFE.
 NPH_MUST_USE NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlets,
                                             const NphVec3 *positions, const NphMeshAttrib *attribs,
-                                            const NphMeshletBounds *bounds,
+                                            const u32 *uv1, const NphMeshletBounds *bounds,
                                             const CookMeshSettings *settings,
                                             const struct CookVoxelMaterials *voxels,
                                             NphJobSystem *jobs, NphRenderClusterLods *out);
@@ -328,7 +332,8 @@ typedef struct CookProxySource {
     NphRenderClusterLods lods;
     NPH_ARRAY(NphVec3) positions;
     NPH_ARRAY(NphMeshAttrib) attribs;
-    CookMesh slots; // its submeshes alone
+    NphArrayU32 uv1; // the second set (f16x2) per vertex, empty without one
+    CookMesh slots;  // its submeshes alone
     NphSphere sphere;
 } CookProxySource;
 

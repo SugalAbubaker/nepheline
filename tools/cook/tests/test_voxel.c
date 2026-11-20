@@ -187,6 +187,72 @@ static void cook_foliage(bool voxels, const CookVoxelMaterials *materials, TestA
     cook_mesh_free(&m);
 }
 
+NTEST(CookVoxel, a_slot_on_the_second_set_samples_through_it)
+{
+    // Red on the left half of the texture, green on the right.
+    const u8 texels[8] = {255, 0, 0, 255, 0, 255, 0, 255};
+    CookImage img;
+    make_image(&img, 2U, 1U, texels);
+    CookVoxelImage chain;
+    NTEST_ASSERT_EQ_INT(cook_voxel_image_init(&chain, nph_allocator_system(), &img, true),
+                        NPH_RESULT_OK);
+    NphMaterialHeader h;
+    nph_material_header_default(&h);
+    CookVoxelMaterial mat;
+    cook_voxel_material_init(&mat, &h);
+    mat.base_color_image.image = &chain;
+    mat.base_color_image.wrap_u = NPH_MATERIAL_WRAP_CLAMP;
+    mat.base_color_image.wrap_v = NPH_MATERIAL_WRAP_CLAMP;
+    mat.base_color_image.set = 1U;
+    const CookVoxelMaterials materials = {&mat, 1U};
+    // One triangle: its first set nothing but the texture's left edge, its second across it.
+    CookMesh mesh;
+    cook_mesh_init(&mesh, nph_allocator_system());
+    CookVertex verts[3];
+    memset(verts, 0, sizeof verts);
+    const NphVec3 positions[3] = {{0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}};
+    NphMeshAttrib attribs[3];
+    for (u32 i = 0; i < 3U; ++i) {
+        verts[i].position = positions[i];
+        verts[i].normal = nph_vec3_unit_z();
+        verts[i].color = nph_vec4_one();
+        attribs[i].normal = nph_oct_encode_snorm16(nph_vec3_unit_z());
+        attribs[i].tangent = nph_pack_snorm8x4(nph_vec4(1.0F, 0.0F, 0.0F, 1.0F));
+        attribs[i].uv0 = nph_pack_f16x2(nph_vec2(0.0F, 0.5F));
+        attribs[i].color = 0xFFFFFFFFU;
+    }
+    const u32 idx[3] = {0U, 1U, 2U};
+    NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(&mesh, verts, 3U, idx, 3U, 0U), NPH_RESULT_OK);
+    const u32 uv1[3] = {nph_pack_f16x2(nph_vec2(0.05F, 0.5F)),
+                        nph_pack_f16x2(nph_vec2(0.95F, 0.5F)),
+                        nph_pack_f16x2(nph_vec2(0.05F, 0.5F))};
+    u8 surfaces[1];
+    CookVoxelSampler cvs;
+    NphRenderVoxelSampler sampler;
+    cook_voxel_sampler_init(&cvs, &mesh, &materials, positions, attribs, uv1, surfaces, &sampler);
+    const u32 tri[3] = {0U, 1U, 2U};
+    NphRenderVoxelSample at0;
+    NphRenderVoxelSample at1;
+    sampler.sample(sampler.user, 0U, tri, nph_vec3(1.0F, 0.0F, 0.0F), 0.0F, &at0);
+    sampler.sample(sampler.user, 0U, tri, nph_vec3(0.0F, 1.0F, 0.0F), 0.0F, &at1);
+    NTEST_EXPECT_NEAR_F32(at0.base_color.x, 1.0F, 0.1F); // red where the second set is left
+    NTEST_EXPECT_NEAR_F32(at0.base_color.y, 0.0F, 0.1F);
+    NTEST_EXPECT_NEAR_F32(at1.base_color.y, 1.0F, 0.1F); // green where it is right
+    NTEST_EXPECT_NEAR_F32(at1.base_color.x, 0.0F, 0.1F);
+    // On the first set: the left edge's red at both corners.
+    mat.base_color_image.set = 0U;
+    sampler.sample(sampler.user, 0U, tri, nph_vec3(0.0F, 1.0F, 0.0F), 0.0F, &at1);
+    NTEST_EXPECT_NEAR_F32(at1.base_color.x, 1.0F, 0.1F);
+    // On the second set of a mesh without one: its first.
+    mat.base_color_image.set = 1U;
+    cook_voxel_sampler_init(&cvs, &mesh, &materials, positions, attribs, NULL, surfaces, &sampler);
+    sampler.sample(sampler.user, 0U, tri, nph_vec3(0.0F, 1.0F, 0.0F), 0.0F, &at1);
+    NTEST_EXPECT_NEAR_F32(at1.base_color.x, 1.0F, 0.1F);
+    cook_mesh_free(&mesh);
+    cook_voxel_image_free(&chain);
+    cook_image_free(&img);
+}
+
 NTEST(CookVoxel, foliage_cooks_into_voxels_coloured_by_its_texture)
 {
     // Red on the left half of the texture, green on the right.

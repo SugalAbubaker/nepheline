@@ -285,9 +285,11 @@ typedef struct RenderMesh {
     u32 handle;
     NphGpuBuffer positions;
     NphGpuBuffer attribs;
+    NphGpuBuffer uv1; // the second set (ADR-0107), null without one
     NphGpuBuffer indices;
     u64 positions_address;
     u64 attribs_address;
+    u64 uv1_address;             // 0 without a second set
     NphRenderSubmesh *submeshes; // from the renderer's allocator
     u32 submesh_count;
     u32 index_count;
@@ -688,7 +690,8 @@ typedef struct RenderDrawCmd {
     u32 index_count;
     u8 alpha_mode;
     u8 cull;
-    u8 pad[6];
+    u8 uv1; // its material reads the second set: the forward pipelines' k_uv1 variant draws it
+    u8 pad[5];
 } RenderDrawCmd;
 
 // The image-based-lighting compute passes of one frame: the DFG table, the
@@ -884,7 +887,8 @@ typedef struct VisFrame {
     // The blended surfaces (ADR-0097): whether the frame has their passes (the renderer
     // lists some), the item slots its cull walks, and their buffers.
     b32 blend;
-    b32 blend_copies; // it winds lists into the index pool first
+    b32 blend_copies;              // it winds lists into the index pool first
+    NphGpuPipeline blend_pipeline; // the one that draws them (render_vis_declare_transparent)
     u32 blend_slots;
     NphGpuRgBuffer blend_indices;
     NphGpuRgBuffer blend_items;
@@ -902,6 +906,9 @@ typedef struct RenderVis {
     // cache: 0 none, 1 the cache's too, 2 the cache's only][ray-traced shadows][the virtual
     // shadow map].
     NphGpuPipeline blend_pipelines[3][2][2];
+    // And those that read the second texture coordinate set (forward.vert k_uv1; ADR-0107), each
+    // made the first time a frame needs it while a material reads it.
+    NphGpuPipeline blend_pipelines_uv1[3][2][2];
     NphGpuShader shaders[VIS_SHADER_COUNT];
     NphGpuPipeline compute[VIS_COMPUTE_COUNT];
     NphGpuPipeline raster[2];   // [opaque, masked]: mesh or vertex pipelines
@@ -1418,6 +1425,11 @@ struct NphRenderer {
     NphGpuShader shaders[RENDER_SHADER_COUNT];
     NphGpuPipeline forward[3][RENDER_CULL_COUNT];    // [alpha mode][cull]
     NphGpuPipeline forward_rt[3][RENDER_CULL_COUNT]; // with ray-traced shadows (rt.c)
+    // And those that read the second texture coordinate set (forward.vert and forward_frag.glsl
+    // k_uv1; ADR-0107), made the first time a frame is declared while a material reads it
+    // (render_forward_uv1_pipelines).
+    NphGpuPipeline forward_uv1[3][RENDER_CULL_COUNT];
+    NphGpuPipeline forward_rt_uv1[3][RENDER_CULL_COUNT];
     NphGpuPipeline sky;
     NphGpuPipeline compute[RENDER_COMPUTE_COUNT];
     RenderTargetPipelines target_pipelines[RENDER_TARGET_FORMATS];
@@ -1430,7 +1442,12 @@ struct NphRenderer {
     RenderFrameLayout layout;
     u64 material_version; // bumped by every material change
     u32 masked_materials; // live materials that are alpha tested
-    u32 uv_materials;     // live materials whose coordinates are transformed (k_uv; ADR-0105)
+    // Live materials whose coordinates are transformed (ADR-0105) or a slot of which reads the
+    // second set (ADR-0107): the shaders' k_uv variants, which take both, are drawn while some are.
+    u32 uv_materials;
+    // Live materials a slot of which, with a texture, reads the second set (ADR-0107): the
+    // blended surfaces are drawn with the forward pipelines' k_uv1 variants while some are.
+    u32 uv1_materials;
     // The alpha keys' ids (render_ray_key_id; ADR-0098): a u64 key to its u32 id, from 1,
     // numbered as materials and meshes first name them and kept for the renderer's life, so
     // an id is never another key's (NphRenderMaterialData.ray_key, NphVisMesh.rays).
@@ -1533,8 +1550,16 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // draw (k_indirect; ADR-0097): `cull` is then RENDER_CULL_BACK_CCW, for which
 // the draws' index lists are wound.
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
-                                  bool ray_query, bool vsm, bool vis_depth, u32 gi,
+                                  bool ray_query, bool vsm, bool vis_depth, u32 gi, bool uv1,
                                   NphGpuPipeline *out);
+
+// The reference renderer's forward pipelines that read the second texture coordinate set
+// (NphRenderer.forward_uv1 and forward_rt_uv1; k_uv1), all of them the first time it is called.
+NphResult render_forward_uv1_pipelines(NphRenderer *r);
+
+// Whether a slot of material `d` that has a texture reads the second texture coordinate set
+// (ADR-0107).
+bool render_material_reads_uv1(const NphRenderMaterialDesc *d);
 NphResult render_load_shader_file(NphRenderer *r, const char *file, NphGpuShader *out);
 const RenderTexture *render_texture_get(const NphRenderer *r, NphRenderTexture texture);
 u32 render_material_sampler(const NphRenderer *r, const NphRenderTextureBinding *binding);

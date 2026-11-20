@@ -5,6 +5,7 @@
 // the irradiance each pixel's surface receives, read through the irradiance
 // debug view once the radiance cache has had frames to fill. And the cache's
 // keys against their CPU twins.
+#include <nepheline/math/pack.h>
 #include <nepheline/math/random.h>
 
 #include "render_internal.h"
@@ -250,6 +251,144 @@ NTEST_F(Gi, a_cut_away_surface_hides_no_sky)
     nph_render_material_destroy(f->renderer, black);
     nph_render_mesh_destroy(f->renderer, plane);
     nph_render_texture_destroy(f->renderer, env);
+}
+
+// ---------------------------------------------------------------------------
+// A glow on the second texture coordinate set (ADR-0107)
+// ---------------------------------------------------------------------------
+
+// The cube, or its twin on the second set: its first set fixed in the texture's dark texel, its
+// own coordinates as the second.
+static NphRenderMesh glow_cube(RenderFixture *f, bool second)
+{
+    NphRenderMeshData data;
+    NTEST_ASSERT_EQ_INT(nph_render_primitive_cube(nph_allocator_system(), 1.0F, &data),
+                        NPH_RESULT_OK);
+    u32 *uv1 = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, data.vertex_count);
+    NTEST_ASSERT_NOT_NULL(uv1);
+    for (u32 i = 0; i < data.vertex_count; ++i) {
+        uv1[i] = data.attribs[i].uv0;
+        if (second) {
+            data.attribs[i].uv0 = nph_pack_f16x2(nph_vec2(0.75F, 0.5F));
+        }
+    }
+    NphRenderSubmesh sub;
+    NphRenderMeshDesc md;
+    nph_render_mesh_data_desc(&data, second ? "glow cube twin" : "glow cube", &sub, &md);
+    md.uv1 = second ? uv1 : NULL;
+    NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &md, &mesh), NPH_RESULT_OK);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, uv1, data.vertex_count);
+    nph_render_mesh_data_free(&data);
+    return mesh;
+}
+
+// A wall that glows through its texture alone, its left half lit and its right half dark, on a
+// black ground under no sky or sun: the ground before it is lit by the cache's rays' hits on
+// the wall (gi_hit.glsl). `set`: the set the emissive slot reads, and the twin cube whose second
+// set holds the coordinates where it is 1; `wrong`: the twin read through its first set, which
+// sits in the dark texel. Returns the ground pixels' mean irradiance (-1: no cache), and in
+// `bands` theirs in four bands across the wall, left to right: the glow's pattern, which the
+// cache's rays sample (their noise apart from one run to the next: GLOW_BANDS' means hold).
+#define GLOW_BANDS 4U
+static f64 glow_ground(u32 set, bool wrong, f64 *bands)
+{
+    static u8 out[PIXELS];
+    RenderFixture fx;
+    test_render_setup(&fx, NULL);
+    if (fx.dev == NULL || !nph_renderer_production_supported(fx.renderer) ||
+        !fx.renderer->gi.supported) {
+        test_render_teardown(&fx);
+        return -1.0;
+    }
+    RenderFixture *f = &fx;
+    const u8 texels[8] = {255, 255, 255, 255, 0, 0, 0, 255};
+    const void *mips[1] = {texels};
+    const u64 sizes[1] = {sizeof texels};
+    NphRenderTextureDesc td;
+    memset(&td, 0, sizeof td);
+    td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+    td.width = 2U;
+    td.height = 1U;
+    td.mip_count = 1U;
+    td.mips = mips;
+    td.mip_sizes = sizes;
+    NphRenderTexture tex;
+    NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex), NPH_RESULT_OK);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.0F, 0.0F, 0.0F, 1.0F);
+    md.roughness = 1.0F;
+    md.emissive = nph_vec3(2.0F, 2.0F, 2.0F);
+    md.textures[NPH_RENDER_SLOT_EMISSIVE].texture = tex;
+    md.textures[NPH_RENDER_SLOT_EMISSIVE].nearest = 1;
+    md.textures[NPH_RENDER_SLOT_EMISSIVE].texcoord = wrong ? 0U : set;
+    NphRenderMaterial glowing;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &glowing), NPH_RESULT_OK);
+    static TestBoxScene scene;
+    memset(&scene, 0, sizeof scene);
+    const NphRenderMesh ground = test_cube_mesh(f);
+    test_box_ground(f, &scene, ground, test_grey(f, 0.0F));
+    const NphRenderMesh wall = glow_cube(f, set == 1U);
+    test_box_add(f, &scene, wall, glowing, nph_vec3(-1.0F, 0.0F, -0.2F),
+                 nph_vec3(1.0F, 1.5F, 0.2F));
+    const NphRenderCamera camera =
+        test_box_camera(&scene, nph_vec3(0.3F, 1.6F, 3.0F), nph_vec3(0.0F, 0.2F, 0.0F), 0.8F);
+    const NphGpuImage target = test_make_target(f->dev, NPH_GPU_FORMAT_R8G8B8A8_UNORM, SIZE);
+    NphRenderView v;
+    gi_view(&v, camera);
+    render_frames(f, &v, target, out, FRAMES);
+    f64 sum = 0.0;
+    u32 count = 0U;
+    f64 band_sum[GLOW_BANDS] = {0.0, 0.0, 0.0, 0.0};
+    u32 band_count[GLOW_BANDS] = {0U, 0U, 0U, 0U};
+    for (u32 i = 0; i < SIZE * SIZE; ++i) {
+        NphVec3 x;
+        NphVec3 n;
+        if (pixel_point(&scene, i, &x, &n) != 0 || x.z < 0.2F || x.x < -1.0F || x.x >= 1.0F) {
+            continue;
+        }
+        const f64 value = (f64)test_box_linear(out, i);
+        const u32 band = (u32)((x.x + 1.0F) * 0.5F * (f32)GLOW_BANDS);
+        sum += value;
+        ++count;
+        band_sum[band] += value;
+        band_count[band] += 1U;
+    }
+    NTEST_EXPECT_GT_UINT(count, 2000U);
+    for (u32 b = 0; b < GLOW_BANDS; ++b) {
+        NTEST_EXPECT_GT_UINT(band_count[b], 200U);
+        bands[b] = band_count[b] != 0U ? band_sum[b] / (f64)band_count[b] : 0.0;
+    }
+    test_box_release(f, target);
+    test_render_teardown(f);
+    return count != 0U ? sum / (f64)count : 0.0;
+}
+
+NTEST(gi, a_glow_on_the_second_set_lights_as_on_the_first)
+{
+    f64 first[GLOW_BANDS] = {0.0, 0.0, 0.0, 0.0};
+    f64 second[GLOW_BANDS] = {0.0, 0.0, 0.0, 0.0};
+    f64 wrong[GLOW_BANDS] = {0.0, 0.0, 0.0, 0.0};
+    const f64 on_first = glow_ground(0U, false, first);
+    if (on_first < 0.0) {
+        NTEST_SKIP("no radiance cache on this device (ray queries)");
+    }
+    const f64 on_second = glow_ground(1U, false, second);
+    const f64 on_wrong = glow_ground(1U, true, wrong);
+    NTEST_LOG("the ground's mean irradiance: the glow on the first set %.4f (bands %.4f %.4f %.4f "
+              "%.4f), on the second %.4f (%.4f %.4f %.4f %.4f), the twin read through its first "
+              "%.4f",
+              on_first, first[0], first[1], first[2], first[3], on_second, second[0], second[1],
+              second[2], second[3], on_wrong);
+    NTEST_EXPECT_TRUE(on_first > 0.01);
+    NTEST_EXPECT_TRUE(nph_f64_abs(on_second / on_first - 1.0) < 0.01);
+    // The pattern: the lit half's side brighter, and the second set's bands the first's.
+    NTEST_EXPECT_TRUE(nph_f64_abs(first[0] - first[GLOW_BANDS - 1U]) > 0.2 * on_first);
+    for (u32 b = 0; b < GLOW_BANDS; ++b) {
+        NTEST_EXPECT_TRUE(nph_f64_abs(second[b] - first[b]) < 0.02 * on_first);
+    }
+    NTEST_EXPECT_TRUE(on_wrong < 0.05 * on_first);
 }
 
 // ---------------------------------------------------------------------------

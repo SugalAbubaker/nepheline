@@ -254,7 +254,18 @@ typedef struct Point {
     NphVec3 normal;
     NphVec4 tangent;
     f32 uv_per_unit;
+    NphVec2 uv1; // the second set's (the first's where the mesh has none)
+    f32 uv1_per_unit;
 } Point;
+
+// A triangle's texture coordinates a unit of its surface spans (the square root of their area
+// over its own), the footprint's scale.
+static f32 per_unit(const NphVec2 uv[3], f32 world)
+{
+    const f32 tex =
+        nph_f32_abs(nph_vec2_cross(nph_vec2_sub(uv[1], uv[0]), nph_vec2_sub(uv[2], uv[0])));
+    return world > 0.0F ? nph_f32_sqrt(tex / world) : 0.0F;
+}
 
 static Point point(const CookVoxelSampler *s, const u32 v[3], NphVec3 b)
 {
@@ -262,6 +273,7 @@ static Point point(const CookVoxelSampler *s, const u32 v[3], NphVec3 b)
     memset(&p, 0, sizeof p);
     const f32 w[3] = {b.x, b.y, b.z};
     NphVec2 uv[3];
+    NphVec2 uv1[3];
     NphVec3 n = nph_vec3_zero();
     NphVec3 t = nph_vec3_zero();
     f32 hand = 0.0F;
@@ -269,6 +281,8 @@ static Point point(const CookVoxelSampler *s, const u32 v[3], NphVec3 b)
         const NphMeshAttrib *a = &s->attribs[v[k]];
         uv[k] = nph_unpack_f16x2(a->uv0);
         p.uv = nph_vec2_add(p.uv, nph_vec2_scale(uv[k], w[k]));
+        uv1[k] = s->uv1 != NULL ? nph_unpack_f16x2(s->uv1[v[k]]) : uv[k];
+        p.uv1 = nph_vec2_add(p.uv1, nph_vec2_scale(uv1[k], w[k]));
         p.color = nph_vec4_add(p.color, nph_vec4_scale(nph_unpack_unorm8x4(a->color), w[k]));
         n = nph_vec3_add(n, nph_vec3_scale(nph_oct_decode_snorm16(a->normal), w[k]));
         const NphVec4 tt = nph_unpack_snorm8x4(a->tangent);
@@ -280,16 +294,18 @@ static Point point(const CookVoxelSampler *s, const u32 v[3], NphVec3 b)
     const NphVec3 p0 = s->positions[v[0]];
     const f32 world = nph_vec3_length(
         nph_vec3_cross(nph_vec3_sub(s->positions[v[1]], p0), nph_vec3_sub(s->positions[v[2]], p0)));
-    const f32 tex =
-        nph_f32_abs(nph_vec2_cross(nph_vec2_sub(uv[1], uv[0]), nph_vec2_sub(uv[2], uv[0])));
-    p.uv_per_unit = world > 0.0F ? nph_f32_sqrt(tex / world) : 0.0F;
+    p.uv_per_unit = per_unit(uv, world);
+    p.uv1_per_unit = per_unit(uv1, world);
     return p;
 }
 
+// A slot's texels at the point, through the set it reads.
 static NphVec4 lookup(const CookVoxelSlot *slot, const Point *p, f32 footprint)
 {
-    return cook_voxel_image_sample(slot->image, p->uv, footprint * p->uv_per_unit, slot->wrap_u,
-                                   slot->wrap_v);
+    const bool second = slot->set == 1U;
+    return cook_voxel_image_sample(slot->image, second ? p->uv1 : p->uv,
+                                   footprint * (second ? p->uv1_per_unit : p->uv_per_unit),
+                                   slot->wrap_u, slot->wrap_v);
 }
 
 static NphVec4 base_color(const CookVoxelMaterial *m, const Point *p, f32 footprint)
@@ -359,13 +375,15 @@ static bool covers(void *user, u32 submesh, const u32 v[3], NphVec3 b, f32 footp
 
 void cook_voxel_sampler_init(CookVoxelSampler *s, const CookMesh *mesh,
                              const CookVoxelMaterials *materials, const NphVec3 *positions,
-                             const NphMeshAttrib *attribs, u8 *surfaces, NphRenderVoxelSampler *out)
+                             const NphMeshAttrib *attribs, const u32 *uv1, u8 *surfaces,
+                             NphRenderVoxelSampler *out)
 {
     NPH_ASSERT(s != NULL && mesh != NULL && materials != NULL && out != NULL);
     s->mesh = mesh;
     s->materials = materials;
     s->positions = positions;
     s->attribs = attribs;
+    s->uv1 = uv1;
     for (u32 i = 0; i < mesh->submeshes.len; ++i) {
         const CookVoxelMaterial *m = material_of(s, i);
         surfaces[i] = m != NULL ? m->surface : (u8)NPH_RENDER_VOXEL_SURFACE_NONE;

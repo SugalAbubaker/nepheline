@@ -104,7 +104,7 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // ---------------------------------------------------------------------------
 
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
-                                  bool ray_query, bool vsm, bool vis_depth, u32 gi,
+                                  bool ray_query, bool vsm, bool vis_depth, u32 gi, bool uv1,
                                   NphGpuPipeline *out)
 {
     NPH_ASSERT(!vis_depth || alpha == (u32)NPH_RENDER_ALPHA_BLEND);
@@ -157,14 +157,15 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
         d.depth.write = 1;
     }
     d.name = vis_depth ? "forward blended (indirect)" : names[alpha][cull];
-    // forward_frag.glsl's k_vsm, k_vis_depth, k_gi and k_cache_only (`gi` 2), and
-    // forward.vert's k_indirect.
+    // forward_frag.glsl's k_vsm, k_vis_depth, k_gi and k_cache_only (`gi` 2), forward.vert's
+    // k_indirect, and both stages' k_uv1 (the second texture coordinate set; ADR-0107).
     d.specialization[0] = vsm ? 1U : 0U;
     d.specialization[1] = vis_depth ? 1U : 0U;
     d.specialization[2] = gi != 0U ? 1U : 0U;
     d.specialization[3] = gi == 2U ? 1U : 0U;
     d.specialization[4] = vis_depth ? 1U : 0U;
-    d.specialization_count = vis_depth ? 5U : (vsm ? 1U : 0U);
+    d.specialization[5] = uv1 ? 1U : 0U;
+    d.specialization_count = uv1 ? 6U : vis_depth ? 5U : (vsm ? 1U : 0U);
     return nph_gpu_pipeline_create_graphics(r->dev, &d, out);
 }
 
@@ -174,10 +175,10 @@ static NphResult create_forward_pipelines(NphRenderer *r)
     for (u32 alpha = 0; alpha < 3U; ++alpha) {
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
             NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false, false,
-                                            0U, &r->forward[alpha][cull]));
+                                            0U, false, &r->forward[alpha][cull]));
             if (rt) {
                 NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true, false,
-                                                false, 0U, &r->forward_rt[alpha][cull]));
+                                                false, 0U, false, &r->forward_rt[alpha][cull]));
             }
         }
     }
@@ -192,6 +193,25 @@ static NphResult create_forward_pipelines(NphRenderer *r)
     s.depth.compare = NPH_GPU_COMPARE_GREATER_OR_EQUAL; // only where depth is still the far plane
     s.name = "sky";
     return nph_gpu_pipeline_create_graphics(r->dev, &s, &r->sky);
+}
+
+NphResult render_forward_uv1_pipelines(NphRenderer *r)
+{
+    // Each one not made yet: a call that failed part way makes the rest the next time.
+    const bool rt = r->rt.supported != 0;
+    for (u32 alpha = 0; alpha < 3U; ++alpha) {
+        for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
+            if (r->forward_uv1[alpha][cull].value == 0U) {
+                NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false,
+                                                false, 0U, true, &r->forward_uv1[alpha][cull]));
+            }
+            if (rt && r->forward_rt_uv1[alpha][cull].value == 0U) {
+                NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true, false,
+                                                false, 0U, true, &r->forward_rt_uv1[alpha][cull]));
+            }
+        }
+    }
+    return NPH_RESULT_OK;
 }
 
 static NphResult create_compute_pipelines(NphRenderer *r)
@@ -595,6 +615,7 @@ void nph_renderer_destroy(NphRenderer *r)
             ++leaked;
             nph_gpu_buffer_destroy(dev, m->positions);
             nph_gpu_buffer_destroy(dev, m->attribs);
+            nph_gpu_buffer_destroy(dev, m->uv1);
             nph_gpu_buffer_destroy(dev, m->indices);
             render_vis_mesh_destroy(r, i);
             render_rt_mesh_destroy(r, i);
@@ -669,6 +690,8 @@ void nph_renderer_destroy(NphRenderer *r)
         for (u32 c = 0; c < (u32)RENDER_CULL_COUNT; ++c) {
             nph_gpu_pipeline_destroy(dev, r->forward[a][c]);
             nph_gpu_pipeline_destroy(dev, r->forward_rt[a][c]);
+            nph_gpu_pipeline_destroy(dev, r->forward_uv1[a][c]);
+            nph_gpu_pipeline_destroy(dev, r->forward_rt_uv1[a][c]);
         }
     }
     nph_gpu_pipeline_destroy(dev, r->sky);
@@ -1329,6 +1352,11 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
         res = make_buffer(r, desc->attribs, (u64)desc->vertex_count * sizeof(NphRenderVertexAttrib),
                           (u32)NPH_GPU_BUFFER_USAGE_STORAGE, "mesh attributes", &m->attribs);
     }
+    if (res == NPH_RESULT_OK && triangles && desc->uv1 != NULL) {
+        res = make_buffer(r, desc->uv1, (u64)desc->vertex_count * sizeof(u32),
+                          (u32)NPH_GPU_BUFFER_USAGE_STORAGE, "mesh second texture coordinates",
+                          &m->uv1);
+    }
     if (res == NPH_RESULT_OK && triangles) {
         res =
             make_buffer(r, desc->indices, (u64)desc->index_count * sizeof(u32),
@@ -1337,6 +1365,8 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
     if (res == NPH_RESULT_OK) {
         m->positions_address = nph_gpu_buffer_address(r->dev, m->positions);
         m->attribs_address = nph_gpu_buffer_address(r->dev, m->attribs);
+        m->uv1_address =
+            triangles && desc->uv1 != NULL ? nph_gpu_buffer_address(r->dev, m->uv1) : 0U;
         m->vertex_count = desc->vertex_count;
         m->index_count = desc->index_count;
         // The bottom level first: the GPU scene's mesh record names it.
@@ -1348,6 +1378,7 @@ NphResult nph_render_mesh_create(NphRenderer *r, const NphRenderMeshDesc *desc, 
     if (res != NPH_RESULT_OK) {
         nph_gpu_buffer_destroy(r->dev, m->positions);
         nph_gpu_buffer_destroy(r->dev, m->attribs);
+        nph_gpu_buffer_destroy(r->dev, m->uv1);
         nph_gpu_buffer_destroy(r->dev, m->indices);
         render_vis_mesh_destroy(r, slot);
         render_rt_mesh_destroy(r, slot);
@@ -1401,6 +1432,7 @@ void nph_render_mesh_destroy(NphRenderer *r, NphRenderMesh mesh)
     }
     nph_gpu_buffer_destroy(r->dev, m->positions);
     nph_gpu_buffer_destroy(r->dev, m->attribs);
+    nph_gpu_buffer_destroy(r->dev, m->uv1);
     nph_gpu_buffer_destroy(r->dev, m->indices);
     render_vis_mesh_destroy(r, slot);
     render_rt_mesh_destroy(r, slot);
@@ -1633,6 +1665,22 @@ static bool uv_transform_valid(const NphRenderUvTransform *t)
     return det != 0.0;
 }
 
+// Whether a material needs the shaders' k_uv variants (NphRenderer.uv_materials): its
+// coordinates are transformed, or a slot with a texture reads the second set.
+bool render_material_reads_uv1(const NphRenderMaterialDesc *d)
+{
+    bool second = false;
+    for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
+        second = second || (d->textures[s].texture.value != 0U && d->textures[s].texcoord == 1U);
+    }
+    return second;
+}
+
+static u32 needs_uv_variants(const NphRenderMaterialDesc *d)
+{
+    return !nph_render_uv_is_identity(&d->uv) || render_material_reads_uv1(d) ? 1U : 0U;
+}
+
 static NphResult validate_material(const NphRenderer *r, const NphRenderMaterialDesc *d)
 {
     if ((u32)d->alpha_mode > (u32)NPH_RENDER_ALPHA_BLEND || !nph_vec4_is_finite(d->base_color) ||
@@ -1640,13 +1688,14 @@ static NphResult validate_material(const NphRenderer *r, const NphRenderMaterial
         !nph_f32_is_finite(d->roughness) || !nph_f32_is_finite(d->normal_scale) ||
         !nph_f32_is_finite(d->occlusion_strength) || !nph_f32_is_finite(d->alpha_cutoff) ||
         (d->alpha_key != 0U && d->alpha_mode != NPH_RENDER_ALPHA_MASK) ||
-        !uv_transform_valid(&d->uv) || (d->alpha_key != 0U && !nph_render_uv_is_identity(&d->uv))) {
+        !uv_transform_valid(&d->uv) || (d->alpha_key != 0U && !nph_render_uv_is_identity(&d->uv)) ||
+        (d->alpha_key != 0U && d->textures[NPH_RENDER_SLOT_BASE_COLOR].texcoord != 0U)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
         const NphRenderTextureBinding *b = &d->textures[s];
         if ((u32)b->wrap_u > (u32)NPH_RENDER_WRAP_MIRROR ||
-            (u32)b->wrap_v > (u32)NPH_RENDER_WRAP_MIRROR) {
+            (u32)b->wrap_v > (u32)NPH_RENDER_WRAP_MIRROR || b->texcoord > 1U) {
             return NPH_RESULT_INVALID_ARGUMENT;
         }
         if (b->texture.value != 0U) {
@@ -1679,14 +1728,15 @@ NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc
     m->changed = 0U;
     r->material_version += 1U;
     r->masked_materials += desc->alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
-    r->uv_materials += nph_render_uv_is_identity(&desc->uv) ? 0U : 1U;
+    r->uv_materials += needs_uv_variants(desc);
+    r->uv1_materials += render_material_reads_uv1(desc) ? 1U : 0U;
     out->value = value;
     return NPH_RESULT_OK;
 }
 
-// Whether what an alpha test reads differs between `a` and `b`: its base colour's alpha, texture
-// and sampling, its cutoff, its sides, its coordinates' transform. Their values are finite
-// (validate_material), so the comparisons are exact.
+// Whether what an alpha test reads differs between `a` and `b`: its base colour's alpha, texture,
+// sampling and coordinates, its cutoff, its sides, its coordinates' transform. Their values are
+// finite (validate_material), so the comparisons are exact.
 static bool alpha_test_differs(const NphRenderMaterialDesc *a, const NphRenderMaterialDesc *b)
 {
     const NphRenderTextureBinding *ta = &a->textures[NPH_RENDER_SLOT_BASE_COLOR];
@@ -1698,7 +1748,8 @@ static bool alpha_test_differs(const NphRenderMaterialDesc *a, const NphRenderMa
            ua->m11 != ub->m11 || ua->m12 != ub->m12 ||
            (a->double_sided != 0) != (b->double_sided != 0) ||
            ta->texture.value != tb->texture.value || ta->wrap_u != tb->wrap_u ||
-           ta->wrap_v != tb->wrap_v || (ta->nearest != 0) != (tb->nearest != 0);
+           ta->wrap_v != tb->wrap_v || (ta->nearest != 0) != (tb->nearest != 0) ||
+           ta->texcoord != tb->texcoord;
 }
 
 NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
@@ -1743,8 +1794,10 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
         (r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_BLEND) != blends ||
         (blends && (r->materials[slot].desc.double_sided != 0) != (desc->double_sided != 0));
     // The resolves that read a transform are the frames' while any material has one (k_uv).
-    r->uv_materials -= nph_render_uv_is_identity(&r->materials[slot].desc.uv) ? 0U : 1U;
-    r->uv_materials += nph_render_uv_is_identity(&desc->uv) ? 0U : 1U;
+    r->uv_materials -= needs_uv_variants(&r->materials[slot].desc);
+    r->uv_materials += needs_uv_variants(desc);
+    r->uv1_materials -= render_material_reads_uv1(&r->materials[slot].desc) ? 1U : 0U;
+    r->uv1_materials += render_material_reads_uv1(desc) ? 1U : 0U;
     r->materials[slot].desc = *desc;
     r->materials[slot].desc.name = NULL;
     // The next frame's resolve takes no history where it draws (frame.c write_materials).
@@ -1768,7 +1821,8 @@ void nph_render_material_destroy(NphRenderer *r, NphRenderMaterial material)
         return;
     }
     r->masked_materials -= r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
-    r->uv_materials -= nph_render_uv_is_identity(&r->materials[slot].desc.uv) ? 0U : 1U;
+    r->uv_materials -= needs_uv_variants(&r->materials[slot].desc);
+    r->uv1_materials -= render_material_reads_uv1(&r->materials[slot].desc) ? 1U : 0U;
     // Its instances draw with the default material from here on, which tests no alpha and
     // holds no mesh's triangles for the rays alone: where the rays held it to a key, the
     // top level's records are written again, and name their meshes' own triangles (ADR-0098).

@@ -43,6 +43,18 @@ bool nph_material_has_uv(uint flags)
 {
     return (flags & uint(NPH_RENDER_MATERIAL_UV_TRANSFORM)) != 0u;
 }
+
+// Whether a slot of a material with a texture reads the second texture coordinate set
+// (ADR-0107), and whether slot `slot` does (its bit in NphRenderMaterialData.wrap).
+bool nph_material_has_uv1(uint flags)
+{
+    return (flags & uint(NPH_RENDER_MATERIAL_UV1)) != 0u;
+}
+
+bool nph_material_slot_uv1(uint wrap, uint slot)
+{
+    return ((wrap >> (uint(NPH_RENDER_MATERIAL_SET1_SHIFT) + slot)) & 1u) != 0u;
+}
 NPH_BUFFER_REF(LightsRef) { NphRenderLightData l[]; };
 // One light's record: LightRef(lights)[i] is the reference to lights[i]
 // (GL_EXT_buffer_reference2), whose fields then load at fixed offsets from
@@ -55,6 +67,24 @@ NPH_BUFFER_REF(DebugRef) { NphRenderDebugVertex v[]; };
 NPH_BUFFER_REF(SkyRef) { NphRenderSkyData s; };
 NPH_BUFFER_REF(LightGridRef) { NphRenderLightGrid g; };
 NPH_BUFFER_REF(WordsRef) { uint w[]; };
+
+// A triangle's second texture coordinate set (ADR-0107): its vertices' in `uv1` (u32 f16x2[]),
+// or `uvs`, the first set's, where the mesh has none (0).
+mat3x2 nph_uv1s(uint64_t uv1, uvec3 vtx, mat3x2 uvs)
+{
+    if (uv1 == 0ul) {
+        return uvs;
+    }
+    WordsRef w = WordsRef(uv1);
+    return mat3x2(unpackHalf2x16(w.w[vtx.x]), unpackHalf2x16(w.w[vtx.y]),
+                  unpackHalf2x16(w.w[vtx.z]));
+}
+
+// A vertex's second set: in `uv1`, or `uv`, its first, where the mesh has none (0).
+vec2 nph_uv1(uint64_t uv1, uint vertex, vec2 uv)
+{
+    return uv1 != 0ul ? unpackHalf2x16(WordsRef(uv1).w[vertex]) : uv;
+}
 
 // Interleaved gradient noise in [0, 1) at a pixel (Jimenez, "Next
 // Generation Post Processing in Call of Duty: Advanced Warfare", SIGGRAPH

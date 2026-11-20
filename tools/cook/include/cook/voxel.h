@@ -66,6 +66,7 @@ typedef struct CookVoxelSlot {
     const CookVoxelImage *image; // NULL: the slot has none
     u32 wrap_u;                  // NphMaterialWrap
     u32 wrap_v;
+    u32 set; // the texture coordinates it reads: 0, or 1 (the sampler's `uv1`; ADR-0107)
 } CookVoxelSlot;
 
 typedef struct CookVoxelMaterial {
@@ -103,11 +104,12 @@ typedef struct CookVoxelSampler {
     const CookVoxelMaterials *materials;
     const NphVec3 *positions;
     const NphMeshAttrib *attribs;
+    const u32 *uv1; // the second set (f16x2) per vertex, or NULL: a slot on set 1 reads set 0
 } CookVoxelSampler;
 
 void cook_voxel_sampler_init(CookVoxelSampler *s, const CookMesh *mesh,
                              const CookVoxelMaterials *materials, const NphVec3 *positions,
-                             const NphMeshAttrib *attribs, u8 *surfaces,
+                             const NphMeshAttrib *attribs, const u32 *uv1, u8 *surfaces,
                              NphRenderVoxelSampler *out);
 
 #ifdef __cplusplus

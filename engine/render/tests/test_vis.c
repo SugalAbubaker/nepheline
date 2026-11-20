@@ -5,6 +5,7 @@
 // and against itself with its culling switched off, on another raster
 // path, and far from the origin. The fixture's teardown asserts zero
 // validation and synchronisation-validation errors and nothing leaked.
+#include <nepheline/math/pack.h>
 #include <nepheline/math/random.h>
 #include <nepheline/math/scalar.h>
 #include <nepheline/render/reference.h>
@@ -1957,6 +1958,191 @@ NTEST(vis, a_tiled_masked_material_matches_the_reference_on_both_rasters)
     if (compared == 0U) {
         NTEST_SKIP("no production path on this device");
     }
+}
+
+// A mesh's twin on the second set (ADR-0107): its first set fixed at one point, its own
+// coordinates as the second.
+static NphRenderMesh second_set_twin(RenderFixture *f, NphResult (*make)(NphRenderMeshData *))
+{
+    NphRenderMeshData data;
+    NTEST_ASSERT_EQ_INT(make(&data), NPH_RESULT_OK);
+    u32 *uv1 = NPH_ALLOC_ARRAY(nph_allocator_system(), u32, data.vertex_count);
+    NTEST_ASSERT_NOT_NULL(uv1);
+    for (u32 i = 0; i < data.vertex_count; ++i) {
+        uv1[i] = data.attribs[i].uv0;
+        data.attribs[i].uv0 = nph_pack_f16x2(nph_vec2(0.1F, 0.1F));
+    }
+    NphRenderSubmesh sub;
+    NphRenderMeshDesc md;
+    nph_render_mesh_data_desc(&data, "second set twin", &sub, &md);
+    md.uv1 = uv1;
+    NphRenderMesh mesh = NPH_RENDER_MESH_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_mesh_create(f->renderer, &md, &mesh), NPH_RESULT_OK);
+    NPH_FREE_ARRAY(nph_allocator_system(), u32, uv1, data.vertex_count);
+    nph_render_mesh_data_free(&data);
+    return mesh;
+}
+
+static NphResult make_dense_plane(NphRenderMeshData *out)
+{
+    return nph_render_primitive_plane(nph_allocator_system(), 1.0F, 48U, 1.0F, out);
+}
+
+// A masked checker that glows by the same texture, drawn on each raster by a near plane and a
+// far, dense one (small triangles, the software raster's where it takes them), with a blended
+// pane of it the production path draws forward (vis_blend.comp's records): once on the first
+// set, once by twins on the second, the material the same but for its slots' set. The same
+// coordinates reach the same samples, untransformed (the second set alone then calls for the
+// shaders' k_uv variants, the first scene drawn without them) and through a tiling transform:
+// the reference renderer's images and the production path's match their twins'.
+NTEST(vis, a_material_on_the_second_set_draws_as_on_the_first)
+{
+    static u8 first_ref[PIXELS];
+    static u8 second_ref[PIXELS];
+    static u8 first_vis[PIXELS];
+    static u8 second_vis[PIXELS];
+    static RenderFixture fx;
+    u32 compared = 0U;
+    for (u32 pass = 0; pass < 4U; ++pass) {
+        RenderFixture *f = &fx;
+        if (!raster_fixture(f, (pass & 1U) == 0U)) {
+            continue;
+        }
+        const bool tiled = pass >= 2U;
+        u8 checker[4U * 4U * 4U];
+        for (u32 i = 0; i < 16U; ++i) {
+            const bool on = ((i % 4U) + (i / 4U)) % 2U == 0U;
+            checker[i * 4U + 0U] = (u8)(80U + 40U * (i % 4U));
+            checker[i * 4U + 1U] = on ? 255U : 64U;
+            checker[i * 4U + 2U] = (u8)(80U + 40U * (i / 4U));
+            checker[i * 4U + 3U] = on ? 255U : 0U;
+        }
+        const void *mips[1] = {checker};
+        const u64 sizes[1] = {sizeof checker};
+        NphRenderTextureDesc td;
+        memset(&td, 0, sizeof td);
+        td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+        td.width = 4U;
+        td.height = 4U;
+        td.mip_count = 1U;
+        td.mips = mips;
+        td.mip_sizes = sizes;
+        NphRenderTexture tex;
+        NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex), NPH_RESULT_OK);
+        NphRenderMaterialDesc md;
+        nph_render_material_desc_default(&md);
+        md.alpha_mode = NPH_RENDER_ALPHA_MASK;
+        md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex;
+        md.textures[NPH_RENDER_SLOT_BASE_COLOR].nearest = 1;
+        md.textures[NPH_RENDER_SLOT_EMISSIVE].texture = tex;
+        md.textures[NPH_RENDER_SLOT_EMISSIVE].nearest = 1;
+        md.emissive = nph_vec3(0.5F, 0.5F, 0.5F);
+        if (tiled) {
+            const NphRenderUvTransform t = {2.0F, 0.0F, 0.25F, 0.0F, -1.0F, 1.0F};
+            md.uv = t;
+        }
+        NphRenderMaterial on_first;
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &on_first), NPH_RESULT_OK);
+        // A blended pane of the same texture, which the production path draws forward from the
+        // records the GPU lists (vis_blend.comp; ADR-0097).
+        NphRenderMaterialDesc bd = md;
+        bd.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+        bd.base_color = nph_vec4(1.0F, 1.0F, 1.0F, 0.6F);
+        NphRenderMaterial blended_first;
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &bd, &blended_first),
+                            NPH_RESULT_OK);
+        const NphRenderMesh plane = mesh_of(f, make_plane);
+        const NphRenderMesh dense = mesh_of(f, make_dense_plane);
+        const NphRenderMesh plane1 = second_set_twin(f, make_plane);
+        const NphRenderMesh dense1 = second_set_twin(f, make_dense_plane);
+        // Planes face +Y; a quarter turn about X faces the camera on +Z.
+        const NphQuat facing = nph_quat_from_rotation_x(0.5F * NPH_PI);
+        const NphRenderTransform near =
+            nph_render_transform_from_trs(nph_dvec3(-0.4, 0.0, 0.0), facing, nph_vec3_one());
+        const NphRenderTransform far =
+            nph_render_transform_from_trs(nph_dvec3(1.5, 0.0, -6.0), facing, nph_vec3_one());
+        const NphRenderTransform pane = nph_render_transform_from_trs(
+            nph_dvec3(0.6, 0.3, 0.5), facing, nph_vec3(0.5F, 1.0F, 0.5F));
+        NphRenderLightDesc ld;
+        memset(&ld, 0, sizeof ld);
+        ld.type = NPH_RENDER_LIGHT_TYPE_POINT;
+        ld.color = nph_vec3_one();
+        ld.intensity = 50.0F;
+        ld.position = nph_dvec3(0.0, 0.5, 2.0);
+        NphRenderLight light;
+        NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+        NphRenderView v;
+        nph_render_view_default(&v, test_camera());
+        v.ev100 = 4.0F;
+        v.background = NPH_RENDER_BACKGROUND_SOLID;
+        v.background_color = nph_vec3(30.0F, 30.0F, 30.0F);
+        const NphRenderPipeline reference = v.pipeline;
+        const NphRenderInstance a = instance(f, plane, on_first, near);
+        const NphRenderInstance b = instance(f, dense, on_first, far);
+        const NphRenderInstance c = instance(f, plane, blended_first, pane);
+        render_into(f, &v, 1U, first_ref);
+        v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+        render_into(f, &v, 3U, first_vis);
+        nph_render_instance_destroy(f->renderer, a);
+        nph_render_instance_destroy(f->renderer, b);
+        nph_render_instance_destroy(f->renderer, c);
+        // The twins, their material made now: the first scene had no material on the second
+        // set, and (untransformed) no k_uv variant.
+        md.textures[NPH_RENDER_SLOT_BASE_COLOR].texcoord = 1U;
+        md.textures[NPH_RENDER_SLOT_EMISSIVE].texcoord = 1U;
+        NphRenderMaterial on_second;
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &on_second),
+                            NPH_RESULT_OK);
+        bd.textures[NPH_RENDER_SLOT_BASE_COLOR].texcoord = 1U;
+        bd.textures[NPH_RENDER_SLOT_EMISSIVE].texcoord = 1U;
+        NphRenderMaterial blended_second;
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &bd, &blended_second),
+                            NPH_RESULT_OK);
+        // Destroyed with the renderer at the teardown.
+        (void)instance(f, plane1, on_second, near);
+        (void)instance(f, dense1, on_second, far);
+        (void)instance(f, plane1, blended_second, pane);
+        v.pipeline = reference;
+        render_into(f, &v, 1U, second_ref);
+        v.pipeline = NPH_RENDER_PIPELINE_PRODUCTION;
+        const NphRenderFrameStats st = render_into(f, &v, 3U, second_vis);
+        const ImageDiff dref = image_diff(first_ref, second_ref, 1U);
+        const ImageDiff dvis = image_diff(first_vis, second_vis, 1U);
+        NTEST_LOG("pass %u (%s, %s): reference %.3f %% within a level, max %u; production %.3f %% "
+                  "within, max %u; %u of %u clusters in software",
+                  pass, f->renderer->vis.mesh_shaders ? "mesh shaders" : "indexed draws",
+                  tiled ? "tiled" : "untransformed", (f64)dref.within * 100.0, dref.max,
+                  (f64)dvis.within * 100.0, dvis.max, st.vis_clusters_sw, st.vis_clusters);
+        NTEST_EXPECT_TRUE(dref.within >= 0.999F);
+        NTEST_EXPECT_TRUE(dvis.within >= 0.999F);
+        test_render_teardown(f);
+        ++compared;
+    }
+    if (compared == 0U) {
+        NTEST_SKIP("no production path on this device");
+    }
+}
+
+// The second set's material checks: a set past the second, and an alpha key with the base
+// colour on the second, are refused.
+NTEST_F(Vis, a_material_takes_the_first_two_sets_and_keys_only_the_first)
+{
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    NphRenderMaterial m;
+    md.textures[NPH_RENDER_SLOT_OCCLUSION].texcoord = 2U;
+    NTEST_EXPECT_EQ_INT(nph_render_material_create(f->renderer, &md, &m),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    md.textures[NPH_RENDER_SLOT_OCCLUSION].texcoord = 1U;
+    NTEST_EXPECT_EQ_INT(nph_render_material_create(f->renderer, &md, &m), NPH_RESULT_OK);
+    md.alpha_mode = NPH_RENDER_ALPHA_MASK;
+    md.alpha_key = 7U;
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].texcoord = 1U;
+    NphRenderMaterial keyed;
+    NTEST_EXPECT_EQ_INT(nph_render_material_create(f->renderer, &md, &keyed),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    md.textures[NPH_RENDER_SLOT_BASE_COLOR].texcoord = 0U;
+    NTEST_EXPECT_EQ_INT(nph_render_material_create(f->renderer, &md, &keyed), NPH_RESULT_OK);
 }
 
 // A level of an sRGB target as linear light.

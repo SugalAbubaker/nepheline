@@ -1104,6 +1104,130 @@ NTEST(mesh, flat_shaded_corners_add_vertices_to_the_asset)
     cook_mesh_free(&src);
 }
 
+// A flat grid of n x n quads whose two halves have their own vertices along the middle column:
+// the same positions, normals and first set, but the second set's u 0 on the left and 1 on the
+// right, a seam in that set alone.
+static void make_seamed_grid(CookMesh *mesh, u32 n)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    const u32 half = n / 2U;
+    const u32 cols = half + 1U;              // a half's columns of vertices
+    const u32 vcount = 2U * cols * (n + 1U); // both halves
+    CookVertex *verts = NPH_ALLOC_ARRAY_ZEROED(alloc, CookVertex, vcount);
+    u32 *indices = NPH_ALLOC_ARRAY(alloc, u32, (u64)n * n * 6U);
+    NTEST_ASSERT_NOT_NULL(verts);
+    NTEST_ASSERT_NOT_NULL(indices);
+    for (u32 side = 0; side < 2U; ++side) {
+        for (u32 c = 0; c < cols; ++c) {
+            for (u32 z = 0; z <= n; ++z) {
+                const u32 x = side * half + c;
+                CookVertex *v = &verts[(side * cols + c) * (n + 1U) + z];
+                v->position = nph_vec3((f32)x / (f32)n, 0.0F, (f32)z / (f32)n);
+                v->normal = nph_vec3_unit_y();
+                v->tangent = nph_vec4(1.0F, 0.0F, 0.0F, 1.0F);
+                v->uv0 = nph_vec2((f32)x / (f32)n, (f32)z / (f32)n);
+                v->uv1 = nph_vec2((f32)side, (f32)z / (f32)n);
+                v->color = nph_vec4_one();
+            }
+        }
+    }
+    u32 k = 0U;
+    for (u32 x = 0; x < n; ++x) {
+        const u32 side = x < half ? 0U : 1U;
+        const u32 c = x - side * half;
+        for (u32 z = 0; z < n; ++z) {
+            const u32 a = (side * cols + c) * (n + 1U) + z;
+            const u32 b = a + (n + 1U);
+            const u32 idx[6] = {a, a + 1U, b, b, a + 1U, b + 1U};
+            memcpy(&indices[k], idx, sizeof idx);
+            k += 6U;
+        }
+    }
+    NTEST_ASSERT_EQ_INT(cook_mesh_add_submesh(mesh, verts, vcount, indices, k, 0U), NPH_RESULT_OK);
+    NPH_FREE_ARRAY(alloc, CookVertex, verts, vcount);
+    NPH_FREE_ARRAY(alloc, u32, indices, (u64)n * n * 6U);
+    mesh->flags = (u32)COOK_MESH_HAS_NORMALS | (u32)COOK_MESH_HAS_TANGENTS |
+                  (u32)COOK_MESH_HAS_UV0 | (u32)COOK_MESH_HAS_UV1;
+    strcpy(mesh->name, "seamed grid");
+}
+
+NTEST(mesh, a_second_set_is_written_and_its_seams_kept_by_the_levels)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    CookMesh src;
+    cook_mesh_init(&src, alloc);
+    make_seamed_grid(&src, 32U);
+    TestAsset cooked;
+    CookMeshStats st;
+    cook_with(&src, true, &cooked, &st);
+    NphMeshView v;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&cooked.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(v.uv1);
+    NTEST_EXPECT_TRUE((v.header->flags & (u32)NPH_MESH_FLAG_HAS_UV1) != 0U);
+    NTEST_ASSERT_GT_UINT(st.lod_levels, 1U);
+    // Every triangle of every level lies on one side of the seam in the second set: its
+    // corners' u all 0 or all 1. A seam the levels did not see joins the sides' vertices.
+    u32 mixed = 0U;
+    u32 triangles = 0U;
+    for (u32 c = 0; c < v.header->meshlet_count; ++c) {
+        const NphMeshlet *ml = &v.meshlets[c];
+        for (u32 t = 0; t < ml->triangle_count; ++t) {
+            const u8 *corner = &v.meshlet_triangles[((u64)ml->triangle_offset + t) * 3U];
+            f32 u[3];
+            for (u32 j = 0; j < 3U; ++j) {
+                const u32 vi = v.meshlet_vertices[ml->vertex_offset + corner[j]];
+                NTEST_ASSERT_LT_UINT(vi, v.header->vertex_count);
+                u[j] = nph_unpack_f16x2(v.uv1[vi]).x;
+            }
+            mixed += u[0] != u[1] || u[1] != u[2] ? 1U : 0U;
+            triangles += 1U;
+        }
+    }
+    NTEST_LOG("%u levels, %u triangles in all", st.lod_levels, triangles);
+    NTEST_EXPECT_EQ_UINT(mixed, 0U);
+    test_asset_free(&cooked);
+    // Without the flag, no stream.
+    src.flags &= ~(u32)COOK_MESH_HAS_UV1;
+    cook_with(&src, false, &cooked, &st);
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&cooked.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_NULL(v.uv1);
+    test_asset_free(&cooked);
+    cook_mesh_free(&src);
+}
+
+NTEST(mesh, added_vertices_carry_the_second_set_as_the_first)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    CookMesh src;
+    cook_mesh_init(&src, alloc);
+    make_steps(&src, 16U);
+    // A second set that is the first's, doubled and moved: carried with the same weights, an
+    // added vertex's keeps that.
+    NPH_ARRAY_FOREACH (CookVertex, vx, &src.vertices) {
+        vx->uv1 = nph_vec2(2.0F * vx->uv0.x + 0.25F, 2.0F * vx->uv0.y + 0.5F);
+    }
+    src.flags |= (u32)COOK_MESH_HAS_UV1;
+    TestAsset cooked;
+    CookMeshStats st;
+    cook_with(&src, true, &cooked, &st);
+    NphMeshView v;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&cooked.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_GT_UINT(st.lod_added_vertices, 0U);
+    NTEST_ASSERT_NOT_NULL(v.uv1);
+    u32 off = 0U;
+    for (u32 i = st.vertices; i < v.header->vertex_count; ++i) {
+        const NphVec2 uv0 = nph_unpack_f16x2(v.attribs[i].uv0);
+        const NphVec2 want = nph_vec2(2.0F * uv0.x + 0.25F, 2.0F * uv0.y + 0.5F);
+        const NphVec2 got = nph_unpack_f16x2(v.uv1[i]);
+        // Half floats: a few steps of the larger value's precision.
+        const f32 tol = 4e-3F * (1.0F + nph_f32_max(nph_f32_abs(want.x), nph_f32_abs(want.y)));
+        off += nph_vec2_near(got, want, tol) ? 0U : 1U;
+    }
+    NTEST_EXPECT_EQ_UINT(off, 0U);
+    test_asset_free(&cooked);
+    cook_mesh_free(&src);
+}
+
 // A mesh of many meshlets is cooked with its levels (step 8): level 0's
 // clusters are the meshlets cooked without them, byte for byte, the coarser
 // levels follow, the levels' records are the builder's (a tree under a root

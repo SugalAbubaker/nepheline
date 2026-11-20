@@ -215,8 +215,7 @@ void main()
                 d.attribs_address = mesh.m.attribs;
                 d.material_index = material;
                 d.instance_index = item.instance;
-                d.pad0 = 0u;
-                d.pad1 = 0u;
+                d.uv1_address = mesh.m.uv1;
             }
         }
     }

@@ -100,14 +100,31 @@ struct NphSurface {
     vec3 position_dy;
     vec2 uv_dx;
     vec2 uv_dy;
+    // The second texture coordinate set and its derivatives (ADR-0107), which a slot on it
+    // samples; read only where NPH_SURFACE_UV1_ACTIVE and its material has such a slot.
+    vec2 uv1;
+    vec2 uv1_dx;
+    vec2 uv1_dy;
     bool front_facing;
     vec3 face_normal; // the triangle's geometric normal, either way round
     vec2 pixel;       // the pixel's position in the target (a light tile is found from it)
     float depth; // its reverse-Z depth (znear over the view distance)
 };
 
+// Whether a slot's set is tested: the includer may compile it out where no material reads
+// the second set (vis_resolve.glsl k_uv).
+#ifndef NPH_SURFACE_UV1_ACTIVE
+#define NPH_SURFACE_UV1_ACTIVE true
+#endif
+
 vec4 nph_surface_sample(NphRenderMaterialData m, int slot, NphSurface s)
 {
+    // A slot on the second set samples through it (ADR-0107).
+    if (NPH_SURFACE_UV1_ACTIVE && nph_material_slot_uv1(m.wrap, uint(slot))) {
+        s.uv = s.uv1;
+        s.uv_dx = s.uv1_dx;
+        s.uv_dy = s.uv1_dy;
+    }
     return NPH_SURFACE_SAMPLE(m.textures[slot], m.samplers[slot], s);
 }
 

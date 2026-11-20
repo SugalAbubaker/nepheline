@@ -476,6 +476,9 @@ typedef struct NphRenderMeshDesc {
     u32 index_count;
     const NphRenderVertexPosition *positions;
     const NphRenderVertexAttrib *attribs;
+    // The second texture coordinate set (ADR-0107), f16x2 a vertex (vertex_count), or NULL:
+    // a material slot on set 1 then reads the first.
+    const u32 *uv1;
     const u32 *indices; // triangle list
     const NphRenderSubmesh *submeshes;
     u32 submesh_count; // 1..NPH_RENDER_MAX_SUBMESHES
@@ -661,6 +664,10 @@ typedef struct NphRenderTextureBinding {
     NphRenderWrap wrap_u;
     NphRenderWrap wrap_v;
     b32 nearest; // nearest filtering instead of trilinear
+    // The texture coordinates it reads (ADR-0107): 0, or 1, the second set of the mesh it is
+    // drawn on (NphRenderMeshDesc.uv1; a mesh without one gives its first). The material's
+    // transform applies to either. An alpha key needs the base colour on 0.
+    u32 texcoord;
 } NphRenderTextureBinding;
 
 // A material's texture coordinate transform (ADR-0105): u' = m00 u + m01 v + m02 and

@@ -84,6 +84,10 @@ vec3 g_tlas_offset; // and the camera's place in it
     nph_shadow_ray(g_tlas, (p).position + g_tlas_offset, (p).face_normal, (l), (distance))
 #endif
 
+// Whether a material reads the second texture coordinate set (ADR-0107; forward.vert's
+// k_uv1): only then does a slot test which set it reads, and the stage read the second.
+layout(constant_id = 5) const bool k_uv1 = false;
+#define NPH_SURFACE_UV1_ACTIVE k_uv1
 #include "surface.glsl"
 
 layout(push_constant, scalar) uniform Push { NphRenderPush pc; };
@@ -93,6 +97,7 @@ layout(location = 1) in vec3 in_normal;
 layout(location = 2) in vec4 in_tangent;
 layout(location = 3) in vec2 in_uv;
 layout(location = 4) in vec4 in_color;
+layout(location = 6) in vec2 in_uv1;
 layout(location = 0) out vec4 out_color;
 
 #if NPH_FORWARD_ALPHA_MODE == 2
@@ -143,6 +148,14 @@ void main()
     s.position_dy = dFdy(in_position);
     s.uv_dx = dFdx(in_uv);
     s.uv_dy = dFdy(in_uv);
+    s.uv1 = vec2(0.0);
+    s.uv1_dx = vec2(0.0);
+    s.uv1_dy = vec2(0.0);
+    if (k_uv1) {
+        s.uv1 = in_uv1;
+        s.uv1_dx = dFdx(in_uv1);
+        s.uv1_dy = dFdy(in_uv1);
+    }
     // Mirrored transforms are drawn with clockwise front faces, so the
     // rasteriser's facing already accounts for them (an indirect draw's is its
     // list's, above).
@@ -178,8 +191,10 @@ void main()
         paging_asks(uvec2(gl_FragCoord.xy), PagingViewRef(view.v.paging).v.feedback_phase)) {
         PagingViewRef paging = PagingViewRef(view.v.paging);
         for (int slot = 0; slot < NPH_RENDER_TEX_COUNT; ++slot) {
-            paging_request(paging, m.textures[slot], (m.wrap >> (4 * slot)) & 15u, s.uv, s.uv_dx,
-                           s.uv_dy);
+            const bool second = k_uv1 && nph_material_slot_uv1(m.wrap, uint(slot));
+            paging_request(paging, m.textures[slot], (m.wrap >> (4 * slot)) & 15u,
+                           second ? s.uv1 : s.uv, second ? s.uv1_dx : s.uv_dx,
+                           second ? s.uv1_dy : s.uv_dy);
         }
     }
 

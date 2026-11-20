@@ -70,16 +70,26 @@ void main()
     vec2 uv = uvs * bary.b;
     vec2 uv_dx = uvs * bary.ddx;
     vec2 uv_dy = uvs * bary.ddy;
-    if (nph_material_has_uv(material.m.flags)) {
+    // The second set where a slot reads it (ADR-0107): the mesh's, else the first's.
+    const uint flags = material.m.flags;
+    const mat3x2 uv1s = nph_material_has_uv1(flags) ? nph_uv1s(mesh.uv1, vtx, uvs) : uvs;
+    vec2 uv1 = uv1s * bary.b;
+    vec2 uv1_dx = uv1s * bary.ddx;
+    vec2 uv1_dy = uv1s * bary.ddy;
+    if (nph_material_has_uv(flags)) {
         const vec4 uv_u = material.m.uv_u;
         const vec4 uv_v = material.m.uv_v;
         uv = nph_material_uv(uv_u, uv_v, uv);
         uv_dx = nph_material_uv_linear(uv_u, uv_v, uv_dx);
         uv_dy = nph_material_uv_linear(uv_u, uv_v, uv_dy);
+        uv1 = nph_material_uv(uv_u, uv_v, uv1);
+        uv1_dx = nph_material_uv_linear(uv_u, uv_v, uv1_dx);
+        uv1_dy = nph_material_uv_linear(uv_u, uv_v, uv1_dy);
     }
     const uint wrap = material.m.wrap;
     for (uint slot = 0u; slot < uint(NPH_RENDER_TEX_COUNT); ++slot) {
-        paging_request(paging, material.m.textures[slot], (wrap >> (4u * slot)) & 15u, uv, uv_dx,
-                       uv_dy);
+        const bool second = nph_material_slot_uv1(wrap, slot);
+        paging_request(paging, material.m.textures[slot], (wrap >> (4u * slot)) & 15u,
+                       second ? uv1 : uv, second ? uv1_dx : uv_dx, second ? uv1_dy : uv_dy);
     }
 }

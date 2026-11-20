@@ -362,7 +362,7 @@ NPH_SHARED_STRUCT(NphVisMesh)
     // three a voxel or four), and its voxel clusters' records
     // (NphRenderVoxelCluster[], a uvec2 each), which a voxel cluster's meshlet
     // names in its triangle_offset, its first brick in its vertex_offset. The
-    // record's stride stays a multiple of 16 (224 bytes), the alignment every
+    // record's stride stays a multiple of 16 (240 bytes), the alignment every
     // buffer reference declares (nph_bindless.glsl NPH_BUFFER_REF), which the
     // resolve's VisMeshRef(...)[i] assumes of each record.
     u64 voxel_bricks;
@@ -383,6 +383,10 @@ NPH_SHARED_STRUCT(NphVisMesh)
     // (NphRenderMaterialData.ray_key). Both 0 otherwise.
     u64 blas_own;
     u64 rays;
+    // The second texture coordinate set (u32 f16x2[], ADR-0107), 0 without one: a material slot
+    // on it reads `attribs`' first set instead.
+    u64 uv1;
+    u64 reserved_uv1; // zero: the stride a multiple of 16
 };
 
 // A visible cluster: one meshlet of one instance that survived culling. It

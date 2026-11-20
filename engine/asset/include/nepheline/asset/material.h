@@ -17,9 +17,10 @@ extern "C" {
 #endif
 
 // 2: the alpha test's key (NphMaterialHeader.alpha_key). 3: the texture coordinates'
-// transform (UVTR, NphMaterialUvTransform; ADR-0105). Versions 1 and 2 still read: they have no
-// transform, and version 1 no key.
-#define NPH_MATERIAL_TYPE_VERSION 3U
+// transform (UVTR, NphMaterialUvTransform; ADR-0105). 4: a slot may read the second texture
+// coordinate set (NphMaterialTextureRef.texcoord 1; ADR-0107). Versions 1 to 3 still read: they
+// read the first set alone, have no transform before 3, and version 1 no key.
+#define NPH_MATERIAL_TYPE_VERSION 4U
 #define NPH_MATERIAL_TAG_HEADER   NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_MATERIAL_TAG_UV       NPH_FOURCC('U', 'V', 'T', 'R')
 
@@ -56,8 +57,10 @@ typedef enum NphMaterialWrap {
 
 typedef struct NphMaterialTextureRef {
     NphGuid texture; // null when the slot is unused
-    u32 texcoord;    // which UV set (0 in this version)
-    u8 wrap_u;       // NphMaterialWrap
+    // The texture coordinates it reads: 0, or from version 4 1, the second set (a mesh's UV1,
+    // asset/mesh.h; one without reads its first). The transform (UVTR) applies to either.
+    u32 texcoord;
+    u8 wrap_u; // NphMaterialWrap
     u8 wrap_v;
     u8 nearest; // 1: nearest filtering
     u8 reserved;

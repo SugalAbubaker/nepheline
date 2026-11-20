@@ -541,6 +541,39 @@ def gltf_collision():
     }
 
 
+def gltf_second_set():
+    """The textured quad with a second texture coordinate set (ADR-0107): its occlusion on
+    TEXCOORD_1, its emissive moved there by KHR_texture_transform's texCoord with a transform of
+    its own, and a second primitive whose material reads the set it has not."""
+    doc = gltf_textured()
+    pos = struct.pack("<12f", -1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1)
+    nrm = struct.pack("<12f", *([0, 1, 0] * 4))
+    uv = struct.pack("<8f", 0, 0, 1, 0, 1, 1, 0, 1)
+    col = struct.pack("<16B", *([255, 128, 0, 255] * 4))
+    idx = struct.pack("<6H", 0, 2, 1, 0, 3, 2)
+    uv1 = struct.pack("<8f", 0.5, 0.5, 0.75, 0.5, 0.75, 0.75, 0.5, 0.75)
+    buf = pos + nrm + uv + col + idx + uv1
+    doc["buffers"] = [{"byteLength": len(buf), "uri": _data_uri(buf)}]
+    doc["bufferViews"].append({"buffer": 0, "byteOffset": 156, "byteLength": 32})
+    doc["accessors"].append({"bufferView": 5, "componentType": 5126, "count": 4, "type": "VEC2"})
+    doc["extensionsUsed"].append("KHR_texture_transform")
+    mat = doc["materials"][0]
+    mat["occlusionTexture"] = {"index": 0, "texCoord": 1, "strength": 0.5}
+    mat["emissiveTexture"] = {"index": 0, "extensions": {"KHR_texture_transform": {
+        "texCoord": 1, "offset": [0.25, 0], "scale": [2, 2]}}}
+    on_first = dict(mat)
+    on_first["name"] = "Lacking"
+    doc["materials"].append(on_first)
+    prims = doc["meshes"][0]["primitives"]
+    prims[0]["attributes"]["TEXCOORD_1"] = 5
+    second = dict(prims[0])
+    second["attributes"] = dict(prims[0]["attributes"])
+    del second["attributes"]["TEXCOORD_1"]
+    second["material"] = 1
+    prims.append(second)
+    return doc
+
+
 def gltf_seeds():
     triangle, triangle_buf = gltf_triangle()
     return {
@@ -551,6 +584,7 @@ def gltf_seeds():
         "specgloss_dds": _dump(gltf_specgloss_dds()),
         "foliage_masked": _dump(gltf_foliage()),
         "collision": _dump(gltf_collision()),
+        "second_set": _dump(gltf_second_set()),
     }
 
 
