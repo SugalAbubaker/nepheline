@@ -368,6 +368,13 @@ const NphPhysicsStats *nph_engine_physics_stats(const NphEngine *engine);
 // nph_game_physics_triggers), or none when not playing.
 NphTriggerEvents nph_engine_physics_triggers(const NphEngine *engine);
 
+// The joint of an entity's Joint (components.h) while it is made: a null
+// handle before both its bodies exist, once broken, or when not playing. Its
+// state (a hinge's angle, a slider's position) comes from physics/joint.h.
+// As nph_engine_physics_body, from the simulation's systems or at the sync
+// point.
+NphPhysicsJoint nph_engine_physics_joint(const NphEngine *engine, NphEntity entity);
+
 // Draws `entity` and its descendants where they are from the next frame on,
 // rather than between where they were and where they are (sim.interpolate):
 // for a move that is no motion, a teleport or a respawn; the view is a

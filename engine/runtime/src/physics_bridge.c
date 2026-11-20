@@ -40,6 +40,13 @@
 // step the sensors' events become Collider-level ones: per pair of trigger
 // and visitor entities the overlapping shapes are counted, and a pair enters
 // when its count leaves zero over the step and leaves when it returns.
+//
+// Joints (ADR-0108): a Joint component's joint is made once both its bodies
+// exist. Its frames come from the world's poses when it is first made, when
+// its structure changes (kind, other, anchors, axis, collision), and when it
+// is joined again after breaking; a change of its settings (limits, motor,
+// spring), or a body made again for the same entity, makes it again from the
+// frames it had, so its angle and length keep their zero.
 #include <nepheline/asset/collision.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hash.h>
@@ -48,6 +55,7 @@
 #include <nepheline/math/mat.h>
 #include <nepheline/physics/body.h>
 #include <nepheline/physics/hull.h>
+#include <nepheline/physics/joint.h>
 #include <nepheline/physics/mesh.h>
 #include <nepheline/physics/shape.h>
 #include <nepheline/render/debug_draw.h>
@@ -158,6 +166,30 @@ typedef struct TriggerPair {
 typedef NPH_ARRAY(TriggerKey) TriggerKeyArray;
 typedef NPH_ARRAY(NphTriggerEvent) TriggerEventArray;
 
+enum {
+    JOINT_BROKEN = 1U << 0U, // broke (or came broken): made again when `broken` goes false
+    JOINT_FAILED =
+        1U << 1U, // could not be made (logged): again when the component or a body changes
+    JOINT_DIRTY = 1U << 2U,   // its component changed: made again
+    JOINT_REFRAME = 1U << 3U, // the next make takes its frames from the world's poses
+};
+
+// A Joint component's joint: the bodies it was made between (or waited or
+// failed for) and the entities they are of, the component as last seen, and
+// the description it was made from, whose frames a body made again keeps.
+typedef struct JointRecord {
+    NphEntity entity;
+    u32 flags; // JOINT_*
+    NphPhysicsJoint joint;
+    NphPhysicsBody body_a;
+    NphPhysicsBody body_b;
+    NphEntity owner_a;
+    NphEntity owner_b;
+    NphJoint component;
+    NphPhysicsJointDesc desc;
+    u32 generation; // the bridge's body_generation when last settled
+} JointRecord;
+
 typedef struct ScaledCopy {
     CopyKey key;
     u32 kind; // NphCollisionShapeKind; 0: a free slot
@@ -200,6 +232,16 @@ struct PhysicsBridge {
     NphArrayU32 copy_free; // free slots
     NphArrayU32 awaiting;  // slots of the records waiting for an asset (BODY_AWAITING)
     b32 load_sync;         // play begin: assets load before the first step
+    // Joints (ADR-0108).
+    NphQuery *joint_query; // Joint (changes), LocalTransform
+    JointRecord *joints;
+    u32 joint_count;
+    u32 joint_cap;
+    NphHashMap joint_index;    // entity value -> u32
+    NphPhysicsBody world_body; // the world's end of joints to no entity, made with the first
+    // Raised whenever a body or part record is made or destroyed: a joint settled at the
+    // current one has its bodies (settle_joints).
+    u32 body_generation;
     // Triggers (ADR-0108).
     NphHashMap trigger_pairs;     // TriggerKey -> TriggerPair
     TriggerKeyArray trigger_step; // the pairs this step's events touched, in order
@@ -267,6 +309,7 @@ static void unlink_part(PhysicsBridge *b, const BodyRecord *part)
 static void destroy_record(PhysicsBridge *b, u32 index, bool keep_parts)
 {
     NPH_ASSERT(index < b->count);
+    b->body_generation += 1U;
     BodyRecord *r = &b->records[index];
     const u32 slot = r->slot;
     const bool part = (r->flags & BODY_PART) != 0U;
@@ -811,6 +854,7 @@ static NphResult create_part(PhysicsBridge *b, NphEntity e, NphEntity owner,
                              const NphLocalTransform *local, const NphCollider *collider)
 {
     NPH_TRY(grow_records(b));
+    b->body_generation += 1U;
     const u32 index = b->count++;
     BodyRecord *r = &b->records[index];
     memset(r, 0, sizeof *r);
@@ -1400,6 +1444,7 @@ static void poll_awaiting(PhysicsBridge *b)
 // Makes the record's body (and shape) from its cached components and pose.
 static NphResult make_body(PhysicsBridge *b, BodyRecord *r)
 {
+    b->body_generation += 1U;
     NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
     const bool rigid = (r->flags & BODY_RIGID) != 0U;
     bd.type = rigid ? body_type(&r->rigid) : NPH_PHYSICS_BODY_STATIC;
@@ -1739,6 +1784,381 @@ static void collect_triggers(PhysicsBridge *b)
 }
 
 // ---------------------------------------------------------------------------
+// Joints (ADR-0108)
+// ---------------------------------------------------------------------------
+
+// The body an end of a joint is on, and the entity whose body it is: an
+// entity's own (its RigidBody's or Collider's, its compound's for a part),
+// or the nearest above it with one.
+static NphPhysicsBody joint_end(const PhysicsBridge *b, NphEntity e, NphEntity *out_owner)
+{
+    *out_owner = NPH_ENTITY_NULL;
+    const BodyRecord *r = record_of(b, e);
+    NphEntity p = nph_world_parent(b->world, e);
+    for (u32 depth = 0U; r == NULL && !nph_entity_is_null(p) && depth < PART_MAX_DEPTH; ++depth) {
+        r = record_of(b, p);
+        p = nph_world_parent(b->world, p);
+    }
+    if (r == NULL || nph_physics_body_is_null(r->body)) {
+        return NPH_PHYSICS_BODY_NULL;
+    }
+    *out_owner = (r->flags & BODY_PART) != 0U ? r->owner : r->entity;
+    return r->body;
+}
+
+// The world's end of joints to no entity: a static body at the origin
+// without shapes, made with the first.
+static NphPhysicsBody world_anchor(PhysicsBridge *b)
+{
+    if (nph_physics_body_is_null(b->world_body)) {
+        NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+        bd.type = NPH_PHYSICS_BODY_STATIC;
+        if (nph_physics_body_create(b->physics, &bd, &b->world_body) != NPH_RESULT_OK) {
+            b->world_body = NPH_PHYSICS_BODY_NULL;
+        }
+    }
+    return b->world_body;
+}
+
+// Where `point` of an entity's frame is in the world, and the direction
+// `dir` of its frame (scale and mirror included; its X for none).
+static bool entity_point(const PhysicsBridge *b, NphEntity e, NphVec3 point, NphVec3 dir,
+                         NphDVec3 *out_point, NphVec3 *out_dir)
+{
+    const NphLocalTransform *lt =
+        NPH_WORLD_GET(b->world, e, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    if (lt == NULL) {
+        return false;
+    }
+    const EntityPose p = entity_pose(b, e, lt);
+    *out_point = nph_dvec3_add_vec3(
+        p.position, nph_quat_rotate(p.rotation, nph_vec3_mul(finite_vec3(point), p.scale)));
+    *out_dir =
+        nph_vec3_normalize_or(nph_quat_rotate(p.rotation, nph_vec3_mul(finite_vec3(dir), p.scale)),
+                              nph_quat_rotate(p.rotation, nph_vec3_unit_x()));
+    return true;
+}
+
+// The component's settings into the description of its kind (its frames and
+// a distance's length as they are).
+static void joint_settings(const NphJoint *c, NphPhysicsJointDesc *d)
+{
+    const bool limit = c->limit != 0;
+    const bool motor = c->motor != 0;
+    const bool spring = c->spring != 0;
+    const f32 lower = finite_or(c->lower, 0.0F);
+    const f32 upper = finite_or(c->upper, 0.0F);
+    const f32 speed = finite_or(c->motor_speed, 0.0F);
+    const f32 force = nonneg(c->motor_force);
+    const f32 hertz = finite_or(c->spring_hertz, 0.0F);
+    const f32 damping = nonneg(c->spring_damping);
+    const f32 target = finite_or(c->spring_target, 0.0F);
+    d->collide_connected = c->collide_connected != 0 ? 1 : 0;
+    switch (d->type) {
+    case NPH_PHYSICS_JOINT_BALL:
+        d->ball.enable_swing_limit = limit ? 1 : 0;
+        d->ball.swing_y = nph_f32_clamp(upper, 1e-3F, 3.1405927F);
+        d->ball.swing_z = d->ball.swing_y;
+        break;
+    case NPH_PHYSICS_JOINT_HINGE:
+        d->hinge.enable_limit = limit ? 1 : 0;
+        d->hinge.lower = lower;
+        d->hinge.upper = upper;
+        d->hinge.enable_motor = motor ? 1 : 0;
+        d->hinge.motor_speed = speed;
+        d->hinge.max_motor_torque = force;
+        d->hinge.enable_spring = spring ? 1 : 0;
+        d->hinge.spring_hertz = hertz;
+        d->hinge.spring_damping_ratio = damping;
+        d->hinge.spring_target = target;
+        break;
+    case NPH_PHYSICS_JOINT_SLIDER:
+        d->slider.enable_limit = limit ? 1 : 0;
+        d->slider.lower = lower;
+        d->slider.upper = upper;
+        d->slider.enable_motor = motor ? 1 : 0;
+        d->slider.motor_speed = speed;
+        d->slider.max_motor_force = force;
+        d->slider.enable_spring = spring ? 1 : 0;
+        d->slider.spring_hertz = hertz;
+        d->slider.spring_damping_ratio = damping;
+        d->slider.spring_target = target;
+        break;
+    case NPH_PHYSICS_JOINT_DISTANCE:
+        d->distance.enable_limit = limit ? 1 : 0;
+        d->distance.min_length = nph_f32_max(lower, 0.0F);
+        d->distance.max_length = upper;
+        d->distance.enable_spring = spring ? 1 : 0;
+        d->distance.spring_hertz = hertz;
+        d->distance.spring_damping_ratio = damping;
+        d->distance.enable_motor = motor ? 1 : 0;
+        d->distance.motor_speed = speed;
+        d->distance.max_motor_force = force;
+        break;
+    default:
+        break; // fixed: nothing to set
+    }
+}
+
+static const NphPhysicsJointType k_joint_types[5] = {
+    NPH_PHYSICS_JOINT_BALL, NPH_PHYSICS_JOINT_HINGE, NPH_PHYSICS_JOINT_FIXED,
+    NPH_PHYSICS_JOINT_SLIDER, NPH_PHYSICS_JOINT_DISTANCE};
+
+// A joint's frames from the world's poses: both at `anchor` with X along
+// `axis`, but a distance joint's other frame at `other_anchor`, the two as
+// far apart as they are now.
+static bool joint_frames(PhysicsBridge *b, JointRecord *j, NphPhysicsBody a, NphPhysicsBody o)
+{
+    const NphJoint *c = &j->component;
+    NphDVec3 at;
+    NphVec3 axis;
+    if (!entity_point(b, j->entity, c->anchor, c->axis, &at, &axis)) {
+        return false;
+    }
+    NphPhysicsJointDesc *d = &j->desc;
+    *d = nph_physics_joint_desc_default(k_joint_types[c->kind], a, o);
+    nph_physics_joint_frames_at(b->physics, a, o, at, axis, &d->frame_a, &d->frame_b);
+    if (c->kind == (u32)NPH_JOINT_DISTANCE) {
+        NphDVec3 end = nph_dvec3_from_vec3(finite_vec3(c->other_anchor));
+        NphVec3 unused;
+        if (!nph_entity_is_null(c->other) &&
+            !entity_point(b, c->other, c->other_anchor, nph_vec3_unit_x(), &end, &unused)) {
+            return false;
+        }
+        NphPhysicsPose ignored;
+        nph_physics_joint_frames_at(b->physics, a, o, end, axis, &ignored, &d->frame_b);
+        d->distance.length = (f32)nph_dvec3_length(nph_dvec3_sub(end, at));
+    }
+    return true;
+}
+
+// Makes the record's joint between `a` (of `oa`) and `o` (of `oo`): from its
+// kept frames, unless it has none or must take them anew.
+static void make_joint(PhysicsBridge *b, JointRecord *j, NphPhysicsBody a, NphEntity oa,
+                       NphPhysicsBody o, NphEntity oo)
+{
+    const bool reframe = (j->flags & JOINT_REFRAME) != 0U || oa.value != j->owner_a.value ||
+                         oo.value != j->owner_b.value;
+    j->body_a = a;
+    j->body_b = o;
+    j->owner_a = oa;
+    j->owner_b = oo;
+    j->joint = NPH_PHYSICS_JOINT_NULL;
+    j->flags &= ~(u32)(JOINT_DIRTY | JOINT_FAILED);
+    NphResult r = NPH_RESULT_INVALID_ARGUMENT;
+    if (j->component.kind <= (u32)NPH_JOINT_DISTANCE) {
+        r = NPH_RESULT_OK;
+        if (reframe || j->desc.type != k_joint_types[j->component.kind]) {
+            r = joint_frames(b, j, a, o) ? NPH_RESULT_OK : NPH_RESULT_NOT_FOUND;
+        }
+    }
+    if (r == NPH_RESULT_OK) {
+        j->flags &= ~(u32)JOINT_REFRAME;
+        j->desc.body_a = a;
+        j->desc.body_b = o;
+        j->desc.user_data = j->entity.value;
+        joint_settings(&j->component, &j->desc);
+        r = nph_physics_joint_create(b->physics, &j->desc, &j->joint);
+    }
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_WARN(&NPH_LOG_RUNTIME,
+                     "entity 0x%08x: its Joint cannot be made (%s) until it or a body changes",
+                     j->entity.value, nph_result_string(r));
+        j->joint = NPH_PHYSICS_JOINT_NULL;
+        j->flags |= JOINT_FAILED;
+    }
+}
+
+static bool joint_made(const PhysicsBridge *b, const JointRecord *j)
+{
+    return !nph_physics_joint_is_null(j->joint) && nph_physics_joint_is_valid(b->physics, j->joint);
+}
+
+static void unmake_joint(PhysicsBridge *b, JointRecord *j)
+{
+    if (joint_made(b, j)) {
+        nph_physics_joint_destroy(b->physics, j->joint);
+    }
+    j->joint = NPH_PHYSICS_JOINT_NULL;
+}
+
+static void drop_joint(PhysicsBridge *b, u32 index)
+{
+    JointRecord *j = &b->joints[index];
+    unmake_joint(b, j);
+    NPH_IGNORE_RESULT(nph_hashmap_remove(&b->joint_index, &j->entity.value));
+    const u32 last = b->joint_count - 1U;
+    if (index != last) {
+        b->joints[index] = b->joints[last];
+        NPH_IGNORE_RESULT(nph_hashmap_set(&b->joint_index, &b->joints[index].entity.value, &index));
+    }
+    b->joint_count = last;
+}
+
+static void drop_joint_of(PhysicsBridge *b, NphEntity e)
+{
+    const u32 *index = NPH_HASHMAP_FIND(&b->joint_index, u32, &e.value);
+    if (index != NULL && b->joints[*index].entity.value == e.value) {
+        drop_joint(b, *index);
+    }
+}
+
+static NphResult grow_joints(PhysicsBridge *b)
+{
+    if (b->joint_count < b->joint_cap) {
+        return NPH_RESULT_OK;
+    }
+    const u32 cap = nph_max_u32(16U, 2U * b->joint_cap);
+    JointRecord *grown = NPH_ALLOC_ARRAY(b->alloc, JointRecord, cap);
+    if (grown == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    if (b->joints != NULL) {
+        memcpy(grown, b->joints, (u64)b->joint_count * sizeof *grown);
+        NPH_FREE_ARRAY(b->alloc, JointRecord, b->joints, b->joint_cap);
+    }
+    b->joints = grown;
+    b->joint_cap = cap;
+    return NPH_RESULT_OK;
+}
+
+// Joints by their fields' bits, as Colliders are (collider_equal).
+static bool joint_equal(const NphJoint *a, const NphJoint *b)
+{
+    return a->kind == b->kind && a->other.value == b->other.value &&
+           vec3_bits_equal(a->anchor, b->anchor) && vec3_bits_equal(a->axis, b->axis) &&
+           vec3_bits_equal(a->other_anchor, b->other_anchor) && a->limit == b->limit &&
+           f32_bits_equal(a->lower, b->lower) && f32_bits_equal(a->upper, b->upper) &&
+           a->motor == b->motor && f32_bits_equal(a->motor_speed, b->motor_speed) &&
+           f32_bits_equal(a->motor_force, b->motor_force) && a->spring == b->spring &&
+           f32_bits_equal(a->spring_hertz, b->spring_hertz) &&
+           f32_bits_equal(a->spring_damping, b->spring_damping) &&
+           f32_bits_equal(a->spring_target, b->spring_target) &&
+           a->collide_connected == b->collide_connected &&
+           f32_bits_equal(a->break_force, b->break_force) && a->broken == b->broken;
+}
+
+// A Joint seen changed (or new): what changed decides whether the next make
+// keeps the frames.
+static NphResult visit_joint(PhysicsBridge *b, NphEntity e, const NphJoint *c)
+{
+    const u32 *known = NPH_HASHMAP_FIND(&b->joint_index, u32, &e.value);
+    if (known == NULL) {
+        NPH_TRY(grow_joints(b));
+        const u32 index = b->joint_count;
+        NPH_TRY(nph_hashmap_insert(&b->joint_index, &e.value, &index));
+        JointRecord *j = &b->joints[index];
+        memset(j, 0, sizeof *j);
+        j->entity = e;
+        j->component = *c;
+        j->flags = (u32)JOINT_REFRAME | (c->broken != 0 ? (u32)JOINT_BROKEN : (u32)JOINT_DIRTY);
+        b->joint_count += 1U;
+        return NPH_RESULT_OK;
+    }
+    JointRecord *j = &b->joints[*known];
+    if (joint_equal(&j->component, c)) {
+        return NPH_RESULT_OK;
+    }
+    const NphJoint was = j->component;
+    j->component = *c;
+    unmake_joint(b, j);
+    j->flags &= ~(u32)(JOINT_FAILED | JOINT_BROKEN);
+    if (c->broken != 0) {
+        j->flags |= JOINT_BROKEN; // the game broke it
+        return NPH_RESULT_OK;
+    }
+    j->flags |= JOINT_DIRTY;
+    const bool structure = was.kind != c->kind || was.other.value != c->other.value ||
+                           !vec3_bits_equal(was.anchor, c->anchor) ||
+                           !vec3_bits_equal(was.axis, c->axis) ||
+                           !vec3_bits_equal(was.other_anchor, c->other_anchor) ||
+                           was.collide_connected != c->collide_connected;
+    if (structure || was.broken != 0) {
+        j->flags |= JOINT_REFRAME; // anew where things are (joined again after breaking too)
+    }
+    return NPH_RESULT_OK;
+}
+
+// The Joints of changed chunks (every one in a full pass).
+static NphResult joint_pass(PhysicsBridge *b, bool full, u32 since, u32 tick)
+{
+    NphQueryIter it;
+    NphChunkView v;
+    if (full) {
+        nph_query_iter(b->joint_query, &it);
+    } else {
+        nph_query_iter_since(b->joint_query, since, tick, &it);
+    }
+    while (nph_query_next(&it, &v)) {
+        const NphJoint *c = NPH_CHUNK_COLUMN(&v, 0, NphJoint);
+        for (u32 i = 0; i < v.count; ++i) {
+            NPH_TRY(visit_joint(b, v.entities[i], &c[i]));
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
+// Every joint made where both its bodies exist, made again where a body
+// was, or where its component changed. A joint settled since the last body
+// record came or went, its component unchanged, is as it was: looking its
+// bodies up again cost 1000 joints 14 us a step (engine_frame_physics_1k_
+// hinged), which checking their breaking forces, 55 us, now outweighs.
+static void settle_joints(PhysicsBridge *b)
+{
+    for (u32 i = 0U; i < b->joint_count; ++i) {
+        JointRecord *j = &b->joints[i];
+        if ((j->flags & JOINT_BROKEN) != 0U ||
+            (j->generation == b->body_generation && (j->flags & JOINT_DIRTY) == 0U)) {
+            continue;
+        }
+        j->generation = b->body_generation;
+        NphEntity oa;
+        NphEntity oo = NPH_ENTITY_NULL;
+        const NphPhysicsBody a = joint_end(b, j->entity, &oa);
+        const NphPhysicsBody o = nph_entity_is_null(j->component.other)
+                                     ? world_anchor(b)
+                                     : joint_end(b, j->component.other, &oo);
+        const bool same = a.value == j->body_a.value && o.value == j->body_b.value;
+        const bool dirty = (j->flags & JOINT_DIRTY) != 0U;
+        if (same && !dirty && (joint_made(b, j) || (j->flags & JOINT_FAILED) != 0U)) {
+            continue; // as made, or failed for these bodies (logged)
+        }
+        unmake_joint(b, j);
+        if (nph_physics_body_is_null(a) || nph_physics_body_is_null(o)) {
+            continue; // waiting for its bodies
+        }
+        make_joint(b, j, a, oa, o, oo);
+    }
+}
+
+// Joints whose last step's force passed their strength break: `broken`
+// written true, the joint left unmade until it goes false.
+static void break_joints(PhysicsBridge *b)
+{
+    const NphRuntimeComponents *ids = &b->engine->ids;
+    for (u32 i = 0U; i < b->joint_count; ++i) {
+        JointRecord *j = &b->joints[i];
+        const f32 strength = j->component.break_force;
+        if (!(nph_f32_is_finite(strength) && strength > 0.0F) || !joint_made(b, j)) {
+            continue;
+        }
+        NphVec3 force;
+        NphVec3 torque;
+        nph_physics_joint_reaction(b->physics, j->joint, &force, &torque);
+        if (!(nph_vec3_length_sq(force) > strength * strength)) {
+            continue;
+        }
+        unmake_joint(b, j);
+        j->flags |= JOINT_BROKEN;
+        j->component.broken = 1; // as written below: the change pass sees nothing new
+        NphJoint *c = NPH_WORLD_GET_MUT(b->world, j->entity, ids->joint, NphJoint);
+        if (c != NULL) {
+            c->broken = 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The step
 // ---------------------------------------------------------------------------
 
@@ -1759,8 +2179,12 @@ static void read_events(PhysicsBridge *b)
     u32 dropped = 0U;
     const NphWorldEvent *events = nph_world_events(b->world, &count, &dropped);
     const NphRuntimeComponents *ids = &b->engine->ids;
-    for (u32 i = b->event_cursor; i < count && b->count > 0U; ++i) {
+    for (u32 i = b->event_cursor; i < count && (b->count > 0U || b->joint_count > 0U); ++i) {
         const NphWorldEvent *ev = &events[i];
+        if (ev->type == NPH_WORLD_EVENT_DESPAWNED ||
+            (ev->type == NPH_WORLD_EVENT_REMOVED && ev->component == ids->joint)) {
+            drop_joint_of(b, ev->entity);
+        }
         bool drop = ev->type == NPH_WORLD_EVENT_DESPAWNED;
         if (ev->type == NPH_WORLD_EVENT_ADDED || ev->type == NPH_WORLD_EVENT_REMOVED) {
             drop = ev->component == ids->rigid_body || ev->component == ids->collider ||
@@ -1799,6 +2223,12 @@ static void read_events(PhysicsBridge *b)
             destroy_record(b, i, false);
         }
     }
+    for (u32 i = b->joint_count; i-- > 0U;) {
+        const NphEntity e = b->joints[i].entity;
+        if (!nph_world_is_alive(b->world, e) || !nph_world_has(b->world, e, ids->joint)) {
+            drop_joint(b, i);
+        }
+    }
     b->full_pass = 1;
 }
 
@@ -1833,7 +2263,7 @@ static NphResult change_pass(PhysicsBridge *b, u32 since, u32 tick, f32 dt)
             NPH_TRY(visit(b, v.entities[i], &lt[i], NULL, &c[i], dt));
         }
     }
-    return NPH_RESULT_OK;
+    return joint_pass(b, full, since, tick);
 }
 
 // Static and kinematic bodies under parents follow them.
@@ -1985,6 +2415,7 @@ static void physics_system(NphSystemContext *ctx)
     poll_awaiting(b);
     NphResult r = change_pass(b, ctx->last_tick, ctx->tick, dt);
     place_deep_parts(b);
+    settle_joints(b);
     follow_parents(b, dt);
     stop_targets(b);
     NPH_PROFILE_END();
@@ -1997,6 +2428,7 @@ static void physics_system(NphSystemContext *ctx)
         NPH_PROFILE_BEGIN("runtime.physics_write_back");
         write_back(b, ctx->tick);
         collect_triggers(b);
+        break_joints(b);
         b->stats = nph_physics_world_stats(b->physics);
         NPH_PROFILE_END();
     }
@@ -2015,9 +2447,11 @@ static void destroy_queries(PhysicsBridge *b)
     nph_query_destroy(b->rigid_query);
     nph_query_destroy(b->static_query);
     nph_query_destroy(b->write_query);
+    nph_query_destroy(b->joint_query);
     b->rigid_query = NULL;
     b->static_query = NULL;
     b->write_query = NULL;
+    b->joint_query = NULL;
 }
 
 static NphResult make_queries(PhysicsBridge *b)
@@ -2033,15 +2467,21 @@ static NphResult make_queries(PhysicsBridge *b)
         nph_term_without(ids->rigid_body)};
     const NphQueryTerm write_terms[2] = {nph_term_write(ids->rigid_body),
                                          nph_term_write(NPH_COMPONENT_ID_LOCAL_TRANSFORM)};
+    const NphQueryTerm joint_terms[2] = {nph_term_changed(nph_term_read(ids->joint)),
+                                         nph_term_read(NPH_COMPONENT_ID_LOCAL_TRANSFORM)};
     const NphQueryDesc rq = {rigid_terms, 3U};
     const NphQueryDesc sq = {static_terms, 3U};
     const NphQueryDesc wq = {write_terms, 2U};
+    const NphQueryDesc jq = {joint_terms, 2U};
     NphResult r = nph_query_create(b->world, &rq, &b->rigid_query);
     if (r == NPH_RESULT_OK) {
         r = nph_query_create(b->world, &sq, &b->static_query);
     }
     if (r == NPH_RESULT_OK) {
         r = nph_query_create(b->world, &wq, &b->write_query);
+    }
+    if (r == NPH_RESULT_OK) {
+        r = nph_query_create(b->world, &jq, &b->joint_query);
     }
     if (r != NPH_RESULT_OK) {
         destroy_queries(b);
@@ -2079,6 +2519,8 @@ NphResult physics_bridge_create(NphEngine *e, PhysicsBridge **out)
     NphHashMapDesc td = cd;
     td.key_size = (u32)sizeof(TriggerKey);
     td.val_size = (u32)sizeof(TriggerPair);
+    NphHashMapDesc jd = cd;
+    jd.key_size = (u32)sizeof(u32);
     NphResult r = nph_hashmap_init(&b->collision_index, alloc, &cd);
     if (r == NPH_RESULT_OK) {
         r = nph_hashmap_init(&b->copy_index, alloc, &kd);
@@ -2091,6 +2533,14 @@ NphResult physics_bridge_create(NphEngine *e, PhysicsBridge **out)
         if (r != NPH_RESULT_OK) {
             nph_hashmap_free(&b->collision_index);
             nph_hashmap_free(&b->copy_index);
+        }
+    }
+    if (r == NPH_RESULT_OK) {
+        r = nph_hashmap_init(&b->joint_index, alloc, &jd);
+        if (r != NPH_RESULT_OK) {
+            nph_hashmap_free(&b->collision_index);
+            nph_hashmap_free(&b->copy_index);
+            nph_hashmap_free(&b->trigger_pairs);
         }
     }
     if (r != NPH_RESULT_OK) {
@@ -2128,6 +2578,10 @@ void physics_bridge_destroy(PhysicsBridge *b)
     nph_hashmap_free(&b->collision_index);
     nph_hashmap_free(&b->copy_index);
     nph_hashmap_free(&b->trigger_pairs);
+    nph_hashmap_free(&b->joint_index);
+    if (b->joints != NULL) {
+        NPH_FREE_ARRAY(b->alloc, JointRecord, b->joints, b->joint_cap);
+    }
     NPH_ARRAY_FREE(&b->trigger_step);
     NPH_ARRAY_FREE(&b->entered);
     NPH_ARRAY_FREE(&b->left);
@@ -2158,6 +2612,12 @@ NphResult physics_bridge_set_world(PhysicsBridge *b, NphWorld *world)
             if (i < b->count && (!nph_world_is_alive(world, b->records[i].entity) ||
                                  !qualifies(b, b->records[i].entity))) {
                 destroy_record(b, i, false);
+            }
+        }
+        for (u32 i = b->joint_count; i-- > 0U;) {
+            const NphEntity e = b->joints[i].entity;
+            if (!nph_world_is_alive(world, e) || !nph_world_has(world, e, b->engine->ids.joint)) {
+                drop_joint(b, i);
             }
         }
         b->full_pass = 1;
@@ -2196,6 +2656,9 @@ NphResult physics_bridge_begin(PhysicsBridge *b)
                         (f32)nph_fixed_clock_step_seconds(&b->engine->clock));
         b->load_sync = 0;
     }
+    if (r == NPH_RESULT_OK) {
+        settle_joints(b); // the joints too, before play_begin
+    }
     if (r != NPH_RESULT_OK) {
         physics_bridge_end(b);
     }
@@ -2214,6 +2677,9 @@ NphResult physics_bridge_refresh(PhysicsBridge *b)
     const NphResult r = change_pass(b, 0U, nph_world_tick(b->world),
                                     (f32)nph_fixed_clock_step_seconds(&b->engine->clock));
     b->load_sync = 0;
+    if (r == NPH_RESULT_OK) {
+        settle_joints(b);
+    }
     return r;
 }
 
@@ -2230,6 +2696,9 @@ void physics_bridge_end(PhysicsBridge *b)
     NPH_ARRAY_CLEAR(&b->trigger_step);
     NPH_ARRAY_CLEAR(&b->entered);
     NPH_ARRAY_CLEAR(&b->left);
+    b->joint_count = 0U; // their joints go with the world
+    nph_hashmap_clear(&b->joint_index);
+    b->world_body = NPH_PHYSICS_BODY_NULL;
     nph_physics_world_destroy(b->physics);
     b->physics = NULL;
     memset(&b->stats, 0, sizeof b->stats);
@@ -2241,7 +2710,9 @@ NphResult physics_bridge_add_system(PhysicsBridge *b, NphSchedule *schedule)
     const NphRuntimeComponents *ids = &b->engine->ids;
     const NphComponentId reads[3] = {ids->collider, NPH_COMPONENT_ID_WORLD_TRANSFORM,
                                      NPH_COMPONENT_ID_HIERARCHY};
-    const NphComponentId writes[2] = {ids->rigid_body, NPH_COMPONENT_ID_LOCAL_TRANSFORM};
+    // Joint's `broken` is written when one breaks.
+    const NphComponentId writes[3] = {ids->rigid_body, NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                      ids->joint};
     // After the game's systems (registered before it), which move bodies,
     // and before the world transforms are composed from where they went.
     const char *const before[1] = {NPH_TRANSFORM_SYSTEM_NAME};
@@ -2253,7 +2724,7 @@ NphResult physics_bridge_add_system(PhysicsBridge *b, NphSchedule *schedule)
     d.reads = reads;
     d.read_count = 3U;
     d.writes = writes;
-    d.write_count = 2U;
+    d.write_count = 3U;
     d.before = before;
     d.before_count = 1U;
     // Alone in its stage: nothing runs beside the step, so game systems may
@@ -2318,6 +2789,20 @@ NphEntity physics_bridge_entity(const PhysicsBridge *b, NphPhysicsBody body)
     const NphEntity e = {(u32)nph_physics_body_user_data(b->physics, body)};
     const BodyRecord *r = record_of(b, e);
     return r != NULL && r->body.value == body.value ? e : NPH_ENTITY_NULL;
+}
+
+NphPhysicsJoint physics_bridge_joint(const PhysicsBridge *b, NphEntity e)
+{
+    NPH_ASSERT(b != NULL);
+    if (b->physics == NULL || nph_entity_is_null(e)) {
+        return NPH_PHYSICS_JOINT_NULL;
+    }
+    const u32 *index = NPH_HASHMAP_FIND(&b->joint_index, u32, &e.value);
+    if (index == NULL || b->joints[*index].entity.value != e.value ||
+        !joint_made(b, &b->joints[*index])) {
+        return NPH_PHYSICS_JOINT_NULL;
+    }
+    return b->joints[*index].joint;
 }
 
 NphTriggerEvents physics_bridge_triggers(const PhysicsBridge *b)

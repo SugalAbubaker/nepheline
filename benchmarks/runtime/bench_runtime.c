@@ -744,6 +744,50 @@ NBENCH(engine_frame_physics_10k_static_reparent)
     nph_engine_destroy(e);
 }
 
+// BODIES doors, each a dynamic slab hinged to the world along its edge by a Joint (ADR-0108),
+// swinging with gravity off and sleep off: the frame with the joints' settling every step and
+// their breaking forces checked.
+NBENCH(engine_frame_physics_1k_hinged)
+{
+    NphEngine *e = headless_engine();
+    nph_engine_play_end(e);
+    NphWorld *w = nph_engine_edit_world(e);
+    const NphRuntimeComponents *ids = nph_engine_components(e);
+    const NphComponentId comps[5] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->rigid_body,
+                                     ids->collider, ids->joint};
+    for (u32 i = 0; i < BODIES; ++i) {
+        NphEntity door;
+        if (nph_world_spawn(w, comps, 5U, &door) != NPH_RESULT_OK) {
+            abort();
+        }
+        NPH_WORLD_GET_MUT(w, door, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+            ->translation = body_position(i, false);
+        NphRigidBody *rb = NPH_WORLD_GET_MUT(w, door, ids->rigid_body, NphRigidBody);
+        rb->gravity_scale = 0.0F;
+        rb->angular_velocity = nph_vec3(0.0F, 1.0F, 0.0F);
+        rb->can_sleep = 0;
+        NphCollider *c = NPH_WORLD_GET_MUT(w, door, ids->collider, NphCollider);
+        c->half_extents = nph_vec3(0.5F, 1.0F, 0.05F);
+        NphJoint *j = NPH_WORLD_GET_MUT(w, door, ids->joint, NphJoint);
+        j->anchor = nph_vec3(-0.5F, 0.0F, 0.0F);
+        j->break_force = 1.0e9F; // checked every step, never reached
+    }
+    if (nph_engine_play_begin(e, false) != NPH_RESULT_OK) {
+        abort();
+    }
+    for (u32 i = 0; i < 8U; ++i) {
+        frame(e);
+    }
+    if (nph_engine_wait(e) != NPH_RESULT_OK || nph_engine_physics_stats(e)->joints != BODIES) {
+        fail("the doors' joints are not made");
+    }
+    while (nbench_keep_running(state)) {
+        frame(e);
+    }
+    nph_engine_destroy(e);
+}
+
 NBENCH(physics_step_1k_spinning)
 {
     NphJobSystemDesc jd;

@@ -133,6 +133,24 @@ What there is today:
    - The joint is made once both bodies exist, at the frames its anchor and axis give in the world then, and made again
      when the component changes.
    - A door is a dynamic body hinged to the world: its limits are its swing, and its spring what closes it.
+   - **Built:**
+     - **Frames are kept.** A change of settings (limits, motor, spring), or a body made again for the same entity,
+       makes the joint again from the frames it had. A hinge's angle and a rope's length therefore keep their zero.
+       Only a change of structure (kind, `other`, an anchor, the axis, collision), or joining again after breaking,
+       takes the frames anew from the world's poses. This refines "made again when the component changes": made
+       again, but from its old frames unless its structure changed. Settings are not set in place, because the
+       physics setters assert on values out of range, and an inspector's half-typed limit must not stop play.
+     - A distance joint's far end is `other_anchor`, in `other`'s frame or the world's. A ball's limit is a cone of
+       `upper` radians about its axis.
+     - Breaking compares the joint's reaction force over the last step with `break_force`. A broken joint stays
+       unmade until the game writes `broken` false. `nph_game_physics_joint` gives the physics joint, for a door's
+       angle.
+     - **The spring's frequency and damping are its row's own:** those of a body turning about its centre. A door,
+       turning about its edge, swings at half of each: measured at 0.24 Hz with a 17 % overshoot, asked for 0.5 Hz
+       critically damped. Box2D's revolute spring behaves the same way.
+     - **Measured** (Profile): 1000 hinged doors cost a frame 0.36 ms, against 0.12 ms for 1000 free bodies spinning.
+       Of the bridge's upkeep, checking every joint's breaking force costs 55 µs. Joints whose bodies have not changed
+       since they were settled cost nothing (a body generation; looking their bodies up again cost 14 µs).
 7. **Physics materials.**
    - A physics material is an asset: a `.npmat` source, cooked to `PMAT` version 1. It holds friction, restitution,
      their combine modes, and density.

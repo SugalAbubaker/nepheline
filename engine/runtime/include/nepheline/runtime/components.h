@@ -16,6 +16,7 @@
 //   RigidBody     a body the physics world moves while the world plays
 //   Collider      the shape of the entity's body, a part of the body above
 //                 it, or a static body of its own
+//   Joint         a joint between the entity's body and another's
 //   AudioSource   a sound the entity plays while the world plays
 //   AudioListener where spatial sounds are heard from
 //   WorldCell     a cell of a world partition: the mesh instances that name
@@ -302,6 +303,68 @@ NPH_COMPONENT_DECLARE(NphCollider);
 NPH_STATIC_ASSERT(sizeof(NphRigidBody) == 56U, "RigidBody is 56 bytes");
 NPH_STATIC_ASSERT(sizeof(NphCollider) == 112U, "Collider is 112 bytes");
 
+// A joint (ADR-0108; physics/joint.h) between the body of the entity (its
+// RigidBody's or Collider's, or the nearest body above it) and the body of
+// `other` (the null entity: the world). It is made once both bodies exist,
+// at the frames `anchor` and `axis` (in the entity's frame) give in the
+// world then, and made again when the component changes or a body is made
+// again. Its kind:
+//   ball      the anchor held together, any turn; with `limit`, the turn
+//             kept within a cone of `upper` radians about `axis`
+//   hinge     a turn about `axis` alone: from `lower` to `upper` radians
+//             with `limit`, the motor's speed in rad/s and its most torque in
+//             N m, the spring's target in radians (a door: its limits its
+//             swing, its spring what closes it)
+//   fixed     the two welded
+//   slider    a slide along `axis` alone: from `lower` to `upper` metres,
+//             the motor in m/s and N, the spring's target in metres
+//   distance  `anchor` held as far from `other_anchor` (in `other`'s frame,
+//             or the world's) as when made: with `limit`, anywhere from
+//             `lower` to `upper` metres apart (a rope: 0 to its length);
+//             with `spring`, pulled softly to that length; the motor in m/s
+//             (positive apart) and N
+// The spring: a frequency in Hz and a damping ratio, whatever the masses,
+// for the joint's own turn or slide as if the body turned about its centre:
+// a door, turning about its edge, swings slower and less damped than they
+// say (half of each for a plain slab).
+// `collide_connected`: the two bodies' shapes touch each other.
+// `break_force` (N; 0: never): past it the joint breaks, `broken` is
+// written true, and the joint stays broken until the component changes (a
+// game joins it again by writing `broken` false). One of the two bodies at
+// least must be dynamic; a joint that cannot be made is logged and tried
+// again when the component or a body changes.
+typedef enum NphJointKind {
+    NPH_JOINT_BALL = 0,
+    NPH_JOINT_HINGE = 1,
+    NPH_JOINT_FIXED = 2,
+    NPH_JOINT_SLIDER = 3,
+    NPH_JOINT_DISTANCE = 4,
+} NphJointKind;
+
+#define NPH_JOINT_FIELDS(F)                                                                        \
+    F(U32, kind, NPH_FIELD_RANGE(0.0F, 4.0F))                                                      \
+    F(ENTITY, other, NPH_FIELD_NO_HINTS)                                                           \
+    F(VEC3, anchor, NPH_FIELD_NO_HINTS)                                                            \
+    F(VEC3, axis, NPH_FIELD_NO_HINTS)                                                              \
+    F(VEC3, other_anchor, NPH_FIELD_NO_HINTS)                                                      \
+    F(BOOL, limit, NPH_FIELD_NO_HINTS)                                                             \
+    F(F32, lower, NPH_FIELD_NO_HINTS)                                                              \
+    F(F32, upper, NPH_FIELD_NO_HINTS)                                                              \
+    F(BOOL, motor, NPH_FIELD_NO_HINTS)                                                             \
+    F(F32, motor_speed, NPH_FIELD_NO_HINTS)                                                        \
+    F(F32, motor_force, NPH_FIELD_RANGE(0.0F, 1.0e9F))                                             \
+    F(BOOL, spring, NPH_FIELD_NO_HINTS)                                                            \
+    F(F32, spring_hertz, NPH_FIELD_RANGE(0.0F, 1000.0F))                                           \
+    F(F32, spring_damping, NPH_FIELD_RANGE(0.0F, 10.0F))                                           \
+    F(F32, spring_target, NPH_FIELD_NO_HINTS)                                                      \
+    F(BOOL, collide_connected, NPH_FIELD_NO_HINTS)                                                 \
+    F(F32, break_force, NPH_FIELD_RANGE(0.0F, 1.0e9F))                                             \
+    F(BOOL, broken, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_READONLY))
+NPH_COMPONENT_STRUCT(NphJoint, NPH_JOINT_FIELDS);
+NPH_COMPONENT_DECLARE(NphJoint);
+
+NPH_STATIC_ASSERT(sizeof(NphJoint) == 96U, "Joint is 96 bytes");
+
 // ---------------------------------------------------------------------------
 // Audio (docs/runtime.md "Audio"; docs/adr/0058-audio-in-the-engine.md)
 // ---------------------------------------------------------------------------
@@ -413,9 +476,10 @@ typedef struct NphRuntimeComponents {
     NphComponentId audio_listener;
     NphComponentId world_cell;
     NphComponentId mesh_materials;
+    NphComponentId joint;
 } NphRuntimeComponents;
 
-#define NPH_RUNTIME_COMPONENT_COUNT 10U
+#define NPH_RUNTIME_COMPONENT_COUNT 11U
 
 // Registers the runtime's components (idempotent: a world that has them
 // returns the same ids). Errors of nph_world_register_component.

@@ -2138,6 +2138,12 @@ NphEntity nph_engine_physics_entity(const NphEngine *e, NphPhysicsBody body)
     return e->physics != NULL ? physics_bridge_entity(e->physics, body) : NPH_ENTITY_NULL;
 }
 
+NphPhysicsJoint nph_engine_physics_joint(const NphEngine *e, NphEntity entity)
+{
+    NPH_ASSERT(e != NULL);
+    return e->physics != NULL ? physics_bridge_joint(e->physics, entity) : NPH_PHYSICS_JOINT_NULL;
+}
+
 NphTriggerEvents nph_engine_physics_triggers(const NphEngine *e)
 {
     NPH_ASSERT(e != NULL);

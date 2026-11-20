@@ -65,6 +65,7 @@
 // (scene/schedule.h), on the job system.
 
 #include <nepheline/core/cvar.h>
+#include <nepheline/physics/joint.h>
 #include <nepheline/physics/world.h>
 #include <nepheline/runtime/audio.h>
 #include <nepheline/runtime/console.h>
@@ -213,6 +214,10 @@ typedef struct NphTriggerEvents {
 // with its (stale) entity. Bodies of the game's own are not reported here
 // (physics/world.h sensor events have them).
 NphTriggerEvents nph_game_physics_triggers(const NphGame *game);
+
+// The joint of an entity's Joint while it is made, or a null handle (engine.h
+// nph_engine_physics_joint): a door's angle, a slider's position.
+NphPhysicsJoint nph_game_physics_joint(const NphGame *game, NphEntity entity);
 
 // Draws `entity` and its descendants where they are from the next frame,
 // not between where they were and where they are: a teleport, a respawn
