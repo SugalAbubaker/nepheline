@@ -2127,6 +2127,7 @@ NTEST(vis, a_material_on_the_second_set_draws_as_on_the_first)
 // colour on the second, are refused.
 NTEST_F(Vis, a_material_takes_the_first_two_sets_and_keys_only_the_first)
 {
+    REQUIRE_RENDERER(f);
     NphRenderMaterialDesc md;
     nph_render_material_desc_default(&md);
     NphRenderMaterial m;

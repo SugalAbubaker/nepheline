@@ -223,10 +223,21 @@ static void out_module(CrashOut *o, u64 address)
 
 #if NPH_ARCH_X64
 
+// A word of the stack, read in a call: clang-cl's __try covers the calls in it, not a load that
+// faults inline (it has no asynchronous exceptions without -fasync-exceptions), and a fault in a
+// stack that failed must end the walk, not the report. The call goes through a pointer the
+// optimizer cannot see through, so no compiler drops it or its cover.
+static NPH_NO_INLINE DWORD64 read_stack_word(DWORD64 at)
+{
+    // NOLINTNEXTLINE(performance-no-int-to-ptr): the stack pointer, read
+    return *(const volatile DWORD64 *)(uptr)at;
+}
+static DWORD64 (*const volatile g_read_stack_word)(DWORD64) = read_stack_word;
+
 // The return addresses of the stack `start` describes, by the unwind data
 // of the modules' functions (RtlVirtualUnwind). A frame that cannot be read
 // ends the walk: the failing thread's stack may be what failed.
-static u32 walk_stack(const CONTEXT *start, u64 *frames, u32 cap)
+u32 crash_win32_walk_stack(const CONTEXT *start, u64 *frames, u32 cap)
 {
     CONTEXT ctx = *start;
     u32 n = 0U;
@@ -243,8 +254,7 @@ static u32 walk_stack(const CONTEXT *start, u64 *frames, u32 cap)
             PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(pc, &image_base, NULL);
             if (fn == NULL) {
                 // A leaf function: its return address is where the stack points.
-                // NOLINTNEXTLINE(performance-no-int-to-ptr): the stack pointer, read
-                ctx.Rip = *(const DWORD64 *)(uptr)ctx.Rsp;
+                ctx.Rip = g_read_stack_word(ctx.Rsp);
                 ctx.Rsp += 8U;
             } else {
                 PVOID handler_data = NULL;
@@ -796,7 +806,7 @@ void crash_win32_write(EXCEPTION_POINTERS *pointers, u32 thread_id, const char *
     crash_out_str(&o, "\nstack:     return addresses, innermost first\n");
 #if NPH_ARCH_X64
     u64 frames[CRASH_FRAMES_MAX];
-    const u32 count = walk_stack(ctx, frames, CRASH_FRAMES_MAX);
+    const u32 count = crash_win32_walk_stack(ctx, frames, CRASH_FRAMES_MAX);
     for (u32 i = 0U; i < count; ++i) {
         crash_out_str(&o, "  #");
         crash_out_dec(&o, i);

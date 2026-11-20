@@ -181,6 +181,13 @@ void crash_win32_guarantee_stack(void);
 // fit. The handler's thread calls it, one exception at a time; tests call it.
 bool crash_win32_exception_copy(void *area, u32 cap, const EXCEPTION_POINTERS *source,
                                 EXCEPTION_RECORD *record, EXCEPTION_POINTERS *out);
+#if NPH_ARCH_X64
+// The return addresses of the stack `start` describes, innermost first, at most `cap` of them
+// in `frames`, by the modules' unwind data (RtlVirtualUnwind); the count. A frame it cannot read
+// ends the walk, for the failing thread's stack may be what failed. With no lock and no
+// allocation; the report calls it, and tests.
+u32 crash_win32_walk_stack(const CONTEXT *start, u64 *frames, u32 cap);
+#endif
 
 // The filter of the frame at the base of every fiber's stack (fiber.c,
 // fiber_win32.c): what reaches it no handler took, so it is reported and the
