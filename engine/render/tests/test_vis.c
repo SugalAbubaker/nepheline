@@ -2418,14 +2418,14 @@ NTEST_F(Vis, glass_kept_per_texel_draws_as_glass_of_its_share)
         md.transmission_texels = 1;
         md.transmission = nph_vec3_one();
         md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex[k];
-        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &panes[k * 2U]),
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &panes[(u64)k * 2U]),
                             NPH_RESULT_OK);
         // As the cooker writes glass of one share: its colour scaled by it, its tint the colour.
         md.transmission_texels = 0;
         md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = NPH_RENDER_TEXTURE_NULL;
         md.base_color = nph_vec4(c.x * keep, c.y * keep, c.z * keep, keep);
         md.transmission = c;
-        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &panes[k * 2U + 1U]),
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &panes[(u64)k * 2U + 1U]),
                             NPH_RESULT_OK);
     }
     md.transmissive = 0;
@@ -2480,8 +2480,8 @@ NTEST_F(Vis, glass_kept_per_texel_draws_as_glass_of_its_share)
         NTEST_ASSERT_TRUE(seen[1][0] > 0.05F && seen[1][0] < 0.95F);
         for (u32 pair = 0; pair < 2U; ++pair) {
             for (u32 ch = 0; ch < 3U; ++ch) {
-                const f32 want = seen[pair * 2U + 1U][ch];
-                NTEST_EXPECT_NEAR_F32(seen[pair * 2U][ch], want, 0.01F + 0.03F * want);
+                const f32 want = seen[(u64)pair * 2U + 1U][ch];
+                NTEST_EXPECT_NEAR_F32(seen[(u64)pair * 2U][ch], want, 0.01F + 0.03F * want);
             }
         }
     }
