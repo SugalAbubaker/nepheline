@@ -319,9 +319,11 @@ typedef struct NphSceneImportDesc {
 // under it one entity per node of the scene with its Name and
 // LocalTransform in the scene's hierarchy, a MeshRenderer for each mesh
 // instance (the mesh and its materials by GUID), a Light for each light,
-// and a Camera for each perspective camera (inactive: the importer does
-// not take the view). A node holding more than one instance, light, or
-// camera gets one child entity per extra one. A scene with a world partition's
+// a Camera for each perspective camera (inactive: the importer does not
+// take the view), and a Collider of each node's collision asset (asset/scene.h
+// version 3; ASSET, no RigidBody: static until a RigidBody is added;
+// ADR-0108). A node holding more than one instance, light, or camera gets
+// one child entity per extra one. A scene with a world partition's
 // cells (asset/scene.h version 2) also gets a child of the root per cell with a
 // WorldCell of a new id, which its instances' MeshRenderers name; but where the
 // root's transform turns or scales it, whose cells could not follow, its

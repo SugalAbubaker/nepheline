@@ -377,7 +377,8 @@ can be handed to the renderer without further checks:
   (finite, ordered), each kind, each block (there, in order, at least its
   kind's header and below 4 GiB), and that no block is left over. The
   blocks themselves are checked by the physics module's validators where a
-  runtime makes shapes of them, since the asset module does not depend on
+  runtime makes shapes of them (the physics bridge's ASSET Colliders,
+  docs/runtime.md "Physics"), since the asset module does not depend on
   physics.
 - **Sound** (`sound.h`): `HEAD` (codec, PCM format, channels, rate,
   frames, the loop, depth, the lossless block size and count, flags:

@@ -5,6 +5,7 @@
 // assets load, follow their transforms, and go when they go. GPU tests
 // skip without a Vulkan device; the import test needs none.
 #include <nepheline/asset/format.h>
+#include <nepheline/asset/scene.h>
 #include <nepheline/asset/vfs.h>
 #include <nepheline/core/guid.h>
 #include <nepheline/platform/file.h>
@@ -360,6 +361,91 @@ NTEST(SceneImport, a_cooked_scene_becomes_entities)
     NTEST_ASSERT_NOT_NULL(second_name);
     NTEST_ASSERT_TRUE(nph_str_equals(nph_text_str(&second_name->text), NPH_STR("scene")));
     NTEST_ASSERT_EQ_UINT(nph_world_entity_count(fx.world), 2U * SCENE_ENTITIES);
+    scene_teardown(&fx);
+}
+
+// A cooked scene's collision (asset/scene.h version 3, COLS; ADR-0108): each node it names gets a
+// Collider of its asset and no RigidBody, a static shape until a designer gives it one; a further
+// tile of a world (instances_only) brings its collision too.
+NTEST(SceneImport, nodes_bring_their_collision)
+{
+    static SceneFixture fx;
+    scene_setup(&fx, false, 256U);
+    NphAssetHandle h;
+    NTEST_ASSERT_EQ_INT(nph_asset_load_guid(fx.loader, nph_guid_from_cstr(SCENE_KEY), &h),
+                        NPH_RESULT_OK);
+    const NphAsset *a = nph_asset_get(fx.loader, h);
+    NphSceneView v;
+    NTEST_ASSERT_EQ_INT(nph_scene_view(a, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_TRUE(v.header->node_count >= 2U);
+    // The showcase again, its first and last nodes colliding.
+    const u32 nodes[2] = {0U, v.header->node_count - 1U};
+    char names[2][NPH_TEXT_CAPACITY];
+    NphSceneCollision cols[2];
+    memset(cols, 0, sizeof cols);
+    for (u32 k = 0U; k < 2U; ++k) {
+        const NphStr name = nph_scene_node_name(&v, nodes[k]);
+        const u64 n = name.len < NPH_TEXT_CAPACITY - 1U ? name.len : NPH_TEXT_CAPACITY - 1U;
+        memcpy(names[k], name.data, (size_t)n);
+        names[k][n] = '\0';
+        cols[k].node = nodes[k];
+        cols[k].collision = nph_guid_from_cstr(k == 0U ? "first.coll" : "last.coll");
+    }
+    const NphGuid guid = nph_guid_from_cstr("colliding.gltf#scene");
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, nph_allocator_system(), NPH_ASSET_TYPE_SCENE, NPH_SCENE_TYPE_VERSION,
+                          guid, 1U);
+    for (u32 i = 0U; i < a->blob_count; ++i) {
+        const NphAssetBlob *b = &a->blobs[i];
+        if (b->tag == NPH_SCENE_TAG_COLLISION) {
+            continue;
+        }
+        if (b->tag == NPH_SCENE_TAG_HEADER) {
+            NphSceneHeader header;
+            NTEST_ASSERT_EQ_UINT(b->size, sizeof header);
+            memcpy(&header, b->data, sizeof header);
+            header.collision_count = 2U;
+            NTEST_ASSERT_EQ_INT(nph_asset_writer_add_blob(&w, b->tag, b->index, &header,
+                                                          sizeof header, NPH_ASSET_CODEC_NONE,
+                                                          b->alignment),
+                                NPH_RESULT_OK);
+            continue;
+        }
+        NTEST_ASSERT_EQ_INT(nph_asset_writer_add_blob(&w, b->tag, b->index, b->data, b->size,
+                                                      NPH_ASSET_CODEC_NONE, b->alignment),
+                            NPH_RESULT_OK);
+    }
+    NTEST_ASSERT_EQ_INT(nph_asset_writer_add_blob(&w, NPH_SCENE_TAG_COLLISION, 0U, cols,
+                                                  sizeof cols, NPH_ASSET_CODEC_NONE, 0U),
+                        NPH_RESULT_OK);
+    nph_asset_release(fx.loader, h);
+    write_test_asset(&fx, "colliding", guid, &w);
+    NphSceneImportDesc d;
+    memset(&d, 0, sizeof d);
+    d.world = fx.world;
+    d.loader = fx.loader;
+    d.scene = guid;
+    d.root_transform = nph_local_transform_identity();
+    NTEST_ASSERT_EQ_INT(nph_scene_import_cooked(&d, NULL, NULL), NPH_RESULT_OK);
+    for (u32 k = 0U; k < 2U; ++k) {
+        const NphEntity e = named(&fx, names[k]);
+        NTEST_ASSERT_FALSE(nph_entity_is_null(e));
+        const NphCollider *c = NPH_WORLD_GET(fx.world, e, fx.ids.collider, NphCollider);
+        NTEST_ASSERT_NOT_NULL(c);
+        NTEST_EXPECT_EQ_UINT(c->shape, (u32)NPH_COLLIDER_ASSET);
+        NTEST_EXPECT_TRUE(nph_guid_equals(c->collision, cols[k].collision));
+        NTEST_EXPECT_FALSE(nph_world_has(fx.world, e, fx.ids.rigid_body));
+    }
+    // A further tile: two more.
+    d.instances_only = 1;
+    NTEST_ASSERT_EQ_INT(nph_scene_import_cooked(&d, NULL, NULL), NPH_RESULT_OK);
+    u32 colliders = 0U;
+    for (u32 i = 0; i < nph_world_entity_slot_count(fx.world); ++i) {
+        const NphEntity e = nph_world_entity_at(fx.world, i);
+        colliders +=
+            !nph_entity_is_null(e) && nph_world_has(fx.world, e, fx.ids.collider) ? 1U : 0U;
+    }
+    NTEST_EXPECT_EQ_UINT(colliders, 4U);
     scene_teardown(&fx);
 }
 

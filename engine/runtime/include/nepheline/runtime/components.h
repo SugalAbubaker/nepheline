@@ -259,19 +259,25 @@ typedef enum NphColliderShape {
     NPH_COLLIDER_SPHERE = 0,
     NPH_COLLIDER_CAPSULE = 1, // its core along the entity's Y
     NPH_COLLIDER_BOX = 2,
+    NPH_COLLIDER_ASSET = 3, // every shape of the collision asset `collision`
 } NphColliderShape;
 
 // A sphere (`radius`), a capsule (`radius` around a core 2 * `half_height`
 // long), or a box (`half_extents`), at `center` and `rotation` in the
 // entity's frame, scaled by the entity's world scale: a box along each of
 // its axes, a sphere by the largest, a capsule's core by Y and its radius
-// by the larger of X and Z. Its material: `density` in kg/m^3, `friction`,
+// by the larger of X and Z. Or (ASSET; ADR-0108) every shape of the
+// collision asset `collision` (asset/collision.h: the cooker's convex hulls
+// and triangle meshes, in the frame of what collides), turned by `rotation`,
+// then scaled by the entity's world scale along each of its axes and
+// mirrored where it mirrors, at `center`; a mesh only on a static or
+// kinematic body. Its material: `density` in kg/m^3, `friction`,
 // and `restitution`. Its filter (physics/shape.h NphPhysicsFilter): two
 // shapes touch when each one's category bits meet the other's mask, unless
 // they share a group (negative: never; positive: always). `hit_events`:
 // report hits above the world's threshold (physics/world.h).
 #define NPH_COLLIDER_FIELDS(F)                                                                     \
-    F(U32, shape, NPH_FIELD_RANGE(0.0F, 2.0F))                                                     \
+    F(U32, shape, NPH_FIELD_RANGE(0.0F, 3.0F))                                                     \
     F(F32, radius, NPH_FIELD_RANGE(0.001F, 100.0F))                                                \
     F(F32, half_height, NPH_FIELD_RANGE(0.0F, 100.0F))                                             \
     F(VEC3, half_extents, NPH_FIELD_NO_HINTS)                                                      \
@@ -283,12 +289,13 @@ typedef enum NphColliderShape {
     F(U64, category, NPH_FIELD_NO_HINTS)                                                           \
     F(U64, mask, NPH_FIELD_NO_HINTS)                                                               \
     F(I32, group, NPH_FIELD_NO_HINTS)                                                              \
-    F(BOOL, hit_events, NPH_FIELD_NO_HINTS)
+    F(BOOL, hit_events, NPH_FIELD_NO_HINTS)                                                        \
+    F(GUID, collision, NPH_FIELD_NO_HINTS)
 NPH_COMPONENT_STRUCT(NphCollider, NPH_COLLIDER_FIELDS);
 NPH_COMPONENT_DECLARE(NphCollider);
 
 NPH_STATIC_ASSERT(sizeof(NphRigidBody) == 56U, "RigidBody is 56 bytes");
-NPH_STATIC_ASSERT(sizeof(NphCollider) == 88U, "Collider is 88 bytes");
+NPH_STATIC_ASSERT(sizeof(NphCollider) == 104U, "Collider is 104 bytes");
 
 // ---------------------------------------------------------------------------
 // Audio (docs/runtime.md "Audio"; docs/adr/0058-audio-in-the-engine.md)
@@ -360,11 +367,13 @@ NPH_COMPONENT_DECLARE(NphAudioListener);
 
 NPH_STATIC_ASSERT(sizeof(NphAudioSource) == 112U, "AudioSource is 112 bytes");
 
-// The shape a Collider makes on an entity of world scale `scale` (absolute,
-// per local axis): its geometry and its pose in the entity's frame (the
-// centre scaled, the rotation unit). Negative and non-finite sizes count as
-// zero. False when that is no valid shape (a sphere of radius 0, an unknown
-// `shape`); the outputs are then unspecified.
+// The shape a Collider makes on an entity of world scale `scale` (per
+// local axis, negative where the entity mirrors): its geometry, sized by
+// the scale's magnitude, and its pose in the entity's frame (the centre
+// scaled, the rotation unit). Negative and non-finite sizes count as zero.
+// False when that is no valid shape (a sphere of radius 0, an ASSET
+// Collider, whose shapes come from its asset, an unknown `shape`); the
+// outputs are then unspecified.
 bool nph_collider_shape(const NphCollider *collider, NphVec3 scale,
                         NphPhysicsGeometry *out_geometry, NphPhysicsPose *out_pose);
 
