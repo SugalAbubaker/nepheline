@@ -333,7 +333,8 @@ static void sweep_target(BodySweep *bs, const PhysBody *tb, const PhysShape *ts)
     }
     for (u32 s = bs->b->shape_head; s != PHYS_NULL; s = w->shapes.data[s].next) {
         const PhysShape *ms = &w->shapes.data[s];
-        if (!nph_physics_filter_should_collide(ms->filter, ts->filter)) {
+        if (((ms->flags | ts->flags) & PHYS_SHAPE_UNTOUCHABLE) != 0U ||
+            !nph_physics_filter_should_collide(ms->filter, ts->filter)) {
             continue;
         }
         Mover mv;

@@ -62,6 +62,7 @@ typedef struct NphPhysicsQueryFilter {
     u64 mask;
     u32 body_types;        // NPH_PHYSICS_QUERY_*
     NphPhysicsBody ignore; // NPH_PHYSICS_BODY_NULL: none
+    b32 sensors;           // sensors' shapes too (shape.h; ADR-0108), which queries skip otherwise
 } NphPhysicsQueryFilter;
 
 // Category bit 0 (shapes' default), every mask bit, every kind of body, and

@@ -80,6 +80,7 @@
 
 #include <nbench/nbench.h>
 
+#include <stdio.h>
 #include <string.h>
 
 #define PAIRS        64U
@@ -1281,7 +1282,7 @@ NBENCH(world_pyramids_16_mt)
 // The pile of a thousand shapes in a bin, on the box ground or on `floor`
 // placed at `at` (a mesh or a heightfield, which the bin's walls stand on).
 static void bench_pile_on(NbenchState *state, NphJobSystem *js, BenchSolver solver,
-                          const NphPhysicsGeometry *floor, NphDVec3 at)
+                          const NphPhysicsGeometry *floor, NphDVec3 at, u32 sensor_side)
 {
     NphPhysicsWorld *w = bench_world(false, solver);
     if (w == NULL) {
@@ -1315,16 +1316,43 @@ static void bench_pile_on(NbenchState *state, NphJobSystem *js, BenchSolver solv
         }
         bench_body(w, NPH_PHYSICS_BODY_DYNAMIC, p, rand_rotation(&r), g);
     }
+    // Sensors over the bin (ADR-0108): `sensor_side` squared boxes 2 m tall, tiling it, each
+    // seeing the shapes that lie in its cell.
+    const f32 cell = 10.0F / (f32)(sensor_side != 0U ? sensor_side : 1U);
+    for (u32 k = 0U; k < sensor_side * sensor_side; ++k) {
+        const u32 row = k / sensor_side;
+        const f64 x = -5.0 + ((f64)(k % sensor_side) + 0.5) * (f64)cell;
+        const f64 z = -5.0 + ((f64)row + 0.5) * (f64)cell;
+        NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+        bd.type = NPH_PHYSICS_BODY_STATIC;
+        bd.position = nph_dvec3(x, 1.0, z);
+        NphPhysicsBody b;
+        if (nph_physics_body_create(w, &bd, &b) != NPH_RESULT_OK) {
+            break;
+        }
+        NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(
+            nph_physics_geometry_box(nph_vec3(0.5F * cell, 1.0F, 0.5F * cell)));
+        sd.sensor = 1;
+        NphPhysicsShape sh;
+        NPH_IGNORE_RESULT(nph_physics_shape_create(w, b, &sd, &sh));
+    }
     bench_steps(w, bench_jobs(), 960U / WORLD_SCALE); // fall and settle
     while (nbench_keep_running(state)) {
         NPH_IGNORE_RESULT(nph_physics_world_step(w, WORLD_DT, js));
+    }
+    if (sensor_side != 0U) {
+        // What the sensors held at the last step, for the cost a visitor.
+        static char label[64];
+        const NphPhysicsStats st = nph_physics_world_stats(w);
+        snprintf(label, sizeof label, "%u sensors, %u visitors", st.sensors, st.sensor_visitors);
+        nbench_set_label(state, label);
     }
     nph_physics_world_destroy(w);
 }
 
 static void bench_pile(NbenchState *state, NphJobSystem *js, BenchSolver solver)
 {
-    bench_pile_on(state, js, solver, NULL, nph_dvec3_zero());
+    bench_pile_on(state, js, solver, NULL, nph_dvec3_zero(), 0U);
 }
 
 // The pile on a flat mesh of 0.5 m cells (12 m across, 1152 triangles), and
@@ -1336,7 +1364,7 @@ static void bench_mesh_pile(NbenchState *state, NphJobSystem *js, f32 ripple)
         return;
     }
     const NphPhysicsGeometry g = nph_physics_geometry_mesh(floor);
-    bench_pile_on(state, js, k_soft, &g, nph_dvec3_zero());
+    bench_pile_on(state, js, k_soft, &g, nph_dvec3_zero(), 0U);
     nph_physics_mesh_free(floor, nph_allocator_system());
 }
 
@@ -1348,7 +1376,7 @@ NBENCH(world_heightfield_pile_1000_mt)
         return;
     }
     const NphPhysicsGeometry g = nph_physics_geometry_heightfield(floor);
-    bench_pile_on(state, bench_jobs(), k_soft, &g, nph_dvec3(-6.0, 0.0, -6.0));
+    bench_pile_on(state, bench_jobs(), k_soft, &g, nph_dvec3(-6.0, 0.0, -6.0), 0U);
     nph_physics_heightfield_free(floor, nph_allocator_system());
 }
 
@@ -1375,6 +1403,18 @@ NBENCH(world_pile_1000_st)
 NBENCH(world_pile_1000_mt)
 {
     bench_pile(state, bench_jobs(), k_soft);
+}
+
+// The pile with 64 sensors tiling its bin, every shape inside one (ADR-0108): against
+// world_pile_1000_st and _mt, what the sensors' pass costs a step.
+NBENCH(world_pile_1000_sensors_64_st)
+{
+    bench_pile_on(state, NULL, k_soft, NULL, nph_dvec3_zero(), 8U);
+}
+
+NBENCH(world_pile_1000_sensors_64_mt)
+{
+    bench_pile_on(state, bench_jobs(), k_soft, NULL, nph_dvec3_zero(), 8U);
 }
 
 NBENCH(world_sleeping_10k)

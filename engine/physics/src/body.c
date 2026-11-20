@@ -162,6 +162,7 @@ void nph_physics_body_destroy(NphPhysicsWorld *world, NphPhysicsBody body)
         const u32 s = b->shape_head;
         PhysShape *shape = &world->shapes.data[s];
         b->shape_head = shape->next;
+        phys_sensor_shape_gone(world, s);
         phys_shape_destroy_proxy(world, s);
         shape->handle = 0U;
         phys_slots_release(&world->shape_slots, s);
@@ -396,7 +397,8 @@ void phys_body_update_mass(NphPhysicsWorld *w, PhysBody *b)
     if ((b->flags & PHYS_BODY_MASS_SET) == 0U) {
         for (u32 s = b->shape_head; s != PHYS_NULL; s = w->shapes.data[s].next) {
             const PhysShape *shape = &w->shapes.data[s];
-            if (shape->density <= 0.0F) {
+            // Sensors and ghosts touch nothing, so they move nothing (ADR-0108).
+            if (shape->density <= 0.0F || (shape->flags & PHYS_SHAPE_UNTOUCHABLE) != 0U) {
                 continue;
             }
             const NphPhysicsMassData m = nph_physics_mass_transform(

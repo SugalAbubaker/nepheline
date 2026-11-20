@@ -17,6 +17,7 @@ NphPhysicsQueryFilter nph_physics_query_filter_default(void)
     f.mask = NPH_U64_MAX;
     f.body_types = NPH_PHYSICS_QUERY_ALL_BODIES;
     f.ignore = NPH_PHYSICS_BODY_NULL;
+    f.sensors = 0;
     return f;
 }
 
@@ -34,6 +35,7 @@ typedef struct Query {
     NphPhysicsQueryFilter filter;
     NphDVec3 origin; // the frame shapes are tested in
     bool ended;      // a callback ended it
+    bool one_way;    // a sensor's (sensor.c): a shape's own mask not asked
 } Query;
 
 static void query_begin(Query *q, const NphPhysicsWorld *w, const NphPhysicsQueryFilter *filter,
@@ -44,6 +46,7 @@ static void query_begin(Query *q, const NphPhysicsWorld *w, const NphPhysicsQuer
     q->filter = filter != NULL ? *filter : nph_physics_query_filter_default();
     q->origin = origin;
     q->ended = false;
+    q->one_way = false;
 }
 
 static bool walks(const Query *q, u32 k)
@@ -58,7 +61,10 @@ static const PhysShape *query_shape(const Query *q, u64 leaf, const PhysBody **b
     const PhysShape *s = &q->w->shapes.data[(u32)leaf];
     const PhysBody *b = &q->w->bodies.data[s->body];
     if ((s->filter.category & q->filter.mask) == 0U ||
-        (s->filter.mask & q->filter.category) == 0U || b->handle == q->filter.ignore.value) {
+        (!q->one_way && (s->filter.mask & q->filter.category) == 0U) ||
+        (q->one_way && (s->flags & PHYS_SHAPE_SENSOR_EVENTS) == 0U) ||
+        b->handle == q->filter.ignore.value ||
+        ((s->flags & PHYS_SHAPE_SENSOR) != 0U && q->filter.sensors == 0)) {
         return NULL;
     }
     *body = b;
@@ -361,7 +367,7 @@ typedef struct ShapeQuery {
     Query q;
     const NphPhysicsGeometry *g;
     NphQuat rotation;
-    NphAABB box; // overlap_aabb's
+    NphAABB box; // the query's, in the trees' frame (overlaps)
     f32 speculative;
     NphPhysicsQueryShapeFn shape_fn;
     NphPhysicsQueryContactFn contact_fn;
@@ -383,7 +389,9 @@ static bool overlap_leaf(u32 proxy, u64 leaf, void *context)
     ShapeQuery *sq = (ShapeQuery *)context;
     const PhysBody *b = NULL;
     const PhysShape *s = query_shape(&sq->q, leaf, &b);
-    if (s == NULL) {
+    // The tree passes fat boxes; the shape's tight one, apart from the query's, rules it out
+    // before the exact test.
+    if (s == NULL || !nph_aabb_overlaps(s->aabb, sq->box)) {
         return true;
     }
     NphQuat rotation;
@@ -507,7 +515,31 @@ void nph_physics_world_overlap_shape(const NphPhysicsWorld *world,
     sq.shape_fn = fn;
     const NphAABB rel =
         nph_physics_geometry_aabb(geometry, nph_physics_pose(nph_vec3_zero(), sq.rotation));
-    shape_walk(&sq, phys_world_box(position, rel), overlap_leaf);
+    sq.box = phys_world_box(position, rel);
+    shape_walk(&sq, sq.box, overlap_leaf);
+}
+
+void phys_overlap_one_way(const NphPhysicsWorld *w, const NphPhysicsGeometry *geometry,
+                          NphDVec3 position, NphQuat rotation, const NphPhysicsQueryFilter *filter,
+                          NphPhysicsQueryShapeFn fn, void *user)
+{
+    // As nph_physics_world_overlap_shape, but during the step (the sensors' pass) and one way.
+    ShapeQuery sq;
+    sq.q.w = w;
+    sq.q.filter = *filter;
+    sq.q.origin = position;
+    sq.q.ended = false;
+    sq.q.one_way = true;
+    sq.g = geometry;
+    sq.rotation = nph_quat_normalize(rotation);
+    sq.speculative = 0.0F;
+    sq.shape_fn = fn;
+    sq.contact_fn = NULL;
+    sq.user = user;
+    const NphAABB rel =
+        nph_physics_geometry_aabb(geometry, nph_physics_pose(nph_vec3_zero(), sq.rotation));
+    sq.box = phys_world_box(position, rel);
+    shape_walk(&sq, sq.box, overlap_leaf);
 }
 
 void nph_physics_world_overlap_aabb(const NphPhysicsWorld *world, NphAABB box,

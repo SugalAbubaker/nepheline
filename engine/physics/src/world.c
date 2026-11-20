@@ -168,6 +168,14 @@ NphResult nph_physics_world_create(const NphPhysicsWorldDesc *desc, NphPhysicsWo
     NPH_ARRAY_INIT(&w->end_events, alloc);
     NPH_ARRAY_INIT(&w->hit_events, alloc);
     NPH_ARRAY_INIT(&w->move_events, alloc);
+    NPH_ARRAY_INIT(&w->sensor_begin_events, alloc);
+    NPH_ARRAY_INIT(&w->sensor_end_events, alloc);
+    NPH_ARRAY_INIT(&w->sensor_pending_ends, alloc);
+    NPH_ARRAY_INIT(&w->sensors, alloc);
+    NPH_ARRAY_INIT(&w->sensor_visitors, alloc);
+    NPH_ARRAY_INIT(&w->sensor_next, alloc);
+    NPH_ARRAY_INIT(&w->sensor_place, alloc);
+    NPH_ARRAY_INIT(&w->sensor_found, alloc);
     for (u32 c = 0U; c < PHYS_GRAPH_COLORS; ++c) {
         NPH_ARRAY_INIT(&w->colors[c].contacts, alloc);
         NPH_ARRAY_INIT(&w->colors[c].joints, alloc);
@@ -250,6 +258,14 @@ void nph_physics_world_destroy(NphPhysicsWorld *world)
     NPH_ARRAY_FREE(&world->end_events);
     NPH_ARRAY_FREE(&world->hit_events);
     NPH_ARRAY_FREE(&world->move_events);
+    NPH_ARRAY_FREE(&world->sensor_begin_events);
+    NPH_ARRAY_FREE(&world->sensor_end_events);
+    NPH_ARRAY_FREE(&world->sensor_pending_ends);
+    NPH_ARRAY_FREE(&world->sensors);
+    NPH_ARRAY_FREE(&world->sensor_visitors);
+    NPH_ARRAY_FREE(&world->sensor_next);
+    NPH_ARRAY_FREE(&world->sensor_place);
+    NPH_ARRAY_FREE(&world->sensor_found);
     for (u32 c = 0U; c < PHYS_GRAPH_COLORS; ++c) {
         nph_bitset_free(&world->colors[c].bodies);
         NPH_ARRAY_FREE(&world->colors[c].contacts);
@@ -303,13 +319,20 @@ NphResult nph_physics_world_step(NphPhysicsWorld *world, f32 dt, NphJobSystem *j
     NPH_ARRAY_CLEAR(&world->end_events);
     NPH_ARRAY_CLEAR(&world->hit_events);
     NPH_ARRAY_CLEAR(&world->move_events);
+    NPH_ARRAY_CLEAR(&world->sensor_begin_events);
+    NPH_ARRAY_CLEAR(&world->sensor_end_events);
 
-    NphResult r = NPH_RESULT_OK;
+    // The ends of sensors destroyed since the last step come first (sensor.c), kept until a step
+    // succeeds.
+    NphResult r = NPH_ARRAY_PUSH_N(&world->sensor_end_events, world->sensor_pending_ends.data,
+                                   world->sensor_pending_ends.len);
     u64 t = nph_time_now_ns();
-    NPH_PROFILE_BEGIN("physics.pairs");
-    r = phys_update_pairs(world, jobs);
-    NPH_PROFILE_END();
-    world->stats.pairs_ms = ms_since(t);
+    if (r == NPH_RESULT_OK) {
+        NPH_PROFILE_BEGIN("physics.pairs");
+        r = phys_update_pairs(world, jobs);
+        NPH_PROFILE_END();
+        world->stats.pairs_ms = ms_since(t);
+    }
     if (r == NPH_RESULT_OK) {
         t = nph_time_now_ns();
         NPH_PROFILE_BEGIN("physics.collide");
@@ -336,6 +359,22 @@ NphResult nph_physics_world_step(NphPhysicsWorld *world, f32 dt, NphJobSystem *j
         NPH_PROFILE_END();
         world->stats.sleep_ms = ms_since(t);
     }
+    if (r == NPH_RESULT_OK) {
+        // What overlaps each sensor, now that the step's poses are final (ADR-0108).
+        t = nph_time_now_ns();
+        NPH_PROFILE_BEGIN("physics.sensors");
+        r = phys_sensors_step(world, jobs);
+        NPH_PROFILE_END();
+        world->stats.sensors_ms = ms_since(t);
+    }
+    if (r == NPH_RESULT_OK) {
+        NPH_ARRAY_CLEAR(&world->sensor_pending_ends);
+    } else {
+        // A step that fails reports no sensor events; the sets stay as the last step that
+        // succeeded left them, so the next that succeeds reports every change since.
+        NPH_ARRAY_CLEAR(&world->sensor_begin_events);
+        NPH_ARRAY_CLEAR(&world->sensor_end_events);
+    }
     world->stepping = false;
     world->stats.steps += 1U;
     world->stats.step_ms = ms_since(t0);
@@ -354,6 +393,10 @@ NphPhysicsEvents nph_physics_world_events(const NphPhysicsWorld *world)
     e.hit_count = world->hit_events.len;
     e.move = world->move_events.data;
     e.move_count = world->move_events.len;
+    e.sensor_begin = world->sensor_begin_events.data;
+    e.sensor_begin_count = world->sensor_begin_events.len;
+    e.sensor_end = world->sensor_end_events.data;
+    e.sensor_end_count = world->sensor_end_events.len;
     return e;
 }
 
@@ -623,6 +666,27 @@ bool nph_physics_world_validate(const NphPhysicsWorld *world)
         VALID(nj == is->joint_count);
         VALID(is->parent == PHYS_NULL); // merges are applied by the end of a step
     }
+    // Sensors: one for each live sensor shape, sorted by slot, each set sorted by handle inside
+    // the last step's buffer and its room (sensor.c).
+    u32 sensor_shapes = 0U;
+    for (u32 i = 0U; i < world->shapes.len; ++i) {
+        const PhysShape *s = &world->shapes.data[i];
+        sensor_shapes += s->handle != 0U && (s->flags & PHYS_SHAPE_SENSOR) != 0U ? 1U : 0U;
+    }
+    VALID(sensor_shapes == world->sensors.len);
+    for (u32 i = 0U; i < world->sensors.len; ++i) {
+        const PhysSensor *ps = &world->sensors.data[i];
+        VALID(ps->shape < world->shapes.len);
+        const PhysShape *s = &world->shapes.data[ps->shape];
+        VALID(s->handle != 0U && (s->flags & PHYS_SHAPE_SENSOR) != 0U);
+        VALID(i == 0U || world->sensors.data[i - 1U].shape < ps->shape);
+        VALID(ps->room >= PHYS_SENSOR_FIRST_ROOM && (ps->room & (ps->room - 1U)) == 0U);
+        VALID(ps->count <= ps->room && (u64)ps->first + ps->count <= world->sensor_visitors.len);
+        for (u32 k = 1U; k < ps->count; ++k) {
+            VALID(world->sensor_visitors.data[ps->first + k - 1U].handle <
+                  world->sensor_visitors.data[ps->first + k].handle);
+        }
+    }
     for (u32 t = 0U; t < PHYS_TREE_COUNT; ++t) {
         VALID(nph_aabb_tree_validate(&world->trees[t]));
     }
@@ -793,7 +857,13 @@ void nph_physics_world_draw(const NphPhysicsWorld *world, const NphPhysicsDebugD
         for (u32 s = b->shape_head; s != PHYS_NULL; s = world->shapes.data[s].next) {
             const PhysShape *shape = &world->shapes.data[s];
             if ((draw->flags & NPH_PHYSICS_DRAW_SHAPES) != 0U) {
-                draw_shape(draw, b, shape, color);
+                u32 shape_color = color;
+                if ((shape->flags & PHYS_SHAPE_SENSOR) != 0U) {
+                    shape_color = NPH_PHYSICS_DRAW_SENSOR_RGBA;
+                } else if ((shape->flags & PHYS_SHAPE_GHOST) != 0U) {
+                    shape_color = NPH_PHYSICS_DRAW_GHOST_RGBA;
+                }
+                draw_shape(draw, b, shape, shape_color);
             }
             if ((draw->flags & NPH_PHYSICS_DRAW_AABBS) != 0U) {
                 NphDVec3 corners[8];

@@ -205,6 +205,15 @@ typedef struct NphPhysicsBodyMoveEvent {
     NphVec3 angular_velocity;
 } NphPhysicsBodyMoveEvent;
 
+// A shape that began or ended overlapping a sensor (shape.h; ADR-0108), with both shapes' user
+// data as they were: a shape destroyed since the last step is reported with what it had.
+typedef struct NphPhysicsSensorEvent {
+    NphPhysicsShape sensor;
+    NphPhysicsShape visitor;
+    u64 sensor_user_data;
+    u64 visitor_user_data;
+} NphPhysicsSensorEvent;
+
 typedef struct NphPhysicsEvents {
     const NphPhysicsContactBeginEvent *begin;
     u32 begin_count;
@@ -214,11 +223,20 @@ typedef struct NphPhysicsEvents {
     u32 hit_count;
     const NphPhysicsBodyMoveEvent *move;
     u32 move_count;
+    const NphPhysicsSensorEvent *sensor_begin;
+    u32 sensor_begin_count;
+    const NphPhysicsSensorEvent *sensor_end;
+    u32 sensor_end_count;
 } NphPhysicsEvents;
 
 // Contact events are reported for shapes with `contact_events`, hit events
-// for shapes with `hit_events` (shape.h), and move events for every awake
-// body. The arrays are the world's; they are overwritten by the next step.
+// for shapes with `hit_events` (shape.h), move events for every awake body,
+// and sensor events for every sensor: in the order of the sensors' shapes'
+// slots, then of the visitors' handles, after the ends of sensors destroyed
+// since the last step, in the order they were destroyed. A step that fails
+// reports no sensor events, and the next that succeeds reports every change
+// since the last that did. The arrays are the world's; they are overwritten
+// by the next step.
 NphPhysicsEvents nph_physics_world_events(const NphPhysicsWorld *world);
 
 // The approach speed above which touching contacts report hits (default
@@ -243,9 +261,11 @@ typedef struct NphPhysicsStats {
     u32 overflow_constraints; // contacts no colour could take, solved serially
     u32 moved_proxies;        // broadphase proxies that grew last step
     u32 new_pairs;
-    u32 swept_bodies;  // fast bodies swept by continuous collision last step
-    u32 impact_bodies; // of those, set back to an impact
-    u32 workers;       // threads that worked the solver's stages
+    u32 swept_bodies;    // fast bodies swept by continuous collision last step
+    u32 impact_bodies;   // of those, set back to an impact
+    u32 sensors;         // sensor shapes (shape.h)
+    u32 sensor_visitors; // the shapes they overlapped at the last step
+    u32 workers;         // threads that worked the solver's stages
     u64 steps;
     // The last step's wall time and its stages', in milliseconds.
     f64 step_ms;
@@ -254,6 +274,7 @@ typedef struct NphPhysicsStats {
     f64 solve_ms;
     f64 finalize_ms;
     f64 sleep_ms;
+    f64 sensors_ms;
 } NphPhysicsStats;
 
 NphPhysicsStats nph_physics_world_stats(const NphPhysicsWorld *world);
@@ -278,6 +299,11 @@ enum {
     NPH_PHYSICS_DRAW_SLEEP = 1U << 4U,    // sleeping bodies' shapes in their own colour
     NPH_PHYSICS_DRAW_JOINTS = 1U << 5U,   // anchors joined to the centres, and the frames' X axes
 };
+
+// Shapes are drawn in their bodies' colours, but sensors' in yellow and ghosts' in violet
+// (shape.h; ABGR, as the line callback's), whatever their bodies.
+#define NPH_PHYSICS_DRAW_SENSOR_RGBA 0xFF40D0E0U
+#define NPH_PHYSICS_DRAW_GHOST_RGBA  0xFFE0A0C0U
 
 // Lines in 32-bit coordinates relative to `origin` (the renderer's debug
 // origin), so drawing keeps its precision far from the world's.

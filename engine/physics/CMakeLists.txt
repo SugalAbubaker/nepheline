@@ -26,6 +26,7 @@ nph_add_module(physics
         src/mesh.c
         src/physics_internal.h
         src/query.c
+        src/sensor.c
         src/shape.c
         src/solver.c
         src/solver_avx2.c
@@ -56,6 +57,7 @@ nph_add_test(physics
         tests/test_joint.c
         tests/test_mesh.c
         tests/test_physics_support.h
+        tests/test_sensor.c
         tests/test_query.c
         tests/test_ragdoll.c
         tests/test_solvers.c

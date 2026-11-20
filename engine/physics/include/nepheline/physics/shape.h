@@ -47,17 +47,28 @@ typedef struct NphPhysicsShapeDesc {
     NphPhysicsFilter filter;
     b32 contact_events; // report begin and end touching (world.h)
     b32 hit_events;     // report hits above the world's threshold
+    // A sensor (ADR-0108): a sphere, capsule, box or hull that touches nothing (no contacts, no
+    // mass), which queries skip unless their filter asks for sensors. After each step it reports
+    // the shapes it began and ended overlapping (world.h sensor events): shapes of dynamic and
+    // kinematic bodies other than its own, not sensors, with `sensor_events`, whose category
+    // meets its mask. Their own masks are not asked.
+    b32 sensor;
+    b32 sensor_events; // sensors see it (on by default): off for debris no trigger needs
+    // A ghost: a shape that touches nothing (no contacts, no mass), but that queries and sensors
+    // see, by its filter as any shape: a character controller's body (ADR-0108). Not a sensor too.
+    b32 ghost;
     u64 user_data;
 } NphPhysicsShapeDesc;
 
 // `geometry` at the body's origin: density 1000 (water), friction 0.6,
-// restitution 0, the default filter, contact events on, hit events off.
+// restitution 0, the default filter, contact events on, hit events off, a
+// solid shape (neither a sensor nor a ghost) that sensors see.
 NphPhysicsShapeDesc nph_physics_shape_desc_default(NphPhysicsGeometry geometry);
 
 // Attaches a shape and updates the body's mass properties (unless they are
 // set explicitly). NPH_RESULT_INVALID_ARGUMENT for invalid geometry, a mesh
-// on a dynamic body, a bad pose, or a negative density, friction, or
-// restitution;
+// on a dynamic body, a bad pose, a negative density, friction, or
+// restitution, a sensor that is not convex, or a shape both sensor and ghost;
 // NPH_RESULT_NOT_FOUND for a stale body; NPH_RESULT_FULL past
 // NPH_PHYSICS_MAX_OBJECTS; NPH_RESULT_OUT_OF_MEMORY.
 NPH_MUST_USE NphResult nph_physics_shape_create(NphPhysicsWorld *world, NphPhysicsBody body,
