@@ -14,6 +14,7 @@
 #include <cook/bc.h>
 #include <cook/collision.h>
 #include <cook/cooker.h>
+#include <cook/glass.h>
 #include <cook/gltf.h>
 #include <cook/image.h>
 #include <cook/material.h>
@@ -1022,10 +1023,10 @@ typedef struct SpecGlossUse {
     NphGuid mr;
 } SpecGlossUse;
 
-// Decodes image `index` of the scene for the conversion (8-bit texels), or
+// Decodes image `index` of the scene for a bake of material textures, `what` (8-bit texels), or
 // leaves `out` empty for -1.
-static NphResult decode_specgloss_image(Cooker *c, const char *key, const CookGltfScene *scene,
-                                        i32 index, CookImage *out)
+static NphResult decode_bake_image(Cooker *c, const char *key, const CookGltfScene *scene,
+                                   i32 index, const char *what, CookImage *out)
 {
     memset(out, 0, sizeof *out);
     if (index < 0) {
@@ -1038,10 +1039,8 @@ static NphResult decode_specgloss_image(Cooker *c, const char *key, const CookGl
         r = NPH_RESULT_UNSUPPORTED;
     }
     if (r != NPH_RESULT_OK) {
-        NPH_LOG_ERROR(&NPH_LOG_COOK,
-                      "%s: image %s: not an 8-bit image the specular-glossiness conversion "
-                      "reads: %s",
-                      key, img->name, nph_result_string(r));
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: image %s: not an 8-bit image %s reads: %s", key,
+                      img->name, what, nph_result_string(r));
     }
     return r;
 }
@@ -1081,9 +1080,10 @@ static NphResult cook_specgloss(Cooker *c, const char *key, const CookGltfScene 
     }
     CookImage diffuse;
     CookImage specgloss;
-    NphResult r = decode_specgloss_image(c, key, scene, d, &diffuse);
+    static const char what[] = "the specular-glossiness conversion";
+    NphResult r = decode_bake_image(c, key, scene, d, what, &diffuse);
     if (r == NPH_RESULT_OK) {
-        r = decode_specgloss_image(c, key, scene, s, &specgloss);
+        r = decode_bake_image(c, key, scene, s, what, &specgloss);
         if (r != NPH_RESULT_OK) {
             cook_image_free(&diffuse);
             return r;
@@ -1106,6 +1106,59 @@ static NphResult cook_specgloss(Cooker *c, const char *key, const CookGltfScene 
         }
         cook_image_free(&base);
         cook_image_free(&mr);
+    }
+    return r;
+}
+
+// Glass whose transmission varies per texel (ADR-0107): its base colour texture, made from its
+// base colour and transmission images and its factor (cook/glass.h), one per distinct trio
+// among the scene's materials.
+typedef struct GlassUse {
+    i32 images[2];
+    u32 factor_bits;
+    NphGuid base;
+} GlassUse;
+
+static NphResult cook_glass(Cooker *c, const char *key, const CookGltfScene *scene,
+                            const CookGltfMaterial *mat, GlassUse *use)
+{
+    const i32 b = mat->glass_image[0];
+    const i32 t = mat->glass_image[1];
+    char sub[96];
+    snprintf(sub, sizeof sub, "glass/%d/%d/%08x/base", b, t, (unsigned)use->factor_bits);
+    char file[64];
+    snprintf(file, sizeof file, "tex_glass_%d_%d_%08x_base", b, t, (unsigned)use->factor_bits);
+    // It depends on both images' bytes and the factor.
+    const u64 content = nph_hash_combine(
+        nph_hash_combine(b >= 0 ? scene->images[b].hash : 0U, scene->images[t].hash),
+        (u64)use->factor_bits);
+    const u64 shash = texture_settings_hash(c, COOK_TEXTURE_COLOR);
+    use->base = asset_guid(key, sub);
+    if (is_current(c, key, sub, content, shash)) {
+        c->stats.skipped += 1U;
+        return NPH_RESULT_OK;
+    }
+    static const char what[] = "glass's transmission per texel";
+    CookImage base;
+    CookImage transmission;
+    NphResult r = decode_bake_image(c, key, scene, b, what, &base);
+    if (r != NPH_RESULT_OK) {
+        return r;
+    }
+    r = decode_bake_image(c, key, scene, t, what, &transmission);
+    if (r != NPH_RESULT_OK) {
+        cook_image_free(&base);
+        return r;
+    }
+    CookImage made;
+    r = cook_glass_texture(c->alloc, b >= 0 ? &base : NULL, &transmission, mat->glass_factor,
+                           &made);
+    cook_image_free(&base);
+    cook_image_free(&transmission);
+    if (r == NPH_RESULT_OK) {
+        r = write_texture(c, key, sub, file, &made, &c->texture, COOK_TEXTURE_COLOR, content, shash,
+                          use->base);
+        cook_image_free(&made);
     }
     return r;
 }
@@ -1214,6 +1267,46 @@ static NphResult cook_scene_textures(Cooker *c, const char *key, CookGltfScene *
         }
     }
     NPH_FREE_ARRAY(c->alloc, SpecGlossUse, sg_uses, nph_max_u32(scene->material_count, 1U));
+    if (r != NPH_RESULT_OK) {
+        return r;
+    }
+    // Glass whose transmission varies per texel: its base colour texture, made.
+    GlassUse *gl_uses =
+        NPH_ALLOC_ARRAY_ZEROED(c->alloc, GlassUse, nph_max_u32(scene->material_count, 1U));
+    if (gl_uses == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    u32 gl_count = 0U;
+    for (u32 m = 0; m < scene->material_count && r == NPH_RESULT_OK; ++m) {
+        CookGltfMaterial *mat = &scene->materials[m];
+        if (mat->glass_image[1] < 0 || (u32)mat->glass_image[1] >= scene->image_count) {
+            continue;
+        }
+        u32 bits = 0U;
+        memcpy(&bits, &mat->glass_factor, sizeof bits);
+        GlassUse *use = NULL;
+        for (u32 u = 0; u < gl_count; ++u) {
+            if (gl_uses[u].images[0] == mat->glass_image[0] &&
+                gl_uses[u].images[1] == mat->glass_image[1] && gl_uses[u].factor_bits == bits) {
+                use = &gl_uses[u];
+                break;
+            }
+        }
+        if (use == NULL) {
+            use = &gl_uses[gl_count++];
+            use->images[0] = mat->glass_image[0];
+            use->images[1] = mat->glass_image[1];
+            use->factor_bits = bits;
+            r = cook_glass(c, key, scene, mat, use);
+            if (r == NPH_RESULT_OK) {
+                r = NPH_ARRAY_PUSH(produced, use->base);
+            }
+        }
+        if (r == NPH_RESULT_OK) {
+            mat->header.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texture = use->base;
+        }
+    }
+    NPH_FREE_ARRAY(c->alloc, GlassUse, gl_uses, nph_max_u32(scene->material_count, 1U));
     return r;
 }
 

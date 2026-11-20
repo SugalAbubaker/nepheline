@@ -284,10 +284,13 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, 
     out->occlusion_strength = d->occlusion_strength;
     out->alpha_mode = (u32)d->alpha_mode;
     out->handle = handle;
-    out->flags = (d->double_sided ? (u32)NPH_RENDER_MATERIAL_DOUBLE_SIDED : 0U) |
-                 (d->unlit ? (u32)NPH_RENDER_MATERIAL_UNLIT : 0U) |
-                 (d->transmissive ? (u32)NPH_RENDER_MATERIAL_TRANSMISSIVE : 0U) |
-                 (nph_render_uv_is_identity(&d->uv) ? 0U : (u32)NPH_RENDER_MATERIAL_UV_TRANSFORM);
+    out->flags =
+        (d->double_sided ? (u32)NPH_RENDER_MATERIAL_DOUBLE_SIDED : 0U) |
+        (d->unlit ? (u32)NPH_RENDER_MATERIAL_UNLIT : 0U) |
+        (d->transmissive ? (u32)NPH_RENDER_MATERIAL_TRANSMISSIVE : 0U) |
+        (d->transmissive && d->transmission_texels ? (u32)NPH_RENDER_MATERIAL_TRANSMISSION_TEXELS
+                                                   : 0U) |
+        (nph_render_uv_is_identity(&d->uv) ? 0U : (u32)NPH_RENDER_MATERIAL_UV_TRANSFORM);
     // The slots on the second set (ADR-0107): a bit each in `wrap`, and the flag the shaders
     // test before they read any of them.
     for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {

@@ -698,6 +698,10 @@ typedef struct NphRenderMaterialDesc {
     // is added whole, and what is behind it shows less by that too (Schlick's share of a
     // dielectric). A plain blended material is a coverage: all of its light scales with alpha.
     b32 transmissive;
+    // Glass (`transmissive`) whose transmission varies per texel (KHR_materials_transmission's
+    // texture; ADR-0107): its base colour texture's alpha holds each texel's share, and its colour
+    // is not scaled by it ahead, so the shader scales it texel by texel. Glass's alone.
+    b32 transmission_texels;
     // The reflectance head on of its dielectric part (F0; glTF's KHR_materials_ior and the factor
     // of KHR_materials_specular; ADR-0107), in [0, 1]: NPH_RENDER_F0_DEFAULT by default, an index
     // of 1.5. The forward passes draw a material of another with variants that read it.

@@ -97,6 +97,10 @@ A material is glass when its Principled BSDF's **Transmission > Weight** is 0.5 
   as a surface you see through by its coverage, such as a decal or a curtain, not as glass.
 - **Its colour tints what is behind it.** That colour is the Base Color, times its texture and
   the vertex colour. White is clear, and amber lamp glass or a green bottle take their colour.
+- **A texture can vary it.** An image on Transmission > Weight (its red channel, through a
+  Separate Color node as the exporter asks) lets each texel through by its own share: dirty
+  glass, clear where the texture is white. Whether the material is glass still goes by the
+  weight, which the exporter writes as 1 with a texture.
 - **Deeper where thicker.** Plug a Volume Absorption node into the Material Output's Volume
   socket, and give the glass a thickness with a glTF Material Output node's Thickness. The tint
   then deepens by Beer's law: the node's Color, raised to the thickness over the distance its

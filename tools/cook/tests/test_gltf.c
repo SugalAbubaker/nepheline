@@ -1268,6 +1268,81 @@ NTEST(gltf, ior_specular_and_volume_give_the_optics)
     cook_gltf_free(&scene);
 }
 
+// Glass whose transmission varies per texel (ADR-0107): KHR_materials_transmission's texture makes
+// it glass whose base colour texture is to be made from its base colour and transmission images,
+// its factor unscaled. Without a base colour texture the one made reads the transmission
+// texture's set. A transmission texture on other coordinates than the base colour's is read in the
+// base colour's, and on a specular-glossiness material it is not drawn (both warned of). It is not
+// glass where it lets less than half the light through.
+NTEST(gltf, a_transmission_texture_keeps_glass_per_texel)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    u8 rgba[2 * 2 * 4];
+    memset(rgba, 200, sizeof rgba);
+    u8 tga[18 + 16];
+    char b64[128];
+    test_base64(tga, test_write_tga(rgba, 2U, 2U, tga), b64);
+    char doc[4096];
+    snprintf(doc, sizeof doc,
+             "{\"asset\":{\"version\":\"2.0\"},"
+             "\"extensionsUsed\":[\"KHR_materials_transmission\","
+             "\"KHR_materials_pbrSpecularGlossiness\"],"
+             "\"materials\":["
+             "{\"name\":\"dirty\",\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0}},"
+             "\"extensions\":{\"KHR_materials_transmission\":{\"transmissionFactor\":1.0,"
+             "\"transmissionTexture\":{\"index\":1}}}},"
+             "{\"name\":\"sheet\",\"extensions\":{\"KHR_materials_transmission\":"
+             "{\"transmissionFactor\":0.9,\"transmissionTexture\":{\"index\":1,\"texCoord\":1}}}},"
+             "{\"name\":\"mixed\",\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0}},"
+             "\"extensions\":{\"KHR_materials_transmission\":{\"transmissionFactor\":1.0,"
+             "\"transmissionTexture\":{\"index\":1,\"texCoord\":1}}}},"
+             "{\"name\":\"gloss\",\"extensions\":{\"KHR_materials_pbrSpecularGlossiness\":"
+             "{\"diffuseFactor\":[1,1,1,1]},\"KHR_materials_transmission\":"
+             "{\"transmissionFactor\":1.0,\"transmissionTexture\":{\"index\":1}}}},"
+             "{\"name\":\"faint\",\"extensions\":{\"KHR_materials_transmission\":"
+             "{\"transmissionFactor\":0.3,\"transmissionTexture\":{\"index\":1}}}}],"
+             "\"textures\":[{\"source\":0},{\"source\":1}],"
+             "\"images\":[{\"uri\":\"data:image/tga;base64,%s\"},"
+             "{\"uri\":\"data:image/tga;base64,%s\"}]}",
+             b64, b64);
+    CookGltfScene scene;
+    NTEST_ASSERT_EQ_INT(cook_gltf_load_memory(alloc, doc, strlen(doc), NULL, &scene),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(scene.material_count, 5U);
+    NTEST_EXPECT_EQ_UINT(scene.warnings, 2U); // the mixed coordinates; the specular-glossiness
+    const u32 texels =
+        (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE | (u32)NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS;
+    const CookGltfMaterial *dirty = &scene.materials[0];
+    NTEST_EXPECT_EQ_UINT(dirty->header.flags & texels, texels);
+    NTEST_EXPECT_EQ_UINT(dirty->header.alpha_mode, (u32)NPH_MATERIAL_ALPHA_BLEND);
+    NTEST_EXPECT_EQ_INT(dirty->glass_image[0], 0);
+    NTEST_EXPECT_EQ_INT(dirty->glass_image[1], 1);
+    NTEST_EXPECT_NEAR_F32(dirty->glass_factor, 1.0F, 0.0F);
+    NTEST_EXPECT_EQ_INT(dirty->image[NPH_MATERIAL_TEXTURE_BASE_COLOR], -1);
+    NTEST_EXPECT_NEAR_F32(dirty->header.base_color_factor.y, 1.0F, 0.0F); // unscaled
+    NTEST_EXPECT_NEAR_F32(dirty->header.base_color_factor.w, 1.0F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(dirty->optics.transmission.x, 1.0F, 0.0F); // tinted texel by texel
+    const CookGltfMaterial *sheet = &scene.materials[1];
+    NTEST_EXPECT_EQ_UINT(sheet->header.flags & texels, texels);
+    NTEST_EXPECT_EQ_INT(sheet->glass_image[0], -1);
+    NTEST_EXPECT_EQ_INT(sheet->glass_image[1], 1);
+    NTEST_EXPECT_NEAR_F32(sheet->glass_factor, 0.9F, 1e-6F);
+    NTEST_EXPECT_EQ_UINT(sheet->header.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texcoord, 1U);
+    const CookGltfMaterial *mixed = &scene.materials[2];
+    NTEST_EXPECT_EQ_INT(mixed->glass_image[1], 1);
+    NTEST_EXPECT_EQ_UINT(mixed->header.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texcoord, 0U);
+    const CookGltfMaterial *gloss = &scene.materials[3];
+    NTEST_EXPECT_EQ_UINT(gloss->header.flags & texels, (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE);
+    NTEST_EXPECT_EQ_INT(gloss->glass_image[1], -1);
+    NTEST_EXPECT_NEAR_F32(gloss->header.base_color_factor.w, 0.0F, 0.0F); // its factor's share
+    const CookGltfMaterial *faint = &scene.materials[4];
+    NTEST_EXPECT_EQ_UINT(faint->header.flags & texels, 0U);
+    NTEST_EXPECT_EQ_INT(faint->glass_image[1], -1);
+    // The transmission image is read, though it stands in no slot.
+    NTEST_EXPECT_TRUE(scene.images[1].data != NULL);
+    cook_gltf_free(&scene);
+}
+
 #ifdef NPH_FUZZ_CORPUS_DIR
 // The glTF fuzz seeds (scripts/fuzz_seeds_cook.py) must import.
 NTEST(gltf, the_fuzz_corpus_imports)

@@ -595,6 +595,25 @@ def gltf_optics():
     }
 
 
+def gltf_glass_texels():
+    """Glass whose transmission varies per texel (ADR-0107): KHR_materials_transmission's
+    texture with a base colour texture, and one without (the made texture on its set)."""
+    image = _data_uri(png(4, 4, 6, gradient_rgba(4, 4)), "image/png")
+    return {
+        "asset": {"version": "2.0", "generator": "nepheline fuzz seeds"},
+        "extensionsUsed": ["KHR_materials_transmission"],
+        "materials": [
+            {"name": "dirty", "pbrMetallicRoughness": {"baseColorTexture": {"index": 0}},
+             "extensions": {"KHR_materials_transmission": {
+                 "transmissionFactor": 1.0, "transmissionTexture": {"index": 1}}}},
+            {"name": "sheet", "extensions": {"KHR_materials_transmission": {
+                "transmissionFactor": 0.8, "transmissionTexture": {"index": 1}}}},
+        ],
+        "textures": [{"source": 0}, {"source": 1}],
+        "images": [{"uri": image}, {"uri": image}],
+    }
+
+
 def gltf_seeds():
     triangle, triangle_buf = gltf_triangle()
     return {
@@ -607,6 +626,7 @@ def gltf_seeds():
         "collision": _dump(gltf_collision()),
         "second_set": _dump(gltf_second_set()),
         "optics": _dump(gltf_optics()),
+        "glass_texels": _dump(gltf_glass_texels()),
     }
 
 

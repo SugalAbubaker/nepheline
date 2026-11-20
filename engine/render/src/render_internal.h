@@ -1463,10 +1463,10 @@ struct NphRenderer {
     // Live materials a slot of which, with a texture, reads the second set (ADR-0107): the
     // blended surfaces are drawn with the forward pipelines' k_uv1 variants while some are.
     u32 uv1_materials;
-    // Live glass that is tinted (NphRenderMaterialDesc.transmission; ADR-0107), and blended
-    // materials of another F0 (render_material_tinted): the blended surfaces are drawn with the
-    // forward pipelines' k_tint variants, which blend by the shader's second output and read F0,
-    // while some is.
+    // Live glass that is tinted (NphRenderMaterialDesc.transmission; ADR-0107) or whose
+    // transmission varies per texel, and blended materials of another F0 (render_material_tinted):
+    // the blended surfaces are drawn with the forward pipelines' k_tint variants, which blend by
+    // the shader's second output and read F0, while some is.
     u32 tinted_materials;
     // Live opaque and alpha-tested materials of another F0 (render_material_reads_f0): the
     // reference renderer draws them with the forward pipelines' k_f0 variants.
@@ -1589,7 +1589,8 @@ bool render_material_reads_f0(const NphRenderMaterialDesc *d);
 NphResult render_forward_tint_pipelines(NphRenderer *r);
 
 // Whether the k_tint variants draw material `d` (ADR-0107): glass that is tinted (its tint not
-// (0, 0, 0)), or a blended material of an F0 not NPH_RENDER_F0_DEFAULT (they read it).
+// (0, 0, 0)) or whose transmission varies per texel (`transmission_texels`, which they scale),
+// or a blended material of an F0 not NPH_RENDER_F0_DEFAULT (they read it).
 bool render_material_tinted(const NphRenderMaterialDesc *d);
 
 // The reference renderer's forward pipelines that read the second texture coordinate set

@@ -647,6 +647,13 @@ NphResult nph_material_view(const NphAsset *asset, NphMaterialView *out)
             return NPH_RESULT_CORRUPT;
         }
     }
+    // Glass whose transmission varies per texel, from version 5 (ADR-0107): glass's alone.
+    if ((h->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS) != 0U &&
+        (asset->header.type_version < 5U ||
+         (h->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE) == 0U ||
+         h->alpha_mode != (u32)NPH_MATERIAL_ALPHA_BLEND)) {
+        return NPH_RESULT_CORRUPT;
+    }
     // Its optics, from version 5: F0 in [0, 1], a tint non-negative and finite, and glass's alone.
     const NphMaterialOptics *optics = NULL;
     const NphAssetBlob *ob = nph_asset_blob(asset, NPH_MATERIAL_TAG_OPTICS, 0U);

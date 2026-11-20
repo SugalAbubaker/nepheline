@@ -362,7 +362,19 @@ above, times `KHR_materials_volume`'s attenuation over its thickness where it ha
 law, `attenuationColor ^ (thickness / attenuationDistance)`), into `NphMaterialOptics.transmission`;
 the renderer tints further by the vertex colour and the base colour texture, as it does the base
 colour. Glass whose factor is white, with no volume and no base colour texture, is untinted, and
-draws as before. In Bistro the street lamps' glass (1.0, 0.9, 0.7) and the two
+draws as before.
+
+Where `KHR_materials_transmission` has a texture, what glass lets through varies per texel
+(ADR-0107; `glass.h`). Its base colour texture is then made: the base colour image's colour as
+it was, its alpha times the share each texel keeps, one minus the factor times the texture's red
+(white where the material has no base colour image, read in the transmission texture's set).
+The material keeps its factors unscaled and is flagged `NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS`,
+and the renderer scales its colour by the share texel by texel. Like specular-glossiness's, the
+texture takes the larger extent of the two images, the other sampled bilinearly, and materials
+that share the images and the factor share it. A transmission texture on other coordinates than
+the base colour's is read in the base colour's, with a warning; on a specular-glossiness material
+it is not drawn, its factor is, with a warning. Whether the material is glass, and whether its
+mesh is left out of the rays, still goes by the factor. In Bistro the street lamps' glass (1.0, 0.9, 0.7) and the two
 `Paris_Glass_Detailed` materials (0.9, 0.9, 1.0) are tinted; its 15 other glass materials are
 not.
 

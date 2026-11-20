@@ -1517,6 +1517,27 @@ NTEST(views, material_optics_from_version_5)
     image_asset_free(&ia);
 }
 
+// Glass whose transmission varies per texel (NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS, version 5;
+// ADR-0107): glass's alone, blended, and none before version 5.
+NTEST(views, glass_kept_per_texel_from_version_5)
+{
+    ImageAsset ia;
+    build_optics_material(&ia, true, NULL, 0U);
+    NphMaterialHeader *h = (NphMaterialHeader *)blob_bytes(&ia, NPH_MATERIAL_TAG_HEADER, 0U);
+    h->flags |= (u32)NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS;
+    NphMaterialView v;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    ia.asset.header.type_version = 4U;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    ia.asset.header.type_version = NPH_MATERIAL_TYPE_VERSION;
+    h->alpha_mode = (u32)NPH_MATERIAL_ALPHA_OPAQUE;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->alpha_mode = (u32)NPH_MATERIAL_ALPHA_BLEND;
+    h->flags &= ~(u32)NPH_MATERIAL_FLAG_TRANSMISSIVE;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+}
+
 NTEST(views, material_uv_transform_from_version_3)
 {
     // Without the blob: the identity.

@@ -466,6 +466,8 @@ static NphResult create_material(CookedScene *s, const NphAsset *asset, f32 emis
     d.double_sided = (h->flags & (u32)NPH_MATERIAL_FLAG_DOUBLE_SIDED) != 0U;
     d.unlit = (h->flags & (u32)NPH_MATERIAL_FLAG_UNLIT) != 0U;
     d.transmissive = (h->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE) != 0U;
+    d.transmission_texels =
+        d.transmissive && (h->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS) != 0U;
     d.normal_scale = h->textures[NPH_MATERIAL_TEXTURE_NORMAL].scale;
     d.occlusion_strength = h->textures[NPH_MATERIAL_TEXTURE_OCCLUSION].scale;
     // F0 and glass's tint (ADR-0107).

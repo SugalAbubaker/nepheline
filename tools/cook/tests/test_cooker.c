@@ -649,6 +649,119 @@ NTEST_F(CookFixture, specular_glossiness_materials_become_metallic_roughness)
     cooker_destroy(c);
 }
 
+// Glass whose transmission varies per texel (KHR_materials_transmission's texture; ADR-0107): its
+// base colour texture is made from its base colour and transmission images and its factor, once
+// for the materials that share them, the colour as it was and the alpha the share each texel
+// keeps; without a base colour image it is white. Its factor is unscaled, and its flag says so;
+// a second cook finds all current.
+NTEST_F(CookFixture, glass_kept_per_texel_gets_its_base_colour_texture_made)
+{
+    u8 base[4 * 4 * 4];
+    u8 trans[4 * 4 * 4];
+    for (u32 i = 0; i < 16U; ++i) {
+        base[(u64)i * 4U] = (u8)(40U + i * 10U);
+        base[(u64)i * 4U + 1U] = 120U;
+        base[(u64)i * 4U + 2U] = (u8)(200U - i * 5U);
+        base[(u64)i * 4U + 3U] = 255U;
+        trans[(u64)i * 4U] = (u8)(i * 17U);
+        trans[(u64)i * 4U + 1U] = 0U;
+        trans[(u64)i * 4U + 2U] = 0U;
+        trans[(u64)i * 4U + 3U] = 255U;
+    }
+    u8 base_tga[18 + 64];
+    u8 trans_tga[18 + 64];
+    char base_b64[256];
+    char trans_b64[256];
+    test_base64(base_tga, test_write_tga(base, 4U, 4U, base_tga), base_b64);
+    test_base64(trans_tga, test_write_tga(trans, 4U, 4U, trans_tga), trans_b64);
+    const f32 pos[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    const f32 uv[6] = {0, 1, 1, 1, 0, 0};
+    u8 buffer[60];
+    memcpy(buffer, pos, sizeof pos);
+    memcpy(buffer + 36, uv, sizeof uv);
+    char buffer_b64[128];
+    test_base64(buffer, sizeof buffer, buffer_b64);
+    static const char dirty[] =
+        "{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0}},\"extensions\":{"
+        "\"KHR_materials_transmission\":{\"transmissionFactor\":1.0,\"transmissionTexture\":{"
+        "\"index\":1}}}}";
+    char doc[4096];
+    snprintf(doc, sizeof doc,
+             "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":["
+             "\"KHR_materials_transmission\"],\"scene\":0,\"scenes\":[{\"nodes\":[0]}],"
+             "\"nodes\":[{\"mesh\":0}],"
+             "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"TEXCOORD_0\":1},"
+             "\"material\":0}]}],"
+             "\"materials\":[%s,%s,{\"extensions\":{\"KHR_materials_transmission\":{"
+             "\"transmissionFactor\":0.8,\"transmissionTexture\":{\"index\":1}}}}],"
+             "\"textures\":[{\"source\":0},{\"source\":1}],"
+             "\"images\":[{\"uri\":\"data:image/tga;base64,%s\"},{\"uri\":\"data:image/tga;base64,"
+             "%s\"}],"
+             "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":"
+             "\"VEC3\",\"min\":[0,0,0],\"max\":[1,1,0]},{\"bufferView\":1,\"componentType\":5126,"
+             "\"count\":3,\"type\":\"VEC2\"}],"
+             "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":36,"
+             "\"byteLength\":24}],"
+             "\"buffers\":[{\"byteLength\":60,\"uri\":\"data:application/octet-stream;base64,%s\"}"
+             "]}",
+             dirty, dirty, base_b64, trans_b64, buffer_b64);
+    char path[1200];
+    test_path_in(&f->dir, "glass.gltf", path, sizeof path);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, doc, strlen(doc)), NPH_RESULT_OK);
+    CookerDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.alloc = f->alloc;
+    desc.out_dir = f->out_dir;
+    desc.source_root = f->dir.dir;
+    cook_texture_settings_default(&desc.texture);
+    cook_mesh_settings_default(&desc.mesh);
+    desc.texture.lz = NPH_LZ_LEVEL_FAST;
+    desc.texture.uncompressed = 1; // RGBA8 levels the test can read
+    desc.texture.no_mips = 1;
+    desc.mesh.lz = NPH_LZ_LEVEL_FAST;
+    Cooker *c = NULL;
+    NTEST_ASSERT_EQ_INT(cooker_create(&desc, &c), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    // Two textures made (the first two materials share theirs), three materials, one mesh, one
+    // scene: neither image is cooked on its own.
+    NTEST_ASSERT_EQ_UINT(cooker_stats(c).cooked, 7U);
+    const NphMaterialHeader m0 = read_material(f, c, "glass.gltf", "material/0");
+    const NphMaterialHeader m1 = read_material(f, c, "glass.gltf", "material/1");
+    const NphMaterialHeader m2 = read_material(f, c, "glass.gltf", "material/2");
+    const u32 texels =
+        (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE | (u32)NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS;
+    NTEST_EXPECT_EQ_UINT(m0.flags & texels, texels);
+    NTEST_EXPECT_EQ_UINT(m2.flags & texels, texels);
+    NTEST_EXPECT_NEAR_F32(m0.base_color_factor.x, 1.0F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(m0.base_color_factor.w, 1.0F, 0.0F);
+    const NphGuid made = m0.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texture;
+    const NphGuid sheet = m2.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texture;
+    NTEST_ASSERT_FALSE(nph_guid_is_null(made));
+    NTEST_ASSERT_FALSE(nph_guid_is_null(sheet));
+    NTEST_ASSERT_TRUE(nph_guid_equals(m1.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texture, made));
+    NTEST_ASSERT_FALSE(nph_guid_equals(sheet, made));
+    u8 made_texels[4 * 4 * 4];
+    u8 sheet_texels[4 * 4 * 4];
+    read_top_level(f, c, made, made_texels, sizeof made_texels);
+    read_top_level(f, c, sheet, sheet_texels, sizeof sheet_texels);
+    for (u32 i = 0; i < 16U; ++i) {
+        for (u32 ch = 0; ch < 3U; ++ch) {
+            NTEST_EXPECT_EQ_UINT(made_texels[(u64)i * 4U + ch], base[(u64)i * 4U + ch]);
+            NTEST_EXPECT_EQ_UINT(sheet_texels[(u64)i * 4U + ch], 255U);
+        }
+        const f32 t = (f32)trans[(u64)i * 4U] / 255.0F;
+        NTEST_EXPECT_NEAR_F32((f32)made_texels[(u64)i * 4U + 3U], 255.0F * (1.0F - t), 0.51F);
+        NTEST_EXPECT_NEAR_F32((f32)sheet_texels[(u64)i * 4U + 3U], 255.0F * (1.0F - 0.8F * t),
+                              0.51F);
+    }
+    cooker_destroy(c);
+    // Nothing changed: everything is current.
+    NTEST_ASSERT_EQ_INT(cooker_create(&desc, &c), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(cooker_cook_file(c, path), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(cooker_stats(c).cooked, 0U);
+    cooker_destroy(c);
+}
+
 NTEST_F(CookFixture, directories_and_colliding_names)
 {
     // a/x.gltf and b/y.gltf under a directory, with a file that is not a

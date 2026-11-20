@@ -415,11 +415,33 @@ static u32 view_set(const cgltf_texture_view *v)
     return set < 0 ? 0U : (u32)set;
 }
 
-// A material's texture views, base colour (or diffuse) first.
+// The share of light a material must let through (KHR_materials_transmission) to be glass: a
+// blended material the eye and the light pass through (convert_material).
+#define GLTF_GLASS_TRANSMISSION 0.5F
+
+// The transmission texture of glass whose transmission it makes vary per texel (ADR-0107): of a
+// metallic-roughness material that is glass, NULL for any other.
+static const cgltf_texture_view *glass_transmission_view(const cgltf_material *m)
+{
+    if (m->has_transmission == 0 || m->has_pbr_specular_glossiness ||
+        m->transmission.transmission_factor < GLTF_GLASS_TRANSMISSION ||
+        m->alpha_mode != cgltf_alpha_mode_opaque ||
+        m->transmission.transmission_texture.texture == NULL) {
+        return NULL;
+    }
+    return &m->transmission.transmission_texture;
+}
+
+// A material's texture views, base colour (or diffuse) first. Glass whose transmission varies per
+// texel and that has no base colour texture is drawn by a base colour texture made in its
+// transmission texture's coordinates, so that texture stands first in its place.
 static u32 material_views(const cgltf_material *m, const cgltf_texture_view *out[6])
 {
     out[0] = m->has_pbr_specular_glossiness ? &m->pbr_specular_glossiness.diffuse_texture
                                             : &m->pbr_metallic_roughness.base_color_texture;
+    if (out[0]->texture == NULL && glass_transmission_view(m) != NULL) {
+        out[0] = glass_transmission_view(m);
+    }
     out[1] = &m->pbr_metallic_roughness.metallic_roughness_texture;
     out[2] = &m->pbr_specular_glossiness.specular_glossiness_texture;
     out[3] = &m->normal_texture;
@@ -881,10 +903,6 @@ static void convert_texture_ref(CookGltfScene *scene, const cgltf_data *data, co
     }
 }
 
-// The share of light a material must let through (KHR_materials_transmission) to be glass: a
-// blended material the eye and the light pass through (convert_material).
-#define GLTF_GLASS_TRANSMISSION 0.5F
-
 static void convert_material(CookGltfScene *scene, const cgltf_data *data, const i32 *tex_images,
                              const cgltf_material *src, CookGltfMaterial *out)
 {
@@ -898,6 +916,8 @@ static void convert_material(CookGltfScene *scene, const cgltf_data *data, const
     }
     out->specgloss_image[0] = -1;
     out->specgloss_image[1] = -1;
+    out->glass_image[0] = -1;
+    out->glass_image[1] = -1;
     if (src->has_pbr_specular_glossiness) {
         // The extension takes precedence over the core model where a
         // document has both (it is the more specific description).
@@ -1004,6 +1024,47 @@ static void convert_material(CookGltfScene *scene, const cgltf_data *data, const
         src->transmission.transmission_factor >= GLTF_GLASS_TRANSMISSION &&
         h->alpha_mode == (u32)NPH_MATERIAL_ALPHA_OPAQUE) {
         const f32 keep = 1.0F - nph_f32_min(src->transmission.transmission_factor, 1.0F);
+        // Its transmission per texel (KHR_materials_transmission's texture; ADR-0107): baked
+        // into a copy of its base colour texture whose alpha keeps each texel's share
+        // (cook/glass.h), read in the base colour's coordinates, or the transmission texture's
+        // where it has no base colour texture. Its colour is then not scaled: the renderer
+        // scales it texel by texel (NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS).
+        bool texels = false;
+        const cgltf_texture_view *tv = &src->transmission.transmission_texture;
+        if (tv->texture != NULL && src->has_pbr_specular_glossiness) {
+            NPH_LOG_WARN(&NPH_LOG_COOK,
+                         "%s: a transmission texture is not drawn on a specular-glossiness "
+                         "material; its factor is",
+                         out->name);
+            scene->warnings += 1U;
+        } else if (tv->texture != NULL) {
+            NphMaterialTextureRef tref = h->textures[NPH_MATERIAL_TEXTURE_BASE_COLOR];
+            i32 timage = -1;
+            convert_texture_ref(scene, data, tex_images, out->name, tv, &tref, &timage);
+            if (timage >= 0) {
+                const i32 bimage = out->image[NPH_MATERIAL_TEXTURE_BASE_COLOR];
+                const cgltf_texture_view *bv = &src->pbr_metallic_roughness.base_color_texture;
+                if (bimage < 0) {
+                    h->textures[NPH_MATERIAL_TEXTURE_BASE_COLOR] = tref;
+                } else {
+                    const UvTransform ta = uv_transform_of(tv);
+                    const UvTransform tb = uv_transform_of(bv);
+                    if (view_set(tv) != view_set(bv) || !uv_transforms_equal(&ta, &tb)) {
+                        NPH_LOG_WARN(&NPH_LOG_COOK,
+                                     "%s: its transmission texture reads other texture "
+                                     "coordinates than its base colour's; it is read in the base "
+                                     "colour's",
+                                     out->name);
+                        scene->warnings += 1U;
+                    }
+                }
+                out->glass_image[0] = bimage;
+                out->glass_image[1] = timage;
+                out->glass_factor = 1.0F - keep;
+                out->image[NPH_MATERIAL_TEXTURE_BASE_COLOR] = -1;
+                texels = true;
+            }
+        }
         // Its tint (ADR-0107): the base colour factor as authored, times KHR_materials_volume's
         // attenuation over its thickness (Beer's law), which the vertex colour and the base
         // colour texture tint further, as they do its base colour. Untinted where all of it is
@@ -1030,17 +1091,20 @@ static void convert_material(CookGltfScene *scene, const cgltf_data *data, const
                 scene->warnings += 1U;
             }
         }
-        const bool per_texel = out->image[NPH_MATERIAL_TEXTURE_BASE_COLOR] >= 0 ||
+        const bool per_texel = texels || out->image[NPH_MATERIAL_TEXTURE_BASE_COLOR] >= 0 ||
                                (out->specgloss && out->specgloss_image[0] >= 0);
         if (per_texel || tint.x != 1.0F || tint.y != 1.0F || tint.z != 1.0F) {
             out->optics.transmission = nph_vec3(
                 nph_f32_max(tint.x, 0.0F), nph_f32_max(tint.y, 0.0F), nph_f32_max(tint.z, 0.0F));
         }
-        h->base_color_factor =
-            nph_vec4(h->base_color_factor.x * keep, h->base_color_factor.y * keep,
-                     h->base_color_factor.z * keep, h->base_color_factor.w * keep);
+        if (!texels) {
+            h->base_color_factor =
+                nph_vec4(h->base_color_factor.x * keep, h->base_color_factor.y * keep,
+                         h->base_color_factor.z * keep, h->base_color_factor.w * keep);
+        }
         h->alpha_mode = (u32)NPH_MATERIAL_ALPHA_BLEND;
-        h->flags |= (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE;
+        h->flags |= (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE |
+                    (texels ? (u32)NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS : 0U);
     }
     // Its KHR_texture_transform is baked into the meshes' texture
     // coordinates (convert_mesh): said here, once, where its textures'
@@ -1547,6 +1611,7 @@ static NphResult convert(CookGltfScene *scene, const cgltf_options *options, cgl
             }
             used = used || (mat->specgloss && (mat->specgloss_image[0] == (i32)i ||
                                                mat->specgloss_image[1] == (i32)i));
+            used = used || mat->glass_image[0] == (i32)i || mat->glass_image[1] == (i32)i;
         }
         if (!used) {
             copy_name(scene->images[i].name, sizeof scene->images[i].name, data->images[i].name,

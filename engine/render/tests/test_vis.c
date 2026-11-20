@@ -2376,6 +2376,122 @@ NTEST_F(Vis, a_dielectrics_f0_sets_what_it_reflects)
     }
 }
 
+// Glass whose transmission varies per texel (NphRenderMaterialDesc.transmission_texels; ADR-0107),
+// lit before a wall that glows white, in the reference and the production path: glass whose
+// texture keeps six tenths draws as glass that keeps six tenths by its factor, its colour scaled
+// by the share and what is behind tinted by its texture's colour unscaled, and a texture that
+// keeps nothing draws as clear glass of that tint. The flag takes a pane that is glass.
+NTEST_F(Vis, glass_kept_per_texel_draws_as_glass_of_its_share)
+{
+    REQUIRE_PRODUCTION(f);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.0F, 0.0F, 0.0F, 1.0F);
+    md.emissive = nph_vec3(8.0F, 8.0F, 8.0F);
+    NphRenderMaterial glowing;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &glowing), NPH_RESULT_OK);
+    // One texel each, orange, keeping six tenths and nothing.
+    static const u8 texel[2][4] = {{255U, 128U, 64U, 153U}, {255U, 128U, 64U, 0U}};
+    NphRenderTexture tex[2];
+    for (u32 k = 0; k < 2U; ++k) {
+        const void *mips[1] = {texel[k]};
+        u64 sizes[1] = {4U};
+        NphRenderTextureDesc td;
+        memset(&td, 0, sizeof td);
+        td.format = NPH_GPU_FORMAT_R8G8B8A8_SRGB;
+        td.width = 1U;
+        td.height = 1U;
+        td.mip_count = 1U;
+        td.mips = mips;
+        td.mip_sizes = sizes;
+        NTEST_ASSERT_EQ_INT(nph_render_texture_create(f->renderer, &td, &tex[k]), NPH_RESULT_OK);
+    }
+    const NphVec3 c = nph_vec3(level_linear(255U), level_linear(128U), level_linear(64U));
+    NphRenderMaterial panes[4]; // by texture, by factor; six tenths kept, then none
+    for (u32 k = 0; k < 2U; ++k) {
+        const f32 keep = k == 0U ? 0.6F : 0.0F;
+        nph_render_material_desc_default(&md);
+        md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+        md.roughness = 0.6F;
+        md.transmissive = 1;
+        md.transmission_texels = 1;
+        md.transmission = nph_vec3_one();
+        md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = tex[k];
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &panes[k * 2U]),
+                            NPH_RESULT_OK);
+        // As the cooker writes glass of one share: its colour scaled by it, its tint the colour.
+        md.transmission_texels = 0;
+        md.textures[NPH_RENDER_SLOT_BASE_COLOR].texture = NPH_RENDER_TEXTURE_NULL;
+        md.base_color = nph_vec4(c.x * keep, c.y * keep, c.z * keep, keep);
+        md.transmission = c;
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &panes[k * 2U + 1U]),
+                            NPH_RESULT_OK);
+    }
+    md.transmissive = 0;
+    md.transmission = nph_vec3_zero();
+    md.transmission_texels = 1;
+    NphRenderMaterial refused;
+    NTEST_EXPECT_EQ_INT(nph_render_material_create(f->renderer, &md, &refused),
+                        NPH_RESULT_INVALID_ARGUMENT); // glass's alone
+    NphRenderTransform t = nph_render_transform_from_trs(nph_dvec3(0.0, 0.0, -0.5),
+                                                         nph_quat_from_rotation_x(0.5F * NPH_PI),
+                                                         nph_vec3(8.0F, 1.0F, 8.0F));
+    const NphRenderInstance wall = instance(f, plane, glowing, t);
+    t = nph_render_transform_from_trs(nph_dvec3(0.0, 0.0, 0.0),
+                                      nph_quat_from_rotation_x(0.5F * NPH_PI), nph_vec3_one());
+    NphRenderInstance inst[4];
+    for (u32 k = 0; k < 4U; ++k) {
+        inst[k] = instance(f, plane, panes[k], t);
+    }
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_POINT;
+    ld.color = nph_vec3_one();
+    ld.intensity = 40.0F;
+    ld.position = nph_dvec3(0.3, 0.2, 2.0);
+    NphRenderLight light;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+    NphRenderView v;
+    nph_render_view_default(&v, test_camera());
+    v.ev100 = 4.0F;
+    v.background = NPH_RENDER_BACKGROUND_SOLID;
+    v.background_color = nph_vec3_zero();
+    v.tonemapper = NPH_RENDER_TONEMAPPER_NONE; // the target's levels are the light's
+    static u8 image[PIXELS];
+    const u64 centre =
+        ((u64)(TEST_TARGET_SIZE / 2U) * TEST_TARGET_SIZE + TEST_TARGET_SIZE / 2U) * 4U;
+    for (u32 path = 0; path < 2U; ++path) {
+        v.pipeline = path == 0U ? NPH_RENDER_PIPELINE_REFERENCE : NPH_RENDER_PIPELINE_PRODUCTION;
+        f32 seen[4][3];
+        for (u32 k = 0; k < 4U; ++k) {
+            for (u32 i = 0; i < 4U; ++i) {
+                nph_render_instance_set_hidden(f->renderer, inst[i], i != k);
+            }
+            (void)render_into(f, &v, 2U, image);
+            for (u32 ch = 0; ch < 3U; ++ch) {
+                seen[k][ch] = level_linear(image[centre + ch]);
+            }
+        }
+        NTEST_LOG("%s: by texture %.4f %.4f %.4f, by factor %.4f %.4f %.4f; clear: %.4f %.4f",
+                  path == 0U ? "reference" : "production", (f64)seen[0][0], (f64)seen[0][1],
+                  (f64)seen[0][2], (f64)seen[1][0], (f64)seen[1][1], (f64)seen[1][2],
+                  (f64)seen[2][0], (f64)seen[3][0]);
+        NTEST_ASSERT_TRUE(seen[1][0] > 0.05F && seen[1][0] < 0.95F);
+        for (u32 pair = 0; pair < 2U; ++pair) {
+            for (u32 ch = 0; ch < 3U; ++ch) {
+                const f32 want = seen[pair * 2U + 1U][ch];
+                NTEST_EXPECT_NEAR_F32(seen[pair * 2U][ch], want, 0.01F + 0.03F * want);
+            }
+        }
+    }
+    nph_render_light_destroy(f->renderer, light);
+    nph_render_instance_destroy(f->renderer, wall);
+    for (u32 k = 0; k < 4U; ++k) {
+        nph_render_instance_destroy(f->renderer, inst[k]);
+    }
+}
+
 // Blended surfaces in front of opaque ones and behind them: the production
 // path has no depth attachment for them, and their fragment stage tests the
 // visibility buffer's depth itself, where the reference tests a depth

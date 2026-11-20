@@ -41,8 +41,14 @@ typedef enum NphMaterialFlags {
     NPH_MATERIAL_FLAG_UNLIT = 1U << 1U,
     // Glass: a blended material (NPH_MATERIAL_ALPHA_BLEND) whose base colour's alpha is the
     // share of the light behind it that its body stops, and whose colour is already scaled by
-    // it; what it reflects is not (render/renderer.h NphRenderMaterialDesc.transmissive).
+    // it (but for NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS); what it reflects is not
+    // (render/renderer.h NphRenderMaterialDesc.transmissive).
     NPH_MATERIAL_FLAG_TRANSMISSIVE = 1U << 2U,
+    // Glass whose transmission varies per texel, from version 5 (KHR_materials_transmission's
+    // texture; ADR-0107): its base colour texture's alpha holds each texel's share, and its
+    // colour is not scaled by it ahead: the renderer scales it texel by texel
+    // (NphRenderMaterialDesc.transmission_texels). Glass's alone.
+    NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS = 1U << 3U,
 } NphMaterialFlags;
 
 // The texture slots, in NphMaterialHeader.textures order.

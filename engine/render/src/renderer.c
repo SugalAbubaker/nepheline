@@ -1742,7 +1742,8 @@ bool render_material_reads_uv1(const NphRenderMaterialDesc *d)
 bool render_material_tinted(const NphRenderMaterialDesc *d)
 {
     const NphVec3 t = d->transmission;
-    return (d->transmissive && (t.x != 0.0F || t.y != 0.0F || t.z != 0.0F)) ||
+    return (d->transmissive &&
+            (t.x != 0.0F || t.y != 0.0F || t.z != 0.0F || d->transmission_texels)) ||
            (d->alpha_mode == NPH_RENDER_ALPHA_BLEND && d->f0 != NPH_RENDER_F0_DEFAULT);
 }
 
@@ -1771,7 +1772,8 @@ static NphResult validate_material(const NphRenderer *r, const NphRenderMaterial
     const NphVec3 tint = d->transmission;
     const bool tinted = tint.x != 0.0F || tint.y != 0.0F || tint.z != 0.0F;
     if (!nph_f32_is_finite(d->f0) || d->f0 < 0.0F || d->f0 > 1.0F || !nph_vec3_is_finite(tint) ||
-        tint.x < 0.0F || tint.y < 0.0F || tint.z < 0.0F || (tinted && !d->transmissive)) {
+        tint.x < 0.0F || tint.y < 0.0F || tint.z < 0.0F || (tinted && !d->transmissive) ||
+        (d->transmission_texels && !d->transmissive)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
