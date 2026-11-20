@@ -94,15 +94,24 @@ What there is today:
 4. **Glass, and the material extensions the renderer can draw.**
    - **IOR and specular:** `KHR_materials_ior` and the factor of `KHR_materials_specular` give each material its F0,
      `((ior - 1) / (ior + 1))^2` times the factor, in the GPU record's free `emissive.w`. Their defaults give 0.04,
-     today's constant: a material without them draws exactly as before.
+     today's constant: a material without them draws exactly as before. Material type version 5 carries it in an
+     optional `OPTC` blob (`NphMaterialOptics`). The voxel far field keeps 0.04: its compact format has no room for
+     it without making those clusters wide, and the user approved the pictures with it so (2026-11-20).
    - **Tinted glass:** a transmissive material's transmitted light is its base colour (glTF's rule), times
      `KHR_materials_volume`'s attenuation over its thickness where it has one (Beer's law,
      `attenuationColor ^ (thickness / attenuationDistance)`). The blended pass gains a second output (dual-source
      blending), so what lies behind glass is multiplied by that colour, channel by channel, where it was dimmed by one
-     scalar. **This changes the image** of transmissive materials whose base colour is not grey, wherever they are drawn:
-     it waits for the user's word, and its cost and pictures are measured on the reference scenes first.
+     scalar. **This changes the image** of transmissive materials whose base colour is not white, wherever they are
+     drawn: the user chose (2026-11-19) to have it built and shown first, its pictures and cost measured on the
+     reference scenes, and approved it as shown (2026-11-20). As built: the tint goes in `OPTC` as the factor before the cooker scales it by the share it
+     keeps (so a transmission of 1 keeps its tint), and the shader tints further by the vertex colour and the base
+     colour texture. Glass with a white factor and no volume or base colour texture stays untinted. The GPU record
+     grows to 160 bytes (`transmission`, `NPH_RENDER_MATERIAL_TINTED`), and the device baseline gains `dualSrcBlend`.
+     The dual-source blend is in variants alone (`k_tint`), drawn while a tinted material is live: blending every
+     blended surface so cost 5 to 8 % of the blended pass where no glass was tinted.
    - **`transmission_texture`** is baked into a copy of the base colour texture, texel by texel, as the
-     specular-glossiness conversion bakes its textures.
+     specular-glossiness conversion bakes its textures. Not built yet: no reference scene has one, and it follows
+     in this step.
    - **Still ignored, with the warning they give today:** clearcoat, sheen, iridescence, anisotropy, dispersion, diffuse
      transmission, the specular colour, refraction.
 
@@ -154,8 +163,17 @@ in one window.
 - **Collision is in the frame of what collides.** An entity drawn at a scale other than one needs its geometry scaled:
   the physics geometry has no scale (ADR-0042), so step four makes scaled copies of hulls and scales meshes where it
   creates shapes.
-- **Tinted glass changes pictures** where coloured transmissive materials are drawn; it waits for the user's word, with
-  its pictures and its cost on the reference scenes.
+- **Tinted glass and F0 change pictures**, measured before and after with 64 frames averaged a view (the base's
+  own and the new build's renderer on the base's cook agree to 0.001 to 0.002 % of pixels, noise). In Bistro, the
+  street lamps' glass (1.0, 0.9, 0.7) turns what is behind it amber, 0.14 to 0.57 % of a view's pixels; its 15
+  white glass materials and the two faint blue ones show no other change. In the landscape, ten bark, twig and
+  branch materials of F0 0.0007 to 0.034 lose the sky's sheen in shade, 22 to 36 % of a view's pixels by more
+  than two levels, the far field's voxels keeping 0.04. The city and the interior have neither.
+- **Their cost**, on the RTX 3060 Ti over the 18 reference views at 1440p against 59ad17c, four rounds in
+  alternating order: the frame -0.005 ms on average (-0.018 to +0.005 ms). Bistro's blended pass, drawn with the
+  dual-source blend while its lamps are tinted, +0.009 to +0.012 ms a view (5 to 7.5 %); the other scenes' blended
+  passes unchanged (-0.3 to -1.7 %). F0 costs nothing measurable. DRAM: no new passes or buffers; the material
+  record is 16 bytes longer (Bistro's 254 materials, 4 KB, through L2).
 - **The second set costs the reference scenes nothing measurable.** On the RTX 3060 Ti over the 18 reference views at
   1440p, against 7c87711, four rounds in alternating order: the frame −0.005 ms on average (−0.018 to +0.009 ms), the
   CPU +0.0001 ms. All but three of the pipelines `render_perf` reports (70 in Bistro and the interior) have the base's

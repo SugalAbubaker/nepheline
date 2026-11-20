@@ -1445,6 +1445,78 @@ static void build_material(ImageAsset *ia, const NphMaterialUvTransform *uv, u64
     image_asset_finish(ia, &w);
 }
 
+// A material asset of the default header, glass where `glass`, and an OPTC blob of
+// `optics_size` bytes from `optics` where it is not NULL.
+static void build_optics_material(ImageAsset *ia, bool glass, const NphMaterialOptics *optics,
+                                  u64 optics_size)
+{
+    memset(ia, 0, sizeof *ia);
+    ia->alloc = nph_allocator_system();
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_MATERIAL, NPH_MATERIAL_TYPE_VERSION,
+                          nph_guid_from_cstr("mat"), 1U);
+    NphMaterialHeader h;
+    nph_material_header_default(&h);
+    if (glass) {
+        h.alpha_mode = (u32)NPH_MATERIAL_ALPHA_BLEND;
+        h.flags |= (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE;
+    }
+    add(&w, NPH_MATERIAL_TAG_HEADER, 0U, &h, sizeof h);
+    if (optics != NULL) {
+        add(&w, NPH_MATERIAL_TAG_OPTICS, 0U, optics, optics_size);
+    }
+    image_asset_finish(ia, &w);
+}
+
+// The optics (version 5, OPTC; ADR-0107): the default without the blob; F0 in [0, 1] and a tint
+// non-negative, finite, and glass's alone; none before version 5 or of another size.
+NTEST(views, material_optics_from_version_5)
+{
+    ImageAsset ia;
+    build_optics_material(&ia, false, NULL, 0U);
+    NphMaterialView v;
+    NTEST_ASSERT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_NULL(v.optics);
+    NphMaterialOptics o = nph_material_view_optics(&v);
+    NTEST_EXPECT_NEAR_F32(o.f0, NPH_MATERIAL_F0_DEFAULT, 0.0F);
+    NTEST_EXPECT_TRUE(nph_material_optics_is_default(&o));
+    image_asset_free(&ia);
+
+    NphMaterialOptics glass = {0.02F, {1.0F, 0.5F, 0.25F}};
+    build_optics_material(&ia, true, &glass, sizeof glass);
+    NTEST_ASSERT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(v.optics);
+    o = nph_material_view_optics(&v);
+    NTEST_EXPECT_NEAR_F32(o.f0, 0.02F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(o.transmission.y, 0.5F, 0.0F);
+    NTEST_EXPECT_FALSE(nph_material_optics_is_default(&o));
+    NphMaterialOptics *p = (NphMaterialOptics *)blob_bytes(&ia, NPH_MATERIAL_TAG_OPTICS, 0U);
+    p->f0 = 1.5F;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    p->f0 = -0.1F;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    p->f0 = 0.02F;
+    p->transmission.z = -1.0F;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    p->transmission.z = 0.25F;
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    ia.asset.header.type_version = 4U; // no optics before version 5
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+
+    // A tint on a material that is not glass, and a blob of another size.
+    build_optics_material(&ia, false, &glass, sizeof glass);
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    const NphMaterialOptics plain = {0.01F, {0.0F, 0.0F, 0.0F}};
+    build_optics_material(&ia, false, &plain, sizeof plain);
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+    build_optics_material(&ia, false, &plain, sizeof(f32) * 2U);
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+}
+
 NTEST(views, material_uv_transform_from_version_3)
 {
     // Without the blob: the identity.

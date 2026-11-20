@@ -143,7 +143,10 @@ static bool extension_supported(const char *name)
         "KHR_materials_unlit",
         "KHR_materials_emissive_strength",
         "KHR_materials_pbrSpecularGlossiness",
-        "KHR_materials_transmission", // for rays only: glass stays out of them ("Rays")
+        "KHR_materials_transmission", // glass: blended, tinted, out of the rays ("Glass")
+        "KHR_materials_ior",          // F0 (ADR-0107)
+        "KHR_materials_specular",     // its factor: F0 (its colour and textures are warned of)
+        "KHR_materials_volume",       // glass's attenuation (its thickness texture is warned of)
         "KHR_mesh_quantization",
         "KHR_texture_transform",
         "MSFT_texture_dds",
@@ -972,10 +975,67 @@ static void convert_material(CookGltfScene *scene, const cgltf_data *data, const
     // through, a blended material whose alpha is the share its body keeps, its colour scaled by
     // it; drawn opaque, as the extension's fallback has it, a window was a white wall that
     // lit nothing behind it and shadowed what it stood before (docs/cook.md "Glass").
+    // F0 (ADR-0107): KHR_materials_ior's ((ior - 1) / (ior + 1))^2, times KHR_materials_specular's
+    // factor; 0.04 without them, an index of 1.5. The specular colour and the specular textures
+    // are not drawn.
+    out->optics = nph_material_optics_default();
+    {
+        const f32 ior = src->has_ior != 0 ? src->ior.ior : 1.5F;
+        const f32 specular = src->has_specular != 0 ? src->specular.specular_factor : 1.0F;
+        const f32 r = (ior - 1.0F) / (ior + 1.0F);
+        const f32 f0 = r * r * specular;
+        if (src->has_ior != 0 || src->has_specular != 0) {
+            out->optics.f0 =
+                nph_f32_is_finite(f0) ? nph_f32_clamp(f0, 0.0F, 1.0F) : NPH_MATERIAL_F0_DEFAULT;
+        }
+        if (src->has_specular != 0 && (src->specular.specular_color_factor[0] != 1.0F ||
+                                       src->specular.specular_color_factor[1] != 1.0F ||
+                                       src->specular.specular_color_factor[2] != 1.0F ||
+                                       src->specular.specular_texture.texture != NULL ||
+                                       src->specular.specular_color_texture.texture != NULL)) {
+            NPH_LOG_WARN(&NPH_LOG_COOK,
+                         "%s: KHR_materials_specular's colour and textures are not drawn; its "
+                         "factor is",
+                         out->name);
+            scene->warnings += 1U;
+        }
+    }
     if (src->has_transmission != 0 &&
         src->transmission.transmission_factor >= GLTF_GLASS_TRANSMISSION &&
         h->alpha_mode == (u32)NPH_MATERIAL_ALPHA_OPAQUE) {
         const f32 keep = 1.0F - nph_f32_min(src->transmission.transmission_factor, 1.0F);
+        // Its tint (ADR-0107): the base colour factor as authored, times KHR_materials_volume's
+        // attenuation over its thickness (Beer's law), which the vertex colour and the base
+        // colour texture tint further, as they do its base colour. Untinted where all of it is
+        // white and nothing tints it per texel: what is behind passes by one share, as before.
+        NphVec3 tint =
+            nph_vec3(h->base_color_factor.x, h->base_color_factor.y, h->base_color_factor.z);
+        if (src->has_volume != 0) {
+            const f32 distance = src->volume.attenuation_distance;
+            if (nph_f32_is_finite(distance) && distance > 0.0F &&
+                src->volume.thickness_factor > 0.0F) {
+                const f32 d = src->volume.thickness_factor / distance;
+                tint.x *=
+                    nph_f32_pow(nph_f32_clamp(src->volume.attenuation_color[0], 0.0F, 1.0F), d);
+                tint.y *=
+                    nph_f32_pow(nph_f32_clamp(src->volume.attenuation_color[1], 0.0F, 1.0F), d);
+                tint.z *=
+                    nph_f32_pow(nph_f32_clamp(src->volume.attenuation_color[2], 0.0F, 1.0F), d);
+            }
+            if (src->volume.thickness_texture.texture != NULL) {
+                NPH_LOG_WARN(&NPH_LOG_COOK,
+                             "%s: KHR_materials_volume's thickness texture is not drawn; its "
+                             "factor is",
+                             out->name);
+                scene->warnings += 1U;
+            }
+        }
+        const bool per_texel = out->image[NPH_MATERIAL_TEXTURE_BASE_COLOR] >= 0 ||
+                               (out->specgloss && out->specgloss_image[0] >= 0);
+        if (per_texel || tint.x != 1.0F || tint.y != 1.0F || tint.z != 1.0F) {
+            out->optics.transmission = nph_vec3(
+                nph_f32_max(tint.x, 0.0F), nph_f32_max(tint.y, 0.0F), nph_f32_max(tint.z, 0.0F));
+        }
         h->base_color_factor =
             nph_vec4(h->base_color_factor.x * keep, h->base_color_factor.y * keep,
                      h->base_color_factor.z * keep, h->base_color_factor.w * keep);

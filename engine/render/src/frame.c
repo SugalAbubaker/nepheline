@@ -43,7 +43,7 @@ NPH_STATIC_ASSERT(sizeof(NphRenderTexturePaging) == 32U,
 NPH_STATIC_ASSERT(sizeof(NphRenderPagingView) == 24U,
                   "NphRenderPagingView matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderDrawData) == 160U, "NphRenderDrawData matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) == 144U,
+NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) == 160U,
                   "NphRenderMaterialData matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphRenderMaterialData) % 16U == 0U,
                   "material records are indexed by buffer reference at 16-byte alignment");
@@ -276,7 +276,7 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, 
     *paged_slots = 0U;
     memset(out, 0, sizeof *out);
     out->base_color = d->base_color;
-    out->emissive = nph_vec4_from_vec3(d->emissive, 0.0F);
+    out->emissive = nph_vec4_from_vec3(d->emissive, d->f0);
     out->metallic = d->metallic;
     out->roughness = d->roughness;
     out->alpha_cutoff = d->alpha_cutoff;
@@ -298,6 +298,12 @@ static void fill_material(const NphRenderer *r, const NphRenderMaterialDesc *d, 
     }
     out->uv_u = nph_vec4(d->uv.m00, d->uv.m01, d->uv.m02, 0.0F);
     out->uv_v = nph_vec4(d->uv.m10, d->uv.m11, d->uv.m12, 0.0F);
+    // Glass's tint (ADR-0107): where it is not white.
+    const NphVec3 tint = d->transmission;
+    if (d->transmissive && (tint.x != 0.0F || tint.y != 0.0F || tint.z != 0.0F)) {
+        out->flags |= (u32)NPH_RENDER_MATERIAL_TINTED;
+        out->transmission = nph_vec4_from_vec3(tint, 0.0F);
+    }
     for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
         const NphRenderTextureBinding *b = &d->textures[s];
         const RenderTexture *t = render_texture_get(r, b->texture);
@@ -605,6 +611,9 @@ static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, DrawL
         c->alpha_mode = (u8)alpha;
         c->cull = (u8)cull_of(double_sided, mirrored);
         c->uv1 = md != NULL && render_material_reads_uv1(md) ? 1U : 0U;
+        c->tint = alpha == (u32)NPH_RENDER_ALPHA_BLEND && md != NULL && render_material_tinted(md)
+                      ? 1U
+                      : 0U;
         if (alpha == (u32)NPH_RENDER_ALPHA_BLEND) {
             c->key = depth_key(view_depth, rec);
             list->blend_count += 1U;
@@ -661,12 +670,16 @@ static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count,
     const u32 rt = r->rt.frame_shadows != 0 ? 1U : 0U;
     for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
-        // A draw whose material reads the second set by the pipelines that do (ADR-0107).
-        const NphGpuPipeline p = c->uv1 != 0U
-                                     ? (rt != 0U ? r->forward_rt_uv1[c->alpha_mode][c->cull]
-                                                 : r->forward_uv1[c->alpha_mode][c->cull])
-                                 : rt != 0U ? r->forward_rt[c->alpha_mode][c->cull]
-                                            : r->forward[c->alpha_mode][c->cull];
+        // A draw whose material reads the second set, or is tinted glass, by the pipelines that
+        // do (ADR-0107).
+        NphGpuPipeline p =
+            rt != 0U ? r->forward_rt[c->alpha_mode][c->cull] : r->forward[c->alpha_mode][c->cull];
+        if (c->tint != 0U) {
+            p = rt != 0U ? r->forward_rt_tint[c->uv1][c->cull] : r->forward_tint[c->uv1][c->cull];
+        } else if (c->uv1 != 0U) {
+            p = rt != 0U ? r->forward_rt_uv1[c->alpha_mode][c->cull]
+                         : r->forward_uv1[c->alpha_mode][c->cull];
+        }
         if (p.value != bound->value) {
             nph_gpu_cmd_bind_pipeline(cmd, p);
             *bound = p;
@@ -825,6 +838,10 @@ static NphResult declare_reference(NphRenderer *r, NphGpuRenderGraph *graph, u32
     // does (ADR-0107).
     if (r->uv1_materials != 0U) {
         NPH_TRY(render_forward_uv1_pipelines(r));
+    }
+    // And those that blend tinted glass, the first frame one is live.
+    if (r->tinted_materials != 0U) {
+        NPH_TRY(render_forward_tint_pipelines(r));
     }
 
     NphGpuRgPassDesc pd;

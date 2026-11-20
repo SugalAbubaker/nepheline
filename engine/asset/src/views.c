@@ -647,9 +647,47 @@ NphResult nph_material_view(const NphAsset *asset, NphMaterialView *out)
             return NPH_RESULT_CORRUPT;
         }
     }
+    // Its optics, from version 5: F0 in [0, 1], a tint non-negative and finite, and glass's alone.
+    const NphMaterialOptics *optics = NULL;
+    const NphAssetBlob *ob = nph_asset_blob(asset, NPH_MATERIAL_TAG_OPTICS, 0U);
+    if (ob != NULL) {
+        if (asset->header.type_version < 5U || ob->size != sizeof(NphMaterialOptics)) {
+            return NPH_RESULT_CORRUPT;
+        }
+        optics = (const NphMaterialOptics *)ob->data;
+        const NphVec3 t = optics->transmission;
+        const bool glass = (h->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE) != 0U;
+        if (!nph_f32_is_finite(optics->f0) || optics->f0 < 0.0F || optics->f0 > 1.0F ||
+            !nph_vec3_is_finite(t) || t.x < 0.0F || t.y < 0.0F || t.z < 0.0F ||
+            (!glass && (t.x != 0.0F || t.y != 0.0F || t.z != 0.0F))) {
+            return NPH_RESULT_CORRUPT;
+        }
+    }
     out->header = h;
     out->uv = uv;
+    out->optics = optics;
     return NPH_RESULT_OK;
+}
+
+NphMaterialOptics nph_material_optics_default(void)
+{
+    NphMaterialOptics o;
+    o.f0 = NPH_MATERIAL_F0_DEFAULT;
+    o.transmission = nph_vec3_zero();
+    return o;
+}
+
+NphMaterialOptics nph_material_view_optics(const NphMaterialView *view)
+{
+    NPH_ASSERT(view != NULL);
+    return view->optics != NULL ? *view->optics : nph_material_optics_default();
+}
+
+bool nph_material_optics_is_default(const NphMaterialOptics *o)
+{
+    NPH_ASSERT(o != NULL);
+    return o->f0 == NPH_MATERIAL_F0_DEFAULT && o->transmission.x == 0.0F &&
+           o->transmission.y == 0.0F && o->transmission.z == 0.0F;
 }
 
 NphMaterialUvTransform nph_material_uv_identity(void)

@@ -690,8 +690,9 @@ typedef struct RenderDrawCmd {
     u32 index_count;
     u8 alpha_mode;
     u8 cull;
-    u8 uv1; // its material reads the second set: the forward pipelines' k_uv1 variant draws it
-    u8 pad[5];
+    u8 uv1;  // its material reads the second set: the forward pipelines' k_uv1 variant draws it
+    u8 tint; // blended, of tinted glass: the k_tint variants draw it (ADR-0107)
+    u8 pad[4];
 } RenderDrawCmd;
 
 // The image-based-lighting compute passes of one frame: the DFG table, the
@@ -909,6 +910,9 @@ typedef struct RenderVis {
     // And those that read the second texture coordinate set (forward.vert k_uv1; ADR-0107), each
     // made the first time a frame needs it while a material reads it.
     NphGpuPipeline blend_pipelines_uv1[3][2][2];
+    // And those of a frame while a tinted material is live (k_tint; ADR-0107), [the second set]
+    // first, each made the first time a frame needs it.
+    NphGpuPipeline blend_pipelines_tint[2][3][2][2];
     NphGpuShader shaders[VIS_SHADER_COUNT];
     NphGpuPipeline compute[VIS_COMPUTE_COUNT];
     NphGpuPipeline raster[2];   // [opaque, masked]: mesh or vertex pipelines
@@ -1430,6 +1434,11 @@ struct NphRenderer {
     // (render_forward_uv1_pipelines).
     NphGpuPipeline forward_uv1[3][RENDER_CULL_COUNT];
     NphGpuPipeline forward_rt_uv1[3][RENDER_CULL_COUNT];
+    // And the blended draws of tinted glass (k_tint, dual-source blending; ADR-0107), [the second
+    // set][cull], made the first time a frame is declared while a tinted material is live
+    // (render_forward_tint_pipelines).
+    NphGpuPipeline forward_tint[2][RENDER_CULL_COUNT];
+    NphGpuPipeline forward_rt_tint[2][RENDER_CULL_COUNT];
     NphGpuPipeline sky;
     NphGpuPipeline compute[RENDER_COMPUTE_COUNT];
     RenderTargetPipelines target_pipelines[RENDER_TARGET_FORMATS];
@@ -1448,6 +1457,10 @@ struct NphRenderer {
     // Live materials a slot of which, with a texture, reads the second set (ADR-0107): the
     // blended surfaces are drawn with the forward pipelines' k_uv1 variants while some are.
     u32 uv1_materials;
+    // Live glass that is tinted (NphRenderMaterialDesc.transmission; ADR-0107): the blended
+    // surfaces are drawn with the forward pipelines' k_tint variants, which blend by the
+    // shader's second output, while some is.
+    u32 tinted_materials;
     // The alpha keys' ids (render_ray_key_id; ADR-0098): a u64 key to its u32 id, from 1,
     // numbered as materials and meshes first name them and kept for the renderer's life, so
     // an id is never another key's (NphRenderMaterialData.ray_key, NphVisMesh.rays).
@@ -1551,7 +1564,14 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 // the draws' index lists are wound.
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
                                   bool ray_query, bool vsm, bool vis_depth, u32 gi, bool uv1,
-                                  NphGpuPipeline *out);
+                                  bool tint, NphGpuPipeline *out);
+
+// The reference renderer's blended pipelines that blend tinted glass (NphRenderer.forward_tint and
+// forward_rt_tint; k_tint), all of them the first time it is called.
+NphResult render_forward_tint_pipelines(NphRenderer *r);
+
+// Whether material `d` is tinted glass (ADR-0107): transmissive, its tint not (0, 0, 0).
+bool render_material_tinted(const NphRenderMaterialDesc *d);
 
 // The reference renderer's forward pipelines that read the second texture coordinate set
 // (NphRenderer.forward_uv1 and forward_rt_uv1; k_uv1), all of them the first time it is called.

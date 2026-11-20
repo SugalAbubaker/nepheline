@@ -81,6 +81,9 @@ typedef struct CookGltfMaterial {
     b32 specgloss;
     i32 specgloss_image[2]; // diffuse, specular-glossiness
     CookSpecGloss specgloss_factors;
+    // Its F0 and glass's tint (ADR-0107): KHR_materials_ior and _specular, and the base colour
+    // factor and KHR_materials_volume of glass; the default where it has none of them.
+    NphMaterialOptics optics;
 } CookGltfMaterial;
 
 typedef struct CookGltfMesh {

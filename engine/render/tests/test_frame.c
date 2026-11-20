@@ -751,6 +751,73 @@ NTEST_F(Frame, the_second_sets_pipelines_draw_while_a_material_reads_it)
     nph_render_texture_destroy(f->renderer, tex);
 }
 
+// The pipelines that blend tinted glass (k_tint, dual-source blending; ADR-0107): counted by the
+// live glass that is tinted, made the first time a frame is drawn while some is, and the
+// production path's blended pass drawn by them only then; untinted, it blends as it always did.
+NTEST_F(Frame, tinted_glass_pipelines_draw_while_tinted_glass_is_live)
+{
+    REQUIRE_RENDERER(f);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+    md.base_color = nph_vec4(0.0F, 0.0F, 0.0F, 0.1F);
+    md.transmissive = 1;
+    NphRenderMaterial mat = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &mat), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 0U);
+    const NphRenderMesh mesh = facing_plane(f);
+    const NphRenderInstance inst = add_instance(f, mesh, mat, facing_transform());
+    const NphRenderPipeline pipelines[2] = {NPH_RENDER_PIPELINE_REFERENCE,
+                                            NPH_RENDER_PIPELINE_PRODUCTION};
+    const u32 count = nph_renderer_production_supported(f->renderer) ? 2U : 1U;
+    const RenderVis *vis = &f->renderer->vis;
+    for (u32 step = 0; step < 3U; ++step) {
+        // 0: untinted glass; 1: tinted; 2: untinted again.
+        const bool tinted = step == 1U;
+        md.transmission = tinted ? nph_vec3(1.0F, 0.5F, 0.25F) : nph_vec3_zero();
+        if (step != 0U) {
+            NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, mat, &md), NPH_RESULT_OK);
+        }
+        NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, tinted ? 1U : 0U);
+        for (u32 p = 0; p < count; ++p) {
+            NphRenderView v;
+            plain_view(&v);
+            v.pipeline = pipelines[p];
+            test_render_read(f, &v);
+            if (pipelines[p] != NPH_RENDER_PIPELINE_PRODUCTION) {
+                continue;
+            }
+            bool found_tint = false;
+            bool found_plain = false;
+            for (u32 g = 0; g < 3U; ++g) {
+                for (u32 rt = 0; rt < 2U; ++rt) {
+                    for (u32 map = 0; map < 2U; ++map) {
+                        const u64 chosen = vis->frame.blend_pipeline.value;
+                        found_tint = found_tint ||
+                                     (chosen != 0U &&
+                                      chosen == vis->blend_pipelines_tint[0][g][rt][map].value);
+                        found_plain =
+                            found_plain ||
+                            (chosen != 0U && chosen == vis->blend_pipelines[g][rt][map].value);
+                    }
+                }
+            }
+            NTEST_EXPECT_TRUE(found_tint == tinted);
+            NTEST_EXPECT_TRUE(found_plain == !tinted);
+        }
+        // The reference renderer's, made the first frame drawn while tinted glass is live, and
+        // kept.
+        NTEST_EXPECT_TRUE((f->renderer->forward_tint[0][0].value != 0U) == (step != 0U));
+    }
+    nph_render_instance_destroy(f->renderer, inst);
+    nph_render_mesh_destroy(f->renderer, mesh);
+    md.transmission = nph_vec3(0.5F, 0.5F, 0.5F);
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, mat, &md), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 1U);
+    nph_render_material_destroy(f->renderer, mat);
+    NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 0U);
+}
+
 NTEST_F(Frame, debug_views_show_material_channels)
 {
     REQUIRE_RENDERER(f);

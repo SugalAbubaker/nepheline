@@ -202,6 +202,9 @@ typedef struct NphGpuLimits {
     u32 max_image_dimension_cube;
     u32 max_image_layers;
     u32 max_color_attachments;
+    // The colour attachments a pipeline that blends by the fragment stage's second output
+    // may have (NPH_GPU_BLEND_SRC1_*; maxFragmentDualSrcAttachments): 1 at least.
+    u32 max_dual_source_attachments;
     u32 max_push_constant_bytes; // the device's; the layout uses NPH_GPU_PUSH_CONSTANT_BYTES
     u32 max_draw_indirect_count;
     u32 max_compute_workgroup_invocations;

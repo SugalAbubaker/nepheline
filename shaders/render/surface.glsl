@@ -822,7 +822,8 @@ vec3 nph_surface_shade(ViewRef view, NphRenderMaterialData m, NphSurface s, vec4
 
     const vec3 v = normalize(-s.position); // the camera is at the origin
     const float nov = max(dot(n, v), 1e-4);
-    const vec3 f0 = mix(vec3(0.04), base.rgb, metallic);
+    // The dielectric part's reflectance head on: the material's (ADR-0107; 0.04 by default).
+    const vec3 f0 = mix(vec3(m.emissive.w), base.rgb, metallic);
     const vec3 diffuse_color = base.rgb * (1.0 - metallic);
     const float a = roughness * roughness;
 

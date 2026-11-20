@@ -445,9 +445,10 @@ NphResult render_vis_create(NphRenderer *r)
             }
             for (u32 g = 0; g < 3U; ++g) {
                 if (g == 0U || r->gi.supported) {
-                    NPH_TRY(render_forward_pipeline(
-                        r, (u32)NPH_RENDER_ALPHA_BLEND, (u32)RENDER_CULL_BACK_CCW, v->hdr_format,
-                        rt != 0U, map != 0U, true, g, false, &v->blend_pipelines[g][rt][map]));
+                    NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND,
+                                                    (u32)RENDER_CULL_BACK_CCW, v->hdr_format,
+                                                    rt != 0U, map != 0U, true, g, false, false,
+                                                    &v->blend_pipelines[g][rt][map]));
                 }
             }
         }
@@ -507,6 +508,8 @@ void render_vis_destroy(NphRenderer *r)
             for (u32 g = 0; g < 3U; ++g) {
                 nph_gpu_pipeline_destroy(dev, v->blend_pipelines[g][rt][map]);
                 nph_gpu_pipeline_destroy(dev, v->blend_pipelines_uv1[g][rt][map]);
+                nph_gpu_pipeline_destroy(dev, v->blend_pipelines_tint[0][g][rt][map]);
+                nph_gpu_pipeline_destroy(dev, v->blend_pipelines_tint[1][g][rt][map]);
             }
         }
     }
@@ -1683,14 +1686,20 @@ static NphResult select_blend_pipeline(NphRenderer *r, NphGpuPipeline *out)
     const u32 vsm = r->vsm.frame_active != 0 ? 1U : 0U;
     const bool cache_only = r->many.frame_no_other_light && !v->debug_view;
     const u32 gi = r->gi.frame_active != 0 ? (cache_only ? 2U : 1U) : 0U;
-    if (r->uv1_materials == 0U) {
+    const bool uv1 = r->uv1_materials != 0U;
+    const bool tint = r->tinted_materials != 0U;
+    if (!uv1 && !tint) {
         *out = v->blend_pipelines[gi][rt][vsm];
         return NPH_RESULT_OK;
     }
-    NphGpuPipeline *p = &v->blend_pipelines_uv1[gi][rt][vsm];
+    // While tinted glass is live, the frame's blended surfaces all blend by the shader's second
+    // output (one indirect draw, sorted far to near; ADR-0097, ADR-0107).
+    NphGpuPipeline *p = tint ? &v->blend_pipelines_tint[uv1 ? 1 : 0][gi][rt][vsm]
+                             : &v->blend_pipelines_uv1[gi][rt][vsm];
     if (p->value == 0U) {
         NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, (u32)RENDER_CULL_BACK_CCW,
-                                        v->hdr_format, rt != 0U, vsm != 0U, true, gi, true, p));
+                                        v->hdr_format, rt != 0U, vsm != 0U, true, gi, uv1, tint,
+                                        p));
     }
     *out = *p;
     return NPH_RESULT_OK;

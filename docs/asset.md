@@ -320,7 +320,7 @@ can be handed to the renderer without further checks:
   bytes the format and extent imply (whole 4x4 blocks for BC formats).
   Formats: R8, RG8, RGBA8 (UNORM and sRGB), RGBA16F, BC4, BC5, BC6H, BC7
   (UNORM and sRGB).
-- **Material** (`material.h`, type version 4; versions 1 to 3 still read): one
+- **Material** (`material.h`, type version 5; versions 1 to 4 still read): one
   `HEAD` with glTF's metallic-roughness parameters, alpha mode and cutoff,
   flags, and five texture references (GUID, UV set, wrap modes, filter,
   scale). From version 2, an alpha-tested material may carry its alpha key
@@ -337,7 +337,12 @@ can be handed to the renderer without further checks:
   finite, or whose linear part is singular. From version 4, a texture
   reference's set may be 1 (ADR-0107): the mesh's `UV1 `, or its first set
   where the mesh has none. The transform applies to either set. The view
-  refuses a set past 1, and 1 before version 4.
+  refuses a set past 1, and 1 before version 4. From version 5, an optional
+  `OPTC` (`NphMaterialOptics`; ADR-0107) holds what its surface reflects head
+  on (F0) and, for glass, the tint of what it lets through; a material
+  without it has F0 0.04 (`NPH_MATERIAL_F0_DEFAULT`) and no tint. The view
+  refuses one before version 5, of another size, an F0 outside [0, 1], a
+  tint negative or not finite, and a tint on a material that is not glass.
 - **Scene** (`scene.h`, type version 3; versions 1 and 2 still read): `HEAD`,
   `NODE` (parent-before-child hierarchy with local TRS, child and sibling
   links, names), `INST` (a mesh GUID at a node with a range of material

@@ -1224,6 +1224,50 @@ NTEST(gltf, non_finite_values_are_refused_or_tangents_remade)
     cook_gltf_free(&scene);
 }
 
+// The optics (ADR-0107): KHR_materials_ior's index and KHR_materials_specular's factor give F0;
+// glass's tint is its base colour factor as authored times KHR_materials_volume's attenuation;
+// white glass with no texture is untinted; the specular colour is warned of.
+NTEST(gltf, ior_specular_and_volume_give_the_optics)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    static const char doc[] =
+        "{\"asset\":{\"version\":\"2.0\"},"
+        "\"extensionsUsed\":[\"KHR_materials_ior\",\"KHR_materials_specular\","
+        "\"KHR_materials_transmission\",\"KHR_materials_volume\"],"
+        "\"materials\":["
+        "{\"name\":\"water\",\"extensions\":{\"KHR_materials_ior\":{\"ior\":1.33},"
+        "\"KHR_materials_specular\":{\"specularFactor\":0.5,"
+        "\"specularColorFactor\":[1,0.9,0.8]}}},"
+        "{\"name\":\"amber\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[1,0.9,0.7,1]},"
+        "\"extensions\":{\"KHR_materials_transmission\":{\"transmissionFactor\":1.0},"
+        "\"KHR_materials_volume\":{\"thicknessFactor\":0.02,\"attenuationDistance\":0.01,"
+        "\"attenuationColor\":[0.5,1,1]}}},"
+        "{\"name\":\"clear\",\"extensions\":{\"KHR_materials_transmission\":"
+        "{\"transmissionFactor\":0.9}}},"
+        "{\"name\":\"plain\"}]}";
+    CookGltfScene scene;
+    NTEST_ASSERT_EQ_INT(cook_gltf_load_memory(alloc, doc, sizeof doc - 1U, NULL, &scene),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(scene.material_count, 4U);
+    NTEST_EXPECT_EQ_UINT(scene.warnings, 1U); // the specular colour
+    const f32 r = 0.33F / 2.33F;
+    NTEST_EXPECT_NEAR_F32(scene.materials[0].optics.f0, r * r * 0.5F, 1e-6F);
+    NTEST_EXPECT_NEAR_F32(scene.materials[0].optics.transmission.x, 0.0F, 0.0F);
+    // Amber glass, all of the light let through (its base colour scaled to nothing): its tint
+    // still the factor, the red attenuated over twice the distance, 0.5^2.
+    const CookGltfMaterial *amber = &scene.materials[1];
+    NTEST_EXPECT_TRUE((amber->header.flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE) != 0U);
+    NTEST_EXPECT_NEAR_F32(amber->header.base_color_factor.y, 0.0F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(amber->optics.transmission.x, 0.25F, 1e-6F);
+    NTEST_EXPECT_NEAR_F32(amber->optics.transmission.y, 0.9F, 1e-6F);
+    NTEST_EXPECT_NEAR_F32(amber->optics.transmission.z, 0.7F, 1e-6F);
+    NTEST_EXPECT_NEAR_F32(amber->optics.f0, NPH_MATERIAL_F0_DEFAULT, 0.0F);
+    // Clear glass: white and untextured, so untinted, and the defaults' optics.
+    NTEST_EXPECT_TRUE(nph_material_optics_is_default(&scene.materials[2].optics));
+    NTEST_EXPECT_TRUE(nph_material_optics_is_default(&scene.materials[3].optics));
+    cook_gltf_free(&scene);
+}
+
 #ifdef NPH_FUZZ_CORPUS_DIR
 // The glTF fuzz seeds (scripts/fuzz_seeds_cook.py) must import.
 NTEST(gltf, the_fuzz_corpus_imports)
