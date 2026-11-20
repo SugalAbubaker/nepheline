@@ -412,6 +412,9 @@ engine_frame_headless_10k_moving 240000
 engine_play_copy_10k           9000000
 engine_frame_physics_1k_resting 22000
 engine_frame_physics_1k_spinning 600000
+engine_frame_physics_1k_compounds_spinning 1250000
+engine_frame_physics_1k_compounds_deep_spinning 2100000
+engine_frame_physics_10k_static_reparent 16000000
 engine_frame_audio_idle        22000
 engine_frame_audio_256_moving  115000
 engine_frame_audio_64_in_10k   62000

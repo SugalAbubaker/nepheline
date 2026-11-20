@@ -3,8 +3,9 @@
 // "Physics"): RigidBody and Collider components become bodies when play
 // begins, bodies move their entities, the game moves bodies through the
 // components, components coming and going make and unmake bodies, bodies
-// name their entities, children follow or not, the world's events
-// overflowing is recovered, and runs repeat. Headless engines in lockstep: one step a frame.
+// name their entities, children follow or not, Colliders below a body are
+// its parts (ADR-0108), the world's events overflowing is recovered, and
+// runs repeat. Headless engines in lockstep: one step a frame.
 #include <nepheline/core/alloc_debug.h>
 #include <nepheline/physics/body.h>
 #include <nepheline/physics/query.h>
@@ -425,9 +426,10 @@ NTEST(Physics, children_follow_their_parents_unless_dynamic)
     start(&fx);
     NphEngine *e = fx.engine;
     NphWorld *w = nph_engine_world(e);
-    // A kinematic carrier with a static collider and a dynamic ball under
+    // A carrier with no body (a Collider under a RigidBody would be a part
+    // of its body: compounds_*), a static collider and a dynamic ball under
     // it.
-    const NphEntity carrier = spawn(&fx, nph_dvec3(0.0, 5.0, 0.0), NPH_RIGID_BODY_KINEMATIC, NULL);
+    const NphEntity carrier = spawn(&fx, nph_dvec3(0.0, 5.0, 0.0), NO_RIGID_BODY, NULL);
     const NphCollider cube = box_collider(nph_vec3(0.5F, 0.5F, 0.5F));
     const NphEntity block = spawn(&fx, nph_dvec3(0.0, 1.0, 0.0), NO_RIGID_BODY, &cube);
     const NphCollider ball = sphere_collider(0.2F);
@@ -455,6 +457,230 @@ NTEST(Physics, children_follow_their_parents_unless_dynamic)
     const NphWorldTransform *lw =
         NPH_WORLD_GET(w, loose, NPH_COMPONENT_ID_WORLD_TRANSFORM, NphWorldTransform);
     NTEST_EXPECT_NEAR_F64(lw->translation.x, 3.0, 1e-5);
+    nph_engine_play_end(e);
+    finish(&fx);
+}
+
+static NphEntity spawn_under(PhysFixture *f, NphEntity parent, NphDVec3 at, u32 type,
+                             const NphCollider *collider)
+{
+    const NphEntity e = spawn(f, at, type, collider);
+    NTEST_EXPECT_EQ_INT(nph_world_set_parent(nph_engine_world(f->engine), e, parent),
+                        NPH_RESULT_OK);
+    return e;
+}
+
+static u32 shape_count(PhysFixture *f, NphEntity e)
+{
+    NphPhysicsShape shapes[8];
+    return nph_physics_body_shapes(nph_engine_physics(f->engine), body_of(f, e), shapes, 8U);
+}
+
+static f32 collider_density(void)
+{
+    return ((const NphCollider *)NphCollider_component()->defaults)->density;
+}
+
+// A chair: a RigidBody with no Collider of its own, and a seat and a leg as
+// children with theirs. One body, two shapes, the mass theirs together; it
+// falls and rests as one, and its children go with it.
+NTEST(Physics, compounds_colliders_below_a_body_are_its_parts)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    (void)spawn_floor(&fx);
+    const NphEntity chair = spawn(&fx, nph_dvec3(0.0, 2.0, 0.0), NPH_RIGID_BODY_DYNAMIC, NULL);
+    const NphCollider seat_shape = box_collider(nph_vec3(0.5F, 0.05F, 0.5F));
+    const NphEntity seat = spawn_under(&fx, chair, nph_dvec3_zero(), NO_RIGID_BODY, &seat_shape);
+    const NphCollider leg_shape = sphere_collider(0.1F);
+    const NphEntity leg =
+        spawn_under(&fx, chair, nph_dvec3(0.4, -0.5, 0.4), NO_RIGID_BODY, &leg_shape);
+    // A back on a frame of its own (no Collider): a part with an entity
+    // between it and its body.
+    const NphEntity frame =
+        spawn_under(&fx, chair, nph_dvec3(0.0, 0.05, -0.45), NO_RIGID_BODY, NULL);
+    const NphCollider back_shape = box_collider(nph_vec3(0.5F, 0.3F, 0.05F));
+    const NphEntity back =
+        spawn_under(&fx, frame, nph_dvec3(0.0, 0.3, 0.0), NO_RIGID_BODY, &back_shape);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    NphPhysicsWorld *pw = nph_engine_physics(e);
+    NTEST_EXPECT_EQ_UINT(body_count(&fx), 2U); // the floor and the chair
+    NTEST_EXPECT_EQ_UINT(body_of(&fx, seat).value, body_of(&fx, chair).value);
+    NTEST_EXPECT_EQ_UINT(body_of(&fx, leg).value, body_of(&fx, chair).value);
+    NTEST_EXPECT_EQ_UINT(body_of(&fx, back).value, body_of(&fx, chair).value);
+    NTEST_EXPECT_EQ_UINT(shape_count(&fx, chair), 3U);
+    const f32 rho = collider_density();
+    const f32 expected = rho * (0.1F + 4.0F / 3.0F * 3.14159265F * 0.001F + 0.06F);
+    const NphPhysicsMassData m = nph_physics_body_mass_data(pw, body_of(&fx, chair));
+    NTEST_EXPECT_NEAR_F32(m.mass, expected, 1e-4F * expected);
+    // The centre theirs together: the seat's at the origin, the leg's at
+    // (0.4, -0.5, 0.4), the back's at (0, 0.35, -0.45) through its frame.
+    const f32 m_leg = rho * 4.0F / 3.0F * 3.14159265F * 0.001F;
+    const f32 m_back = rho * 0.06F;
+    NTEST_EXPECT_NEAR_F32(m.center.x, 0.4F * m_leg / expected, 1e-5F);
+    NTEST_EXPECT_NEAR_F32(m.center.y, (-0.5F * m_leg + 0.35F * m_back) / expected, 1e-5F);
+    NTEST_EXPECT_NEAR_F32(m.center.z, (0.4F * m_leg - 0.45F * m_back) / expected, 1e-5F);
+    // Falling and tumbling, its parts are never made again: their frames are
+    // composed from their LocalTransforms, not from the moving body's.
+    NphPhysicsShape before[3];
+    NphPhysicsShape during[3];
+    NTEST_ASSERT_EQ_UINT(nph_physics_body_shapes(pw, body_of(&fx, chair), before, 3U), 3U);
+    for (u32 i = 0U; i < 48U; ++i) {
+        frames(&fx, 10U);
+        NTEST_ASSERT_EQ_UINT(nph_physics_body_shapes(pw, body_of(&fx, chair), during, 3U), 3U);
+        for (u32 k = 0U; k < 3U; ++k) {
+            NTEST_EXPECT_EQ_UINT(during[k].value, before[k].value);
+        }
+    }
+    // Resting on the leg and the seat's corner: below where it started, and
+    // its children where the body put them.
+    const f64 y = local_of(&fx, chair)->translation.y;
+    NTEST_EXPECT_TRUE(y < 1.0);
+    const NphWorldTransform *lw = NPH_WORLD_GET(
+        nph_engine_world(e), leg, NPH_COMPONENT_ID_WORLD_TRANSFORM, NphWorldTransform);
+    const NphDVec3 at = nph_physics_body_position(pw, body_of(&fx, chair));
+    const NphQuat q = nph_physics_body_rotation(pw, body_of(&fx, chair));
+    const NphVec3 off = nph_quat_rotate(q, nph_vec3(0.4F, -0.5F, 0.4F));
+    NTEST_EXPECT_NEAR_F64(lw->translation.x, at.x + (f64)off.x, 1e-4);
+    NTEST_EXPECT_NEAR_F64(lw->translation.y, at.y + (f64)off.y, 1e-4);
+    // Nothing of it went below the floor.
+    NTEST_EXPECT_TRUE(lw->translation.y > 0.05);
+    nph_engine_play_end(e);
+    finish(&fx);
+}
+
+// A part's new LocalTransform places it again in its body (its mass's centre
+// with it); so does an entity between them moving, and the body's entity
+// changing scale.
+NTEST(Physics, compounds_parts_moved_in_their_bodies_are_placed_again)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    const NphEntity body = spawn(&fx, nph_dvec3(0.0, 5.0, 0.0), NPH_RIGID_BODY_DYNAMIC, NULL);
+    rigid(&fx, body)->gravity_scale = 0.0F;
+    const NphCollider ball = sphere_collider(0.2F);
+    const NphEntity near_part =
+        spawn_under(&fx, body, nph_dvec3(1.0, 0.0, 0.0), NO_RIGID_BODY, &ball);
+    const NphEntity holder = spawn_under(&fx, body, nph_dvec3_zero(), NO_RIGID_BODY, NULL);
+    const NphEntity deep_part =
+        spawn_under(&fx, holder, nph_dvec3(-1.0, 0.0, 0.0), NO_RIGID_BODY, &ball);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    NphPhysicsWorld *pw = nph_engine_physics(e);
+    const NphPhysicsBody pb = body_of(&fx, body);
+    NTEST_EXPECT_EQ_UINT(body_of(&fx, deep_part).value, pb.value);
+    NTEST_EXPECT_EQ_UINT(shape_count(&fx, body), 2U);
+    // Two equal balls either side: the centre at the body's origin.
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(pw, pb).center.x, 0.0F, 1e-5F);
+    // The near part moved out to x = 3: the centre halfway, at 1.
+    local(&fx, near_part)->translation.x = 3.0;
+    frames(&fx, 1U);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(pw, pb).center.x, 1.0F, 1e-5F);
+    // The holder (no Collider, nothing the bridge watches) moved down 2 m:
+    // the deep part with it.
+    local(&fx, holder)->translation.y = -2.0;
+    frames(&fx, 2U);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(pw, pb).center.y, -1.0F, 1e-5F);
+    // The body's entity twice as large: the parts twice as far out, and
+    // eight times as heavy.
+    const f32 mass = nph_physics_body_mass_data(pw, pb).mass;
+    local(&fx, body)->scale = nph_vec3_splat(2.0F);
+    frames(&fx, 1U);
+    const NphPhysicsMassData m = nph_physics_body_mass_data(pw, body_of(&fx, body));
+    NTEST_EXPECT_NEAR_F32(m.center.x, 2.0F, 1e-4F);
+    NTEST_EXPECT_NEAR_F32(m.center.y, -2.0F, 1e-4F);
+    NTEST_EXPECT_NEAR_F32(m.mass, 8.0F * mass, 1e-4F * mass);
+    // Steps that change nothing make nothing again: the same shapes.
+    NphPhysicsShape before[2];
+    NphPhysicsShape after[2];
+    NTEST_ASSERT_EQ_UINT(nph_physics_body_shapes(pw, body_of(&fx, body), before, 2U), 2U);
+    frames(&fx, 10U);
+    NTEST_ASSERT_EQ_UINT(nph_physics_body_shapes(pw, body_of(&fx, body), after, 2U), 2U);
+    NTEST_EXPECT_EQ_UINT(after[0].value, before[0].value);
+    NTEST_EXPECT_EQ_UINT(after[1].value, before[1].value);
+    nph_engine_play_end(e);
+    finish(&fx);
+}
+
+// A body made again, for a new type, takes its parts' shapes in the same
+// step, and a RigidBody's mass holds over its parts however many there are.
+NTEST(Physics, compounds_a_body_made_again_keeps_its_parts)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    const NphEntity body = spawn(&fx, nph_dvec3(0.0, 5.0, 0.0), NPH_RIGID_BODY_DYNAMIC, NULL);
+    rigid(&fx, body)->gravity_scale = 0.0F;
+    rigid(&fx, body)->mass = 10.0F;
+    const NphCollider cube = box_collider(nph_vec3(0.25F, 0.25F, 0.25F));
+    (void)spawn_under(&fx, body, nph_dvec3(1.0, 0.0, 0.0), NO_RIGID_BODY, &cube);
+    const NphEntity second =
+        spawn_under(&fx, body, nph_dvec3(-1.0, 0.0, 0.0), NO_RIGID_BODY, &cube);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    NphPhysicsWorld *pw = nph_engine_physics(e);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(pw, body_of(&fx, body)).mass, 10.0F, 1e-5F);
+    const NphPhysicsBody was = body_of(&fx, body);
+    rigid(&fx, body)->type = NPH_RIGID_BODY_KINEMATIC;
+    frames(&fx, 1U);
+    NTEST_EXPECT_NE_UINT(body_of(&fx, body).value, was.value);
+    NTEST_EXPECT_EQ_UINT(shape_count(&fx, body), 2U);
+    NTEST_EXPECT_EQ_UINT(body_of(&fx, second).value, body_of(&fx, body).value);
+    rigid(&fx, body)->type = NPH_RIGID_BODY_DYNAMIC;
+    frames(&fx, 1U);
+    NTEST_EXPECT_EQ_UINT(shape_count(&fx, body), 2U);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(pw, body_of(&fx, body)).mass, 10.0F, 1e-5F);
+    // One part despawned: one shape, the mass still the RigidBody's.
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(nph_engine_world(e), second), NPH_RESULT_OK);
+    frames(&fx, 1U);
+    NTEST_EXPECT_EQ_UINT(shape_count(&fx, body), 1U);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(pw, body_of(&fx, body)).mass, 10.0F, 1e-5F);
+    nph_engine_play_end(e);
+    finish(&fx);
+}
+
+// A Collider becomes a part when a RigidBody comes above it and a static
+// body of its own again when that goes; a RigidBody below another keeps a
+// body of its own, with its own parts.
+NTEST(Physics, compounds_colliders_turn_parts_as_bodies_come_and_go)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    NphWorld *w = nph_engine_world(e);
+    const NphEntity top = spawn(&fx, nph_dvec3(0.0, 5.0, 0.0), NO_RIGID_BODY, NULL);
+    const NphCollider ball = sphere_collider(0.2F);
+    const NphEntity child = spawn_under(&fx, top, nph_dvec3(1.0, 0.0, 0.0), NO_RIGID_BODY, &ball);
+    const NphEntity inner =
+        spawn_under(&fx, top, nph_dvec3(-2.0, 0.0, 0.0), NPH_RIGID_BODY_KINEMATIC, NULL);
+    const NphEntity inner_part =
+        spawn_under(&fx, inner, nph_dvec3(0.0, 1.0, 0.0), NO_RIGID_BODY, &ball);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    NphPhysicsWorld *pw = nph_engine_physics(e);
+    // No body above the child: a static body of its own.
+    NTEST_ASSERT_FALSE(nph_physics_body_is_null(body_of(&fx, child)));
+    NTEST_EXPECT_EQ_INT((int)nph_physics_body_type(pw, body_of(&fx, child)),
+                        (int)NPH_PHYSICS_BODY_STATIC);
+    NTEST_EXPECT_EQ_UINT(body_of(&fx, inner_part).value, body_of(&fx, inner).value);
+    // A RigidBody on the top: the child is its part; the inner body keeps
+    // its own body and part.
+    NTEST_ASSERT_EQ_INT(nph_world_add(w, top, fx.ids.rigid_body, NULL), NPH_RESULT_OK);
+    rigid(&fx, top)->type = NPH_RIGID_BODY_KINEMATIC;
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_UINT(body_of(&fx, child).value, body_of(&fx, top).value);
+    NTEST_EXPECT_EQ_UINT(shape_count(&fx, top), 1U);
+    NTEST_EXPECT_NE_UINT(body_of(&fx, inner).value, body_of(&fx, top).value);
+    NTEST_EXPECT_EQ_UINT(body_of(&fx, inner_part).value, body_of(&fx, inner).value);
+    NTEST_EXPECT_EQ_UINT(body_count(&fx), 2U);
+    // The RigidBody gone: the child a static body of its own again.
+    NTEST_ASSERT_EQ_INT(nph_world_remove(w, top, fx.ids.rigid_body), NPH_RESULT_OK);
+    frames(&fx, 2U);
+    NTEST_ASSERT_FALSE(nph_physics_body_is_null(body_of(&fx, child)));
+    NTEST_EXPECT_TRUE(nph_physics_body_is_null(body_of(&fx, top)));
+    NTEST_EXPECT_EQ_INT((int)nph_physics_body_type(pw, body_of(&fx, child)),
+                        (int)NPH_PHYSICS_BODY_STATIC);
+    NTEST_EXPECT_NEAR_F64(nph_physics_body_position(pw, body_of(&fx, child)).x, 1.0, 1e-6);
+    NTEST_EXPECT_EQ_UINT(body_count(&fx), 2U);
     nph_engine_play_end(e);
     finish(&fx);
 }

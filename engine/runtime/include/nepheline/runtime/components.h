@@ -14,8 +14,8 @@
 //                 the first active one is the game's view
 //   Environment   the sky that lights the world (the first one found)
 //   RigidBody     a body the physics world moves while the world plays
-//   Collider      the shape of the entity's body, or a static body of its
-//                 own
+//   Collider      the shape of the entity's body, a part of the body above
+//                 it, or a static body of its own
 //   AudioSource   a sound the entity plays while the world plays
 //   AudioListener where spatial sounds are heard from
 //   WorldCell     a cell of a world partition: the mesh instances that name
@@ -210,7 +210,10 @@ NPH_COMPONENT_DECLARE(NphEnvironment);
 // a Collider a body in its physics world (physics/world.h), placed where
 // the entity is and shaped by its Collider: a Collider without a RigidBody
 // is a static body, and a RigidBody without a Collider a point of 1 kg
-// (or of `mass`). A dynamic body moves its entity: each step writes its
+// (or of `mass`). A Collider without a RigidBody below an entity with one
+// (no closer one between them) is a part of that entity's body instead: a
+// compound, each part placed where its entity is in the body and scaled by
+// its own world scale (ADR-0108). A dynamic body moves its entity: each step writes its
 // pose into the entity's LocalTransform and its velocities into its
 // RigidBody. The game moves bodies by writing their components:
 //   - new velocities, or any other RigidBody field, change the body;
@@ -218,7 +221,8 @@ NPH_COMPONENT_DECLARE(NphEnvironment);
 //     moves a kinematic one there over the step (pushing what it meets on
 //     the way), after which it stops unless moved again or given a
 //     velocity;
-//   - a new Collider makes the body's shape again (and its mass).
+//   - a new Collider makes the body's shape again (and its mass), and a
+//     part's new LocalTransform places it again in its body.
 // Bodies move in the world: a dynamic body's parent moving does not carry
 // it (its LocalTransform is written relative to wherever the parent is), a
 // static or kinematic one follows its parent.

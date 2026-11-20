@@ -554,6 +554,22 @@ after the game's systems and before the transform system:
 A Collider alone is a static body (the level); a RigidBody alone, a point
 of 1 kg (or of its `mass`).
 
+**Compounds** ([ADR-0108](adr/0108-physics-in-levels.md)). A Collider
+without a RigidBody below an entity with one, no closer one between them,
+is a part of that entity's body: a shape of it, not a body of its own. A
+chair's seat, back, and legs are children of the chair, each with its
+Collider, and the chair's RigidBody makes them one body, its mass theirs
+together (or the RigidBody's `mass`, spread as theirs is). A part sits
+where its entity is in the body, composed from the LocalTransforms between
+them (exact, so a moving body's parts never drift), and is scaled by its
+own world scale. A part's new LocalTransform or Collider makes its shape
+again and the body's mass with it; so does the body's entity changing
+scale, and an entity between them moving (those are checked every step,
+being nothing the bridge otherwise watches). A body made again, for a new
+type, takes its parts' shapes in the same step. A RigidBody below another
+is a body of its own, as before, and a Collider whose RigidBody goes, or
+that one comes above, is made again as what it now is.
+
 **The game moves bodies through their components.** A dynamic body's pose
 is written into its entity's LocalTransform and its velocities into its
 RigidBody after every step. The game:
@@ -856,6 +872,9 @@ instance):
 | `engine_frame_headless` | 4.05 µs | the empty frame above, now with the physics system: 3.04 µs without it (an empty step and the bridge's checks; its stage boundary measured free) |
 | `engine_frame_physics_1k_resting` | 4.44 µs | 1,000 crates asleep on a floor: a settled scene adds 0.4 µs |
 | `engine_frame_physics_1k_spinning` | 120.6 µs | 1,000 bodies turning in place, each moved, written back, and composed every step |
+| `engine_frame_physics_1k_compounds_spinning` | 248 µs | the same with two boxes a body, its children (ADR-0108): 2,000 parts; as bodies of their own following their parents (before compounds), 1.64 ms |
+| `engine_frame_physics_1k_compounds_deep_spinning` | 412 µs | each part under an entity of its own: 2,000 chains hashed every step (85 ns each; composed every step, 215 ns) |
+| `engine_frame_physics_10k_static_reparent` | 3.16 ms | 10,000 static Colliders in 100 groups, one given another parent every frame: a full pass, every Collider looked at again (asking for a body above each costs it 1 %) |
 | `physics_step_1k_spinning` | 68.1 µs | the same bodies stepped in a physics world of their own |
 | `scene_sync_10k_moving` | 79 ns | the scene renderer bringing a moved instance up to date |
 | `scene_interpolate_10k_moving` | 262 ns | the same, captured and drawn between its states |

@@ -73,6 +73,19 @@ What there is today:
      at the pose its entity has relative to the body's entity, scaled by its own world scale.
    - Moving such a child relative to its body remakes the child's shapes and the body's mass.
    - A `RigidBody` under another stays a body of its own, as today; joints link the two (decision 6).
+   - **Built:**
+     - A part's frame is composed from the LocalTransforms between it and its body, under the body's world scale.
+       These are exact inputs, so a moving body's parts read the same every step and are never made again.
+     - Each body's parts are a list through their entity slots, so a body made again for a new type takes its parts'
+       shapes in the same step.
+     - A part with entities between it and its body (whose changes the bridge does not watch) is checked every step
+       by a hash of what its frame is composed from.
+     - A Collider whose RigidBody comes or goes above it is made again as what it now is.
+   - **Measured** (Ryzen 7 5800X, Profile):
+     - 1000 spinning bodies of two parts cost a frame 0.25 ms, where the same children as static bodies following
+       their parents cost 1.64 ms.
+     - With an entity between each part and its body, 0.41 ms.
+     - A full pass over 10k grouped Colliders costs 1 % more, for the question of a body above each.
 4. **Colliders of collision assets.**
    - `Collider`'s `shape` gains `ASSET`: every shape of the collision asset `collision` (a GUID), at the collider's
      `center` and `rotation`.
