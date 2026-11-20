@@ -57,6 +57,7 @@ nph_add_test(physics
         tests/test_joint.c
         tests/test_mesh.c
         tests/test_physics_support.h
+        tests/test_combine.c
         tests/test_sensor.c
         tests/test_query.c
         tests/test_ragdoll.c

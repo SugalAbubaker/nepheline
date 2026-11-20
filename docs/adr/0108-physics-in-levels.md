@@ -61,8 +61,10 @@ What there is today:
      triggers hold a few shapes each.
 2. **Combine modes for friction and restitution.**
    - Each shape has a mode for each: the default, average, minimum, multiply or maximum.
-   - Of two shapes' modes the higher one wins, PhysX's rule, so ice (minimum) is slippery against anything.
-   - Two defaults combine as today: friction by the geometric mean, restitution by the larger.
+   - Of two shapes' modes the higher one wins, PhysX's rule (its order: average, minimum, multiply, maximum), so ice
+     (minimum) is slippery against every shape of the default and average modes.
+   - Two defaults combine as today: friction by the geometric mean, restitution by the larger. Pairs of default shapes
+     take that arithmetic after one test, so the contacts cost what they did (measured within the noise).
 3. **Compounds through the hierarchy.** The bridge's record of one entity, one body and one shape splits into bodies
    and shapes.
    - A body belongs to an entity with a `RigidBody`, or to a `Collider` entity with no `RigidBody` above it (a static

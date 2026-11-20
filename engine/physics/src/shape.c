@@ -26,6 +26,21 @@ bool nph_physics_filter_should_collide(NphPhysicsFilter a, NphPhysicsFilter b)
     return (a.category & b.mask) != 0U && (b.category & a.mask) != 0U;
 }
 
+f32 nph_physics_combine_friction(f32 a, NphPhysicsCombine mode_a, f32 b, NphPhysicsCombine mode_b)
+{
+    NPH_ASSERT((u32)mode_a < NPH_PHYSICS_COMBINE_COUNT && (u32)mode_b < NPH_PHYSICS_COMBINE_COUNT);
+    NPH_ASSERT(a >= 0.0F && b >= 0.0F);
+    return phys_combine(a, (u32)mode_a, b, (u32)mode_b, false);
+}
+
+f32 nph_physics_combine_restitution(f32 a, NphPhysicsCombine mode_a, f32 b,
+                                    NphPhysicsCombine mode_b)
+{
+    NPH_ASSERT((u32)mode_a < NPH_PHYSICS_COMBINE_COUNT && (u32)mode_b < NPH_PHYSICS_COMBINE_COUNT);
+    NPH_ASSERT(a >= 0.0F && a <= 1.0F && b >= 0.0F && b <= 1.0F);
+    return phys_combine(a, (u32)mode_a, b, (u32)mode_b, true);
+}
+
 NphPhysicsShapeDesc nph_physics_shape_desc_default(NphPhysicsGeometry geometry)
 {
     NphPhysicsShapeDesc d;
@@ -169,7 +184,9 @@ NphResult nph_physics_shape_create(NphPhysicsWorld *world, NphPhysicsBody body,
     if (desc == NULL || !nph_physics_geometry_is_valid(&desc->geometry) ||
         !pose_valid(desc->pose) || !(desc->density >= 0.0F) || !nph_f32_is_finite(desc->density) ||
         !(desc->friction >= 0.0F) || !nph_f32_is_finite(desc->friction) ||
-        !(desc->restitution >= 0.0F) || !(desc->restitution <= 1.0F)) {
+        !(desc->restitution >= 0.0F) || !(desc->restitution <= 1.0F) ||
+        (u32)desc->friction_combine >= NPH_PHYSICS_COMBINE_COUNT ||
+        (u32)desc->restitution_combine >= NPH_PHYSICS_COMBINE_COUNT) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     PhysBody *b = phys_body(world, body);
@@ -212,6 +229,8 @@ NphResult nph_physics_shape_create(NphPhysicsWorld *world, NphPhysicsBody body,
     s->density = desc->density;
     s->friction = desc->friction;
     s->restitution = desc->restitution;
+    s->friction_combine = (u8)desc->friction_combine;
+    s->restitution_combine = (u8)desc->restitution_combine;
     s->filter = desc->filter;
     s->flags = (desc->contact_events != 0 ? PHYS_SHAPE_CONTACT_EVENTS : 0U) |
                (desc->hit_events != 0 ? PHYS_SHAPE_HIT_EVENTS : 0U) |
@@ -331,6 +350,40 @@ f32 nph_physics_shape_restitution(const NphPhysicsWorld *world, NphPhysicsShape 
 {
     const PhysShape *s = checked(world, shape);
     return s != NULL ? s->restitution : 0.0F;
+}
+
+NphPhysicsCombine nph_physics_shape_friction_combine(const NphPhysicsWorld *world,
+                                                     NphPhysicsShape shape)
+{
+    const PhysShape *s = checked(world, shape);
+    return s != NULL ? (NphPhysicsCombine)s->friction_combine : NPH_PHYSICS_COMBINE_DEFAULT;
+}
+
+NphPhysicsCombine nph_physics_shape_restitution_combine(const NphPhysicsWorld *world,
+                                                        NphPhysicsShape shape)
+{
+    const PhysShape *s = checked(world, shape);
+    return s != NULL ? (NphPhysicsCombine)s->restitution_combine : NPH_PHYSICS_COMBINE_DEFAULT;
+}
+
+void nph_physics_shape_set_friction_combine(NphPhysicsWorld *world, NphPhysicsShape shape,
+                                            NphPhysicsCombine mode)
+{
+    NPH_ASSERT((u32)mode < NPH_PHYSICS_COMBINE_COUNT);
+    PhysShape *s = checked(world, shape);
+    if (s != NULL && (u32)mode < NPH_PHYSICS_COMBINE_COUNT) {
+        s->friction_combine = (u8)mode;
+    }
+}
+
+void nph_physics_shape_set_restitution_combine(NphPhysicsWorld *world, NphPhysicsShape shape,
+                                               NphPhysicsCombine mode)
+{
+    NPH_ASSERT((u32)mode < NPH_PHYSICS_COMBINE_COUNT);
+    PhysShape *s = checked(world, shape);
+    if (s != NULL && (u32)mode < NPH_PHYSICS_COMBINE_COUNT) {
+        s->restitution_combine = (u8)mode;
+    }
 }
 
 void nph_physics_shape_set_friction(NphPhysicsWorld *world, NphPhysicsShape shape, f32 friction)
