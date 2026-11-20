@@ -20,13 +20,14 @@ typedef struct Importer {
     u32 created_count;
     u32 created_cap;
     NphEntity *node_entities; // per node
-    u8 *node_used;            // per node: its entity already holds a MeshRenderer / Light / Camera
+    u8 *node_used; // per node: its entity holds a MeshRenderer / Light / Camera / Collider
 } Importer;
 
 enum {
     USED_MESH = 1U,
     USED_LIGHT = 2U,
     USED_CAMERA = 4U,
+    USED_COLLIDER = 8U,
 };
 
 static NphResult spawn(Importer *im, NphStr name, const NphLocalTransform *local, NphEntity parent,
@@ -190,6 +191,20 @@ static NphResult import(Importer *im, const NphSceneImportDesc *d, NphEntity *ou
         }
         NPH_TRY(nph_world_add(im->world, e, im->ids.mesh_renderer, &m));
     }
+    // Each node's collision (version 3; ADR-0107, ADR-0108): a Collider of its
+    // asset and no RigidBody, so the shapes are static; a designer makes a
+    // prop move by giving it a RigidBody. A further tile of a world has its
+    // own collision, so instances_only keeps them.
+    for (u32 i = 0; i < v->collision_count; ++i) {
+        const NphSceneCollision *src = &v->collisions[i];
+        NphCollider c;
+        nph_component_init_default(NphCollider_component(), &c);
+        c.shape = (u32)NPH_COLLIDER_ASSET;
+        c.collision = src->collision;
+        NphEntity e;
+        NPH_TRY(holder(im, src->node, USED_COLLIDER, "collider", &e));
+        NPH_TRY(nph_world_add(im->world, e, im->ids.collider, &c));
+    }
     if (d->instances_only != 0) {
         return NPH_RESULT_OK;
     }
@@ -252,10 +267,10 @@ NphResult nph_scene_import_cooked(const NphSceneImportDesc *desc, NphEntity *out
         const NphSceneHeader *h = view.header;
         im.view = &view;
         node_cap = h->node_count != 0U ? h->node_count : 1U;
-        // Every node, one extra per instance, light, and camera, a cell's, the
-        // root.
+        // Every node, one extra per instance, light, camera, and collision, a
+        // cell's, the root.
         im.created_cap = 1U + h->node_count + h->instance_count + h->light_count + h->camera_count +
-                         view.cell_count;
+                         view.collision_count + view.cell_count;
         im.created = NPH_ALLOC_ARRAY(a, NphEntity, im.created_cap);
         im.node_entities = NPH_ALLOC_ARRAY_ZEROED(a, NphEntity, node_cap);
         im.node_used = NPH_ALLOC_ARRAY_ZEROED(a, u8, node_cap);

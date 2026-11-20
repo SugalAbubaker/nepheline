@@ -51,6 +51,7 @@ nph_add_test(runtime
         tests/test_clock.c
         tests/test_console.c
         tests/test_engine.c
+        tests/test_physics_assets.c
         tests/test_physics_bridge.c
         tests/test_proxy_stream.c
         tests/test_scene_render.c

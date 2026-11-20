@@ -27,11 +27,23 @@
 // body's entity down to its own (exact inputs, so a moving body's parts read
 // the same every step). Each body's parts are a list through their entity
 // slots, which outlives the body's record when the body is made again.
+//
+// Collision assets (ADR-0108): an ASSET Collider's shapes are its asset's
+// hulls and meshes, the asset held while playing and its blocks, checked
+// once by the physics module's validators, used in place; at another scale
+// (or turned), a copy built from the moved points, shared by every shape of
+// the same block made the same way and freed with the last. Assets load
+// before the first step at play begin, and in the background during play,
+// a body waiting for its shapes.
+#include <nepheline/asset/collision.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hash.h>
+#include <nepheline/core/hashmap.h>
 #include <nepheline/core/profile.h>
 #include <nepheline/math/mat.h>
 #include <nepheline/physics/body.h>
+#include <nepheline/physics/hull.h>
+#include <nepheline/physics/mesh.h>
 #include <nepheline/physics/shape.h>
 #include <nepheline/render/debug_draw.h>
 #include <nepheline/scene/query.h>
@@ -42,6 +54,7 @@
 #include <string.h>
 
 #define NO_RECORD NPH_U32_MAX
+#define NO_COPY   NPH_U32_MAX
 
 typedef enum BodyFlags {
     BODY_RIGID = 1U << 0U, // made from a RigidBody (else a Collider's static body)
@@ -61,6 +74,9 @@ typedef enum BodyFlags {
     // A part with entities between it and its body, whose changes the bridge
     // does not see: its frame is checked every step.
     BODY_DEEP = 1U << 7U,
+    // Its ASSET Collider's asset is loading: its shapes come when it is
+    // ready (poll_awaiting), a dynamic body asleep until then.
+    BODY_AWAITING = 1U << 8U,
 } BodyFlags;
 
 typedef struct BodyRecord {
@@ -87,7 +103,45 @@ typedef struct BodyRecord {
     u32 part_next;
     NphPhysicsPose frame;
     u64 chain_hash; // a deep part's: what its frame was composed from (place_deep_parts)
+    // An ASSET Collider's shapes, one a shape of its asset (null where one
+    // was refused), each with the copy it uses (NO_COPY: the asset's block
+    // in place): `asset_count` of each, the bridge's allocations.
+    NphPhysicsShape *asset_shapes;
+    u32 *asset_copies;
+    u32 asset_count;
 } BodyRecord;
+
+typedef enum CollisionState {
+    COLLISION_LOADING = 0,
+    COLLISION_READY = 1,
+    COLLISION_FAILED = 2,
+} CollisionState;
+
+// A collision asset the world's Colliders name, held while playing: its
+// shapes' kinds and blocks, checked once when it became ready.
+typedef struct CollisionEntry {
+    NphGuid guid;
+    u32 state; // CollisionState
+    u32 shape_count;
+    NphAssetHandle asset;
+    u32 *kinds;                // per shape: NphCollisionShapeKind
+    NphCollisionBlock *blocks; // per shape
+} CollisionEntry;
+
+// A block's copy at a scale and turn: the asset, the shape, and the scale's
+// three and the rotation's four words as bits.
+typedef struct CopyKey {
+    NphGuid guid;
+    u32 shape;
+    u32 bits[7];
+} CopyKey;
+
+typedef struct ScaledCopy {
+    CopyKey key;
+    u32 kind; // NphCollisionShapeKind; 0: a free slot
+    u32 refs;
+    void *block; // NphPhysicsHull * or NphPhysicsMesh *, the bridge's allocation
+} ScaledCopy;
 
 struct PhysicsBridge {
     NphEngine *engine;
@@ -112,6 +166,18 @@ struct PhysicsBridge {
     b32 full_pass;             // look at every chunk at the next step
     u32 step;                  // steps since play began
     NphPhysicsStats stats;
+    // Collision assets (ADR-0108) while playing.
+    CollisionEntry *collisions;
+    u32 collision_count;
+    u32 collision_cap;
+    NphHashMap collision_index; // NphGuid -> u32
+    ScaledCopy *copies;
+    u32 copy_count; // slots used, free ones among them
+    u32 copy_cap;
+    NphHashMap copy_index; // CopyKey -> u32
+    NphArrayU32 copy_free; // free slots
+    NphArrayU32 awaiting;  // slots of the records waiting for an asset (BODY_AWAITING)
+    b32 load_sync;         // play begin: assets load before the first step
 };
 
 // ---------------------------------------------------------------------------
@@ -151,6 +217,8 @@ static void remove_slot(NphArrayU32 *list, u32 slot)
 }
 
 static void reweigh(PhysicsBridge *b, NphEntity owner);
+static void drop_shapes(PhysicsBridge *b, BodyRecord *r, bool destroy);
+static void make_shapes(PhysicsBridge *b, BodyRecord *r);
 
 // Takes a part out of its body's list.
 static void unlink_part(PhysicsBridge *b, const BodyRecord *part)
@@ -181,18 +249,17 @@ static void destroy_record(PhysicsBridge *b, u32 index, bool keep_parts)
         if ((r->flags & BODY_DEEP) != 0U) {
             remove_slot(&b->deep_parts, slot);
         }
-        if (b->physics != NULL && !nph_physics_shape_is_null(r->shape)) {
-            nph_physics_shape_destroy(b->physics, r->shape);
-            owner = r->owner;
-        }
+        drop_shapes(b, r, !nph_physics_body_is_null(r->body));
+        owner = r->owner;
     } else {
         if (b->physics != NULL && !nph_physics_body_is_null(r->body)) {
             nph_physics_body_destroy(b->physics, r->body); // its shapes, its parts' too
         }
+        drop_shapes(b, r, false);
         for (u32 s = b->slot_parts[slot]; s != NO_RECORD;) {
             BodyRecord *p = &b->records[b->slot_record[s]];
+            drop_shapes(b, p, false);
             p->body = NPH_PHYSICS_BODY_NULL;
-            p->shape = NPH_PHYSICS_SHAPE_NULL;
             s = p->part_next;
         }
         if ((r->flags & BODY_FOLLOWS) != 0U) {
@@ -231,6 +298,7 @@ static void destroy_all(PhysicsBridge *b)
     }
     NPH_ARRAY_CLEAR(&b->follows);
     NPH_ARRAY_CLEAR(&b->deep_parts);
+    NPH_ARRAY_CLEAR(&b->awaiting);
     NPH_ARRAY_CLEAR(&b->targeted);
     NPH_ARRAY_CLEAR(&b->last_targeted);
 }
@@ -293,7 +361,7 @@ static NphResult size_slots(PhysicsBridge *b)
 typedef struct EntityPose {
     NphDVec3 position;
     NphQuat rotation;
-    NphVec3 scale; // absolute, per local axis
+    NphVec3 scale; // per local axis, negative where the entity mirrors
     bool parented; // under a parent with a world transform
 } EntityPose;
 
@@ -345,7 +413,8 @@ static bool collider_equal(const NphCollider *a, const NphCollider *b)
            vec3_bits_equal(a->center, b->center) && quat_bits_equal(a->rotation, b->rotation) &&
            f32_bits_equal(a->density, b->density) && f32_bits_equal(a->friction, b->friction) &&
            f32_bits_equal(a->restitution, b->restitution) && a->category == b->category &&
-           a->mask == b->mask && a->group == b->group && a->hit_events == b->hit_events;
+           a->mask == b->mask && a->group == b->group && a->hit_events == b->hit_events &&
+           nph_guid_equals(a->collision, b->collision);
 }
 
 // A rotation a body takes (unit within the physics module's 1e-3): a
@@ -354,6 +423,16 @@ static bool collider_equal(const NphCollider *a, const NphCollider *b)
 static NphQuat body_rotation(NphQuat q)
 {
     return nph_quat_is_normalized(q, 1e-6F) ? q : nph_quat_normalize_or_identity(q);
+}
+
+// A frame's scale along each of its axes: their lengths, Z's negative where
+// the axes mirror (axes_rotation takes out the rotation of the unmirrored
+// twin, and this mirror puts it back).
+static NphVec3 axes_scale(NphVec3 x, NphVec3 y, NphVec3 z)
+{
+    const f32 sz = nph_vec3_length(z);
+    return nph_vec3(nph_vec3_length(x), nph_vec3_length(y),
+                    nph_vec3_dot(nph_vec3_cross(x, y), z) < 0.0F ? -sz : sz);
 }
 
 // The rotation of a frame's axes with their scale and shear taken out
@@ -392,15 +471,14 @@ static EntityPose entity_pose_under(const PhysicsBridge *b, NphEntity parent,
     if (pw == NULL) {
         p.position = local->translation;
         p.rotation = body_rotation(local->rotation);
-        p.scale = nph_vec3_abs(local->scale);
+        p.scale = local->scale; // its signs the mirror the rotation leaves out
         p.parented = false;
         return p;
     }
     const NphWorldTransform w = nph_world_transform_compose(pw, local);
     p.position = w.translation;
     p.rotation = axes_rotation(w.x_axis, w.y_axis);
-    p.scale =
-        nph_vec3(nph_vec3_length(w.x_axis), nph_vec3_length(w.y_axis), nph_vec3_length(w.z_axis));
+    p.scale = axes_scale(w.x_axis, w.y_axis, w.z_axis);
     p.parented = true;
     return p;
 }
@@ -510,6 +588,17 @@ static NphPhysicsFilter collider_filter(const NphCollider *c)
     return f;
 }
 
+// A Collider's material, filter, and events on a shape of the record's.
+static void apply_shape_desc(const BodyRecord *r, const NphCollider *c, NphPhysicsShapeDesc *sd)
+{
+    sd->density = nonneg(c->density);
+    sd->friction = nonneg(c->friction);
+    sd->restitution = nph_f32_clamp(finite_or(c->restitution, 0.0F), 0.0F, 1.0F);
+    sd->filter = collider_filter(c);
+    sd->hit_events = c->hit_events != 0 ? 1 : 0;
+    sd->user_data = r->entity.value;
+}
+
 // The record's shape from its Collider at its scale (none when the
 // Collider names none that is valid: logged once, until it changes).
 static void make_shape(PhysicsBridge *b, BodyRecord *r, const NphCollider *c)
@@ -532,13 +621,8 @@ static void make_shape(PhysicsBridge *b, BodyRecord *r, const NphCollider *c)
         pose.rotation = nph_quat_normalize(nph_quat_mul(r->frame.rotation, pose.rotation));
     }
     NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(g);
+    apply_shape_desc(r, c, &sd);
     sd.pose = pose;
-    sd.density = nonneg(c->density);
-    sd.friction = nonneg(c->friction);
-    sd.restitution = nph_f32_clamp(finite_or(c->restitution, 0.0F), 0.0F, 1.0F);
-    sd.filter = collider_filter(c);
-    sd.hit_events = c->hit_events != 0 ? 1 : 0;
-    sd.user_data = r->entity.value;
     const NphResult res = nph_physics_shape_create(b->physics, r->body, &sd, &r->shape);
     if (res != NPH_RESULT_OK) {
         NPH_LOG_WARN(&NPH_LOG_RUNTIME, "entity 0x%08x: its Collider's shape: %s", r->entity.value,
@@ -619,8 +703,7 @@ static bool part_frame(const PhysicsBridge *b, const BodyRecord *r, const NphLoc
     m = nph_world_transform_compose(&m, local);
     out_frame->position = nph_dvec3_to_vec3(m.translation);
     out_frame->rotation = axes_rotation(m.x_axis, m.y_axis);
-    *out_scale =
-        nph_vec3(nph_vec3_length(m.x_axis), nph_vec3_length(m.y_axis), nph_vec3_length(m.z_axis));
+    *out_scale = axes_scale(m.x_axis, m.y_axis, m.z_axis);
     *out_between = n;
     return true;
 }
@@ -689,12 +772,9 @@ static bool place_part(PhysicsBridge *b, BodyRecord *r, bool force)
     }
     r->frame = frame;
     r->scale = scale;
-    if (b->physics != NULL && !nph_physics_shape_is_null(r->shape)) {
-        nph_physics_shape_destroy(b->physics, r->shape);
-    }
-    r->shape = NPH_PHYSICS_SHAPE_NULL;
+    drop_shapes(b, r, true);
     if (!nph_physics_body_is_null(r->body)) {
-        make_shape(b, r, &r->collider);
+        make_shapes(b, r);
     }
     return true;
 }
@@ -742,8 +822,8 @@ static void attach_parts(PhysicsBridge *b, const BodyRecord *owner)
 {
     for (u32 s = b->slot_parts[owner->slot]; s != NO_RECORD;) {
         BodyRecord *p = &b->records[b->slot_record[s]];
+        drop_shapes(b, p, false); // gone with the body before this one
         p->body = owner->body;
-        p->shape = NPH_PHYSICS_SHAPE_NULL;
         NPH_IGNORE_RESULT(place_part(b, p, true));
         s = p->part_next;
     }
@@ -784,6 +864,511 @@ static void place_deep_parts(PhysicsBridge *b)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Collision assets (ADR-0108)
+// ---------------------------------------------------------------------------
+
+static void log_collision(NphGuid guid, const char *what, NphResult r)
+{
+    char text[NPH_GUID_STRING_LEN + 1U];
+    nph_guid_to_string(guid, text);
+    NPH_LOG_WARN(&NPH_LOG_RUNTIME, "collision asset %s %s: %s", text, what, nph_result_string(r));
+}
+
+static void free_collision_arrays(PhysicsBridge *b, CollisionEntry *c)
+{
+    if (c->kinds != NULL) {
+        NPH_FREE_ARRAY(b->alloc, u32, c->kinds, c->shape_count);
+        NPH_FREE_ARRAY(b->alloc, NphCollisionBlock, c->blocks, c->shape_count);
+    }
+    c->kinds = NULL;
+    c->blocks = NULL;
+}
+
+// A ready asset's shapes: its view, and each block checked by the physics
+// module's validators, once.
+static NphResult read_collision(PhysicsBridge *b, CollisionEntry *c, const NphAsset *asset)
+{
+    NphCollisionView v;
+    NPH_TRY(nph_collision_view(asset, &v));
+    const u32 n = v.header->shape_count;
+    u32 *kinds = NPH_ALLOC_ARRAY(b->alloc, u32, n);
+    NphCollisionBlock *blocks = NPH_ALLOC_ARRAY(b->alloc, NphCollisionBlock, n);
+    if (kinds == NULL || blocks == NULL) {
+        if (kinds != NULL) {
+            NPH_FREE_ARRAY(b->alloc, u32, kinds, n);
+        }
+        if (blocks != NULL) {
+            NPH_FREE_ARRAY(b->alloc, NphCollisionBlock, blocks, n);
+        }
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    c->shape_count = n;
+    c->kinds = kinds;
+    c->blocks = blocks;
+    for (u32 i = 0U; i < n; ++i) {
+        kinds[i] = v.shapes[i].kind;
+        blocks[i] = nph_collision_shape_block(asset, &v, i);
+        const bool valid = kinds[i] == (u32)NPH_COLLISION_SHAPE_HULL
+                               ? nph_physics_hull_validate(blocks[i].data, blocks[i].size, 0.0F)
+                               : nph_physics_mesh_validate(blocks[i].data, blocks[i].size);
+        if (!valid) {
+            free_collision_arrays(b, c);
+            return NPH_RESULT_CORRUPT;
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
+// A collision entry loading: ready or failed when its asset is (held when
+// ready: the shapes use its blocks in place).
+static void poll_collision(PhysicsBridge *b, u32 index)
+{
+    CollisionEntry *c = &b->collisions[index];
+    if (c->state != (u32)COLLISION_LOADING) {
+        return;
+    }
+    NphAssetLoader *loader = nph_engine_loader(b->engine);
+    const NphAssetState st = nph_asset_state(loader, c->asset);
+    if (st == NPH_ASSET_STATE_LOADING) {
+        return;
+    }
+    NphResult r = nph_asset_error(loader, c->asset);
+    if (st == NPH_ASSET_STATE_READY) {
+        r = read_collision(b, c, nph_asset_get(loader, c->asset));
+    } else if (r == NPH_RESULT_OK) {
+        r = NPH_RESULT_NOT_FOUND;
+    }
+    c->state = r == NPH_RESULT_OK ? (u32)COLLISION_READY : (u32)COLLISION_FAILED;
+    if (r != NPH_RESULT_OK) {
+        nph_asset_release(loader, c->asset);
+        c->asset = NPH_ASSET_HANDLE_NULL;
+        log_collision(c->guid, "makes no shapes", r);
+    }
+}
+
+static NphResult grow_collisions(PhysicsBridge *b)
+{
+    if (b->collision_count < b->collision_cap) {
+        return NPH_RESULT_OK;
+    }
+    const u32 cap = nph_max_u32(16U, 2U * b->collision_cap);
+    CollisionEntry *grown = NPH_ALLOC_ARRAY(b->alloc, CollisionEntry, cap);
+    if (grown == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    if (b->collisions != NULL) {
+        memcpy(grown, b->collisions, (u64)b->collision_count * sizeof *grown);
+        NPH_FREE_ARRAY(b->alloc, CollisionEntry, b->collisions, b->collision_cap);
+    }
+    b->collisions = grown;
+    b->collision_cap = cap;
+    return NPH_RESULT_OK;
+}
+
+// The entry of `guid`, its load started when it is new: before returning at
+// play begin (load_sync), in the background otherwise. NO_RECORD for the
+// null GUID or when the table cannot grow.
+static u32 collision_of(PhysicsBridge *b, NphGuid guid)
+{
+    if (nph_guid_is_null(guid)) {
+        return NO_RECORD;
+    }
+    const u32 *known = NPH_HASHMAP_FIND(&b->collision_index, u32, &guid);
+    if (known != NULL) {
+        poll_collision(b, *known);
+        return *known;
+    }
+    if (grow_collisions(b) != NPH_RESULT_OK) {
+        return NO_RECORD;
+    }
+    const u32 index = b->collision_count;
+    if (nph_hashmap_insert(&b->collision_index, &guid, &index) != NPH_RESULT_OK) {
+        return NO_RECORD;
+    }
+    CollisionEntry *c = &b->collisions[index];
+    memset(c, 0, sizeof *c);
+    c->guid = guid;
+    b->collision_count += 1U;
+    NphAssetLoader *loader = nph_engine_loader(b->engine);
+    const NphResult r = b->load_sync != 0
+                            ? nph_asset_load_guid(loader, guid, &c->asset)
+                            : nph_asset_load_guid_async(loader, guid, NULL, &c->asset);
+    if (r != NPH_RESULT_OK) {
+        c->state = (u32)COLLISION_FAILED;
+        c->asset = NPH_ASSET_HANDLE_NULL;
+        log_collision(guid, "cannot be loaded", r);
+        return index;
+    }
+    c->state = (u32)COLLISION_LOADING;
+    poll_collision(b, index); // finished already (at play begin, or loaded before)
+    return index;
+}
+
+static void release_collisions(PhysicsBridge *b)
+{
+    NphAssetLoader *loader = nph_engine_loader(b->engine);
+    for (u32 i = 0U; i < b->collision_count; ++i) {
+        CollisionEntry *c = &b->collisions[i];
+        if (!nph_asset_handle_is_null(c->asset)) {
+            nph_asset_release(loader, c->asset);
+        }
+        free_collision_arrays(b, c);
+    }
+    b->collision_count = 0U;
+    nph_hashmap_clear(&b->collision_index);
+}
+
+static void free_copy_block(PhysicsBridge *b, ScaledCopy *c)
+{
+    if (c->kind == (u32)NPH_COLLISION_SHAPE_HULL) {
+        nph_physics_hull_free((NphPhysicsHull *)c->block, b->alloc);
+    } else {
+        nph_physics_mesh_free((NphPhysicsMesh *)c->block, b->alloc);
+    }
+    c->block = NULL;
+    c->kind = 0U;
+}
+
+static void release_copy(PhysicsBridge *b, u32 index)
+{
+    ScaledCopy *c = &b->copies[index];
+    NPH_ASSERT(c->kind != 0U && c->refs > 0U);
+    c->refs -= 1U;
+    if (c->refs > 0U) {
+        return;
+    }
+    NPH_IGNORE_RESULT(nph_hashmap_remove(&b->copy_index, &c->key));
+    free_copy_block(b, c);
+    // Out of memory keeps the slot from reuse: it stays free, unused.
+    NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&b->copy_free, index));
+}
+
+// A block made again with every point moved by `m` (the entity's scale
+// after the Collider's turn): a hull from its moved vertices, a mesh from
+// its moved vertices and its triangles, wound again where `m` mirrors.
+static NphResult build_copy(PhysicsBridge *b, u32 kind, const void *block, NphMat3 m, void **out)
+{
+    *out = NULL;
+    if (kind == (u32)NPH_COLLISION_SHAPE_HULL) {
+        const NphPhysicsHull *h = (const NphPhysicsHull *)block;
+        NphVec3 points[NPH_PHYSICS_HULL_MAX_VERTICES];
+        const NphVec3 *v = nph_physics_hull_vertices(h);
+        for (u32 i = 0U; i < h->vertex_count; ++i) {
+            points[i] = nph_mat3_mul_vec3(m, v[i]);
+        }
+        NphPhysicsHullDesc d;
+        memset(&d, 0, sizeof d);
+        d.points = points;
+        d.point_count = h->vertex_count;
+        d.max_vertices = NPH_PHYSICS_HULL_MAX_VERTICES;
+        NphPhysicsHull *built = NULL;
+        NPH_TRY(nph_physics_hull_build(&d, b->alloc, &built));
+        *out = built;
+        return NPH_RESULT_OK;
+    }
+    const NphPhysicsMesh *src = (const NphPhysicsMesh *)block;
+    const u64 vbytes = (u64)src->vertex_count * sizeof(NphVec3);
+    const u64 tbytes = (u64)src->triangle_count * 3U * sizeof(u32);
+    NphVec3 *vertices = (NphVec3 *)NPH_ALLOC(b->alloc, vbytes, 16U);
+    u32 *indices = (u32 *)NPH_ALLOC(b->alloc, tbytes, 16U);
+    NphResult r = vertices != NULL && indices != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    if (r == NPH_RESULT_OK) {
+        const NphVec3 *v = nph_physics_mesh_vertices(src);
+        for (u32 i = 0U; i < src->vertex_count; ++i) {
+            vertices[i] = nph_mat3_mul_vec3(m, v[i]);
+        }
+        const bool mirrored = nph_mat3_determinant(m) < 0.0F;
+        const u32 *t = nph_physics_mesh_triangles(src);
+        for (u32 i = 0U; i < src->triangle_count; ++i) {
+            const u32 k = 3U * i;
+            indices[k] = t[k];
+            indices[k + 1U] = t[k + (mirrored ? 2U : 1U)];
+            indices[k + 2U] = t[k + (mirrored ? 1U : 2U)];
+        }
+        NphPhysicsMeshDesc d;
+        memset(&d, 0, sizeof d);
+        d.vertices = vertices;
+        d.vertex_count = src->vertex_count;
+        d.indices = indices;
+        d.triangle_count = src->triangle_count;
+        d.weld_tolerance = -1.0F; // welded when it was cooked: exact copies only
+        d.two_sided = (src->flags & (u32)NPH_PHYSICS_MESH_TWO_SIDED) != 0U ? 1 : 0;
+        NphPhysicsMesh *built = NULL;
+        r = nph_physics_mesh_build(&d, b->alloc, &built);
+        *out = built;
+    }
+    if (vertices != NULL) {
+        NPH_FREE(b->alloc, vertices, vbytes, 16U);
+    }
+    if (indices != NULL) {
+        NPH_FREE(b->alloc, indices, tbytes, 16U);
+    }
+    return r;
+}
+
+static NphResult take_copy_slot(PhysicsBridge *b, u32 *out)
+{
+    if (b->copy_free.len > 0U) {
+        *out = NPH_ARRAY_POP(&b->copy_free);
+        return NPH_RESULT_OK;
+    }
+    if (b->copy_count == b->copy_cap) {
+        const u32 cap = nph_max_u32(16U, 2U * b->copy_cap);
+        ScaledCopy *grown = NPH_ALLOC_ARRAY(b->alloc, ScaledCopy, cap);
+        if (grown == NULL) {
+            return NPH_RESULT_OUT_OF_MEMORY;
+        }
+        if (b->copies != NULL) {
+            memcpy(grown, b->copies, (u64)b->copy_count * sizeof *grown);
+            NPH_FREE_ARRAY(b->alloc, ScaledCopy, b->copies, b->copy_cap);
+        }
+        b->copies = grown;
+        b->copy_cap = cap;
+    }
+    *out = b->copy_count++;
+    return NPH_RESULT_OK;
+}
+
+// The copy of `entry`'s shape `shape` at scale `scale` after turn `turn`,
+// shared (a reference taken) or built; NO_COPY when it cannot be (logged).
+static u32 copy_of(PhysicsBridge *b, const CollisionEntry *entry, u32 shape, NphVec3 scale,
+                   NphQuat turn)
+{
+    CopyKey key;
+    memset(&key, 0, sizeof key);
+    key.guid = entry->guid;
+    key.shape = shape;
+    key.bits[0] = nph_f32_to_bits(scale.x);
+    key.bits[1] = nph_f32_to_bits(scale.y);
+    key.bits[2] = nph_f32_to_bits(scale.z);
+    key.bits[3] = nph_f32_to_bits(turn.x);
+    key.bits[4] = nph_f32_to_bits(turn.y);
+    key.bits[5] = nph_f32_to_bits(turn.z);
+    key.bits[6] = nph_f32_to_bits(turn.w);
+    const u32 *known = NPH_HASHMAP_FIND(&b->copy_index, u32, &key);
+    if (known != NULL) {
+        b->copies[*known].refs += 1U;
+        return *known;
+    }
+    const NphMat3 m =
+        nph_mat3_mul(nph_mat3_from_diagonal(scale), nph_mat3_from_quat(nph_quat_normalize(turn)));
+    void *block = NULL;
+    NphResult r = build_copy(b, entry->kinds[shape], entry->blocks[shape].data, m, &block);
+    u32 index = NO_COPY;
+    if (r == NPH_RESULT_OK) {
+        r = take_copy_slot(b, &index);
+    }
+    if (r == NPH_RESULT_OK) {
+        r = nph_hashmap_insert(&b->copy_index, &key, &index);
+        if (r != NPH_RESULT_OK) {
+            NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&b->copy_free, index));
+        }
+    }
+    if (r != NPH_RESULT_OK) {
+        if (block != NULL) {
+            ScaledCopy doomed = {key, entry->kinds[shape], 0U, block};
+            free_copy_block(b, &doomed);
+        }
+        log_collision(entry->guid, "cannot be scaled", r);
+        return NO_COPY;
+    }
+    ScaledCopy *c = &b->copies[index];
+    c->key = key;
+    c->kind = entry->kinds[shape];
+    c->refs = 1U;
+    c->block = block;
+    return index;
+}
+
+static void free_copies(PhysicsBridge *b)
+{
+    for (u32 i = 0U; i < b->copy_count; ++i) {
+        if (b->copies[i].kind != 0U) {
+            free_copy_block(b, &b->copies[i]); // none left in a record's hands at play end
+        }
+    }
+    b->copy_count = 0U;
+    nph_hashmap_clear(&b->copy_index);
+    NPH_ARRAY_CLEAR(&b->copy_free);
+}
+
+// Waits for its asset: a dynamic body asleep until its shapes come.
+static void await_asset(PhysicsBridge *b, BodyRecord *r)
+{
+    if ((r->flags & BODY_AWAITING) == 0U &&
+        NPH_ARRAY_PUSH(&b->awaiting, r->slot) == NPH_RESULT_OK) {
+        r->flags |= BODY_AWAITING;
+    }
+    if (!nph_physics_body_is_null(r->body) &&
+        nph_physics_body_type(b->physics, r->body) == NPH_PHYSICS_BODY_DYNAMIC) {
+        nph_physics_body_set_awake(b->physics, r->body, false);
+    }
+}
+
+// An ASSET Collider's shapes on the record's body: every shape of its
+// asset, a mesh refused on a dynamic body, in place at a scale of one and
+// otherwise from a copy, at the Collider's place (in a part's frame).
+static void make_asset_shapes(PhysicsBridge *b, BodyRecord *r)
+{
+    r->flags &= ~(u32)BODY_UNSHAPED;
+    const u32 index = collision_of(b, r->collider.collision);
+    if (index == NO_RECORD || b->collisions[index].state == (u32)COLLISION_FAILED) {
+        r->flags |= BODY_UNSHAPED;
+        return;
+    }
+    if (b->collisions[index].state == (u32)COLLISION_LOADING) {
+        await_asset(b, r);
+        return;
+    }
+    const CollisionEntry *entry = &b->collisions[index];
+    const u32 n = entry->shape_count;
+    NphPhysicsShape *shapes = NPH_ALLOC_ARRAY(b->alloc, NphPhysicsShape, n);
+    u32 *copies = NPH_ALLOC_ARRAY(b->alloc, u32, n);
+    if (shapes == NULL || copies == NULL) {
+        if (shapes != NULL) {
+            NPH_FREE_ARRAY(b->alloc, NphPhysicsShape, shapes, n);
+        }
+        if (copies != NULL) {
+            NPH_FREE_ARRAY(b->alloc, u32, copies, n);
+        }
+        NPH_LOG_WARN(&NPH_LOG_RUNTIME, "entity 0x%08x: no room for its Collider's shapes",
+                     r->entity.value);
+        r->flags |= BODY_UNSHAPED;
+        return;
+    }
+    r->asset_shapes = shapes;
+    r->asset_copies = copies;
+    r->asset_count = n;
+    const NphCollider *c = &r->collider;
+    const NphVec3 scale = r->scale;
+    // The Collider's place in the entity's frame, its centre mirrored with
+    // it (components.c); its turn applies before the scale.
+    NphPhysicsGeometry unused;
+    NphPhysicsPose place;
+    NphCollider as_box = *c;
+    as_box.shape = NPH_COLLIDER_BOX;
+    as_box.half_extents = nph_vec3_one();
+    NPH_IGNORE_RESULT(nph_collider_shape(&as_box, scale, &unused, &place));
+    const bool in_place = nph_f32_to_bits(scale.x) == nph_f32_to_bits(1.0F) &&
+                          nph_f32_to_bits(scale.y) == nph_f32_to_bits(1.0F) &&
+                          nph_f32_to_bits(scale.z) == nph_f32_to_bits(1.0F);
+    const bool dynamic = nph_physics_body_type(b->physics, r->body) == NPH_PHYSICS_BODY_DYNAMIC;
+    bool refused = false;
+    for (u32 i = 0U; i < n; ++i) {
+        r->asset_shapes[i] = NPH_PHYSICS_SHAPE_NULL;
+        r->asset_copies[i] = NO_COPY;
+        const u32 kind = entry->kinds[i];
+        if (kind == (u32)NPH_COLLISION_SHAPE_MESH && dynamic) {
+            refused = true; // a mesh bounds no volume to move a body with
+            continue;
+        }
+        NphPhysicsPose pose = place;
+        const void *block = entry->blocks[i].data;
+        if (!in_place) {
+            r->asset_copies[i] = copy_of(b, entry, i, scale, place.rotation);
+            if (r->asset_copies[i] == NO_COPY) {
+                continue;
+            }
+            block = b->copies[r->asset_copies[i]].block;
+            pose.rotation = nph_quat_identity(); // the copy is turned already
+        }
+        const NphPhysicsGeometry g = kind == (u32)NPH_COLLISION_SHAPE_HULL
+                                         ? nph_physics_geometry_hull((const NphPhysicsHull *)block)
+                                         : nph_physics_geometry_mesh((const NphPhysicsMesh *)block);
+        if ((r->flags & BODY_PART) != 0U) {
+            pose.position =
+                nph_vec3_add(r->frame.position, nph_quat_rotate(r->frame.rotation, pose.position));
+            pose.rotation = nph_quat_normalize(nph_quat_mul(r->frame.rotation, pose.rotation));
+        }
+        NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(g);
+        apply_shape_desc(r, c, &sd);
+        sd.pose = pose;
+        const NphResult res =
+            nph_physics_shape_create(b->physics, r->body, &sd, &r->asset_shapes[i]);
+        if (res != NPH_RESULT_OK) {
+            NPH_LOG_WARN(&NPH_LOG_RUNTIME, "entity 0x%08x: its Collider's shape %u: %s",
+                         r->entity.value, i, nph_result_string(res));
+            r->asset_shapes[i] = NPH_PHYSICS_SHAPE_NULL;
+            if (r->asset_copies[i] != NO_COPY) {
+                release_copy(b, r->asset_copies[i]);
+                r->asset_copies[i] = NO_COPY;
+            }
+        }
+    }
+    if (refused) {
+        NPH_LOG_WARN(&NPH_LOG_RUNTIME,
+                     "entity 0x%08x: its collision's meshes are left out of a dynamic body "
+                     "(meshes collide with what moves: use hulls)",
+                     r->entity.value);
+    }
+}
+
+// Destroys a record's shapes (`destroy`; a destroyed body took them with
+// it) and lets go of what they used: their copies, the arrays of an ASSET
+// Collider's, a wait for an asset.
+static void drop_shapes(PhysicsBridge *b, BodyRecord *r, bool destroy)
+{
+    if (destroy && b->physics != NULL) {
+        if (!nph_physics_shape_is_null(r->shape)) {
+            nph_physics_shape_destroy(b->physics, r->shape);
+        }
+        for (u32 i = 0U; i < r->asset_count; ++i) {
+            if (!nph_physics_shape_is_null(r->asset_shapes[i])) {
+                nph_physics_shape_destroy(b->physics, r->asset_shapes[i]);
+            }
+        }
+    }
+    r->shape = NPH_PHYSICS_SHAPE_NULL;
+    if (r->asset_count > 0U) {
+        for (u32 i = 0U; i < r->asset_count; ++i) {
+            if (r->asset_copies[i] != NO_COPY) {
+                release_copy(b, r->asset_copies[i]);
+            }
+        }
+        NPH_FREE_ARRAY(b->alloc, NphPhysicsShape, r->asset_shapes, r->asset_count);
+        NPH_FREE_ARRAY(b->alloc, u32, r->asset_copies, r->asset_count);
+    }
+    r->asset_shapes = NULL;
+    r->asset_copies = NULL;
+    r->asset_count = 0U;
+    if ((r->flags & BODY_AWAITING) != 0U) {
+        remove_slot(&b->awaiting, r->slot);
+        r->flags &= ~(u32)BODY_AWAITING;
+    }
+}
+
+// A record's shapes from its Collider, on its body.
+static void make_shapes(PhysicsBridge *b, BodyRecord *r)
+{
+    if (r->collider.shape == (u32)NPH_COLLIDER_ASSET) {
+        make_asset_shapes(b, r);
+    } else {
+        make_shape(b, r, &r->collider);
+    }
+}
+
+// The records whose assets were loading: shapes for those now ready (the
+// body woken, its explicit mass over them), none for those that failed.
+static void poll_awaiting(PhysicsBridge *b)
+{
+    for (u32 i = b->awaiting.len; i-- > 0U;) {
+        BodyRecord *r = &b->records[b->slot_record[b->awaiting.data[i]]];
+        const u32 index = collision_of(b, r->collider.collision);
+        if (index != NO_RECORD && b->collisions[index].state == (u32)COLLISION_LOADING) {
+            continue;
+        }
+        remove_slot(&b->awaiting, r->slot);
+        r->flags &= ~(u32)BODY_AWAITING;
+        if (nph_physics_body_is_null(r->body)) {
+            continue;
+        }
+        make_asset_shapes(b, r);
+        nph_physics_body_set_awake(b->physics, r->body, true);
+        reweigh(b, (r->flags & BODY_PART) != 0U ? r->owner : r->entity);
+    }
+}
+
 // Makes the record's body (and shape) from its cached components and pose.
 static NphResult make_body(PhysicsBridge *b, BodyRecord *r)
 {
@@ -818,7 +1403,7 @@ static NphResult make_body(PhysicsBridge *b, BodyRecord *r)
     }
     r->flags &= ~(u32)BODY_FAILED;
     if ((r->flags & BODY_SHAPED) != 0U) {
-        make_shape(b, r, &r->collider);
+        make_shapes(b, r);
     }
     attach_parts(b, r);
     if (rigid && r->rigid.mass > 0.0F) {
@@ -1007,12 +1592,10 @@ static NphResult visit(PhysicsBridge *b, NphEntity e, const NphLocalTransform *l
     if (collider != NULL && (rescaled || !collider_equal(collider, &r->collider))) {
         r->collider = *collider;
         if (!nph_physics_body_is_null(r->body)) {
-            if (!nph_physics_shape_is_null(r->shape)) {
-                nph_physics_shape_destroy(b->physics, r->shape);
-            }
-            make_shape(b, r, collider);
+            drop_shapes(b, r, true);
+            make_shapes(b, r);
             if (rigid != NULL && rigid->mass > 0.0F) {
-                apply_mass(b, r, rigid->mass); // over the new shape's
+                apply_mass(b, r, rigid->mass); // over the new shapes'
             }
         }
     }
@@ -1275,6 +1858,7 @@ static void physics_system(NphSystemContext *ctx)
     b->targeted = last;
     NPH_ARRAY_CLEAR(&b->targeted);
     read_events(b);
+    poll_awaiting(b);
     NphResult r = change_pass(b, ctx->last_tick, ctx->tick, dt);
     place_deep_parts(b);
     follow_parents(b, dt);
@@ -1354,8 +1938,27 @@ NphResult physics_bridge_create(NphEngine *e, PhysicsBridge **out)
     b->alloc = alloc;
     NPH_ARRAY_INIT(&b->follows, alloc);
     NPH_ARRAY_INIT(&b->deep_parts, alloc);
+    NPH_ARRAY_INIT(&b->awaiting, alloc);
+    NPH_ARRAY_INIT(&b->copy_free, alloc);
     NPH_ARRAY_INIT(&b->targeted, alloc);
     NPH_ARRAY_INIT(&b->last_targeted, alloc);
+    NphHashMapDesc cd;
+    memset(&cd, 0, sizeof cd);
+    cd.key_size = (u32)sizeof(NphGuid);
+    cd.val_size = (u32)sizeof(u32);
+    NphHashMapDesc kd = cd;
+    kd.key_size = (u32)sizeof(CopyKey);
+    NphResult r = nph_hashmap_init(&b->collision_index, alloc, &cd);
+    if (r == NPH_RESULT_OK) {
+        r = nph_hashmap_init(&b->copy_index, alloc, &kd);
+        if (r != NPH_RESULT_OK) {
+            nph_hashmap_free(&b->collision_index);
+        }
+    }
+    if (r != NPH_RESULT_OK) {
+        NPH_FREE_TYPE(alloc, PhysicsBridge, b);
+        return r;
+    }
     *out = b;
     return NPH_RESULT_OK;
 }
@@ -1376,6 +1979,16 @@ void physics_bridge_destroy(PhysicsBridge *b)
     }
     NPH_ARRAY_FREE(&b->follows);
     NPH_ARRAY_FREE(&b->deep_parts);
+    NPH_ARRAY_FREE(&b->awaiting);
+    NPH_ARRAY_FREE(&b->copy_free);
+    if (b->collisions != NULL) {
+        NPH_FREE_ARRAY(b->alloc, CollisionEntry, b->collisions, b->collision_cap);
+    }
+    if (b->copies != NULL) {
+        NPH_FREE_ARRAY(b->alloc, ScaledCopy, b->copies, b->copy_cap);
+    }
+    nph_hashmap_free(&b->collision_index);
+    nph_hashmap_free(&b->copy_index);
     NPH_ARRAY_FREE(&b->targeted);
     NPH_ARRAY_FREE(&b->last_targeted);
     NPH_FREE_TYPE(b->alloc, PhysicsBridge, b);
@@ -1434,9 +2047,12 @@ NphResult physics_bridge_begin(PhysicsBridge *b)
     (void)nph_world_events(b->world, &b->event_cursor, &b->events_dropped);
     NphResult r = size_slots(b);
     if (r == NPH_RESULT_OK) {
-        // Every body before the game's play_begin, which may join them.
+        // Every body before the game's play_begin, which may join them, its
+        // collision assets loaded first.
+        b->load_sync = 1;
         r = change_pass(b, 0U, nph_world_tick(b->world),
                         (f32)nph_fixed_clock_step_seconds(&b->engine->clock));
+        b->load_sync = 0;
     }
     if (r != NPH_RESULT_OK) {
         physics_bridge_end(b);
@@ -1452,8 +2068,11 @@ NphResult physics_bridge_refresh(PhysicsBridge *b)
     }
     read_events(b);
     b->full_pass = 1;
-    return change_pass(b, 0U, nph_world_tick(b->world),
-                       (f32)nph_fixed_clock_step_seconds(&b->engine->clock));
+    b->load_sync = 1; // what play_begin made has its shapes before the first step
+    const NphResult r = change_pass(b, 0U, nph_world_tick(b->world),
+                                    (f32)nph_fixed_clock_step_seconds(&b->engine->clock));
+    b->load_sync = 0;
+    return r;
 }
 
 void physics_bridge_end(PhysicsBridge *b)
@@ -1463,6 +2082,8 @@ void physics_bridge_end(PhysicsBridge *b)
         return;
     }
     destroy_all(b);
+    free_copies(b);
+    release_collisions(b);
     nph_physics_world_destroy(b->physics);
     b->physics = NULL;
     memset(&b->stats, 0, sizeof b->stats);

@@ -61,7 +61,8 @@ static const NphCollider g_collider_defaults = {(u32)NPH_COLLIDER_BOX,
                                                 1U,
                                                 NPH_U64_MAX,
                                                 0,
-                                                0};
+                                                0,
+                                                {0U, 0U}}; // no collision asset
 NPH_COMPONENT_DEFINE(NphCollider, NPH_COLLIDER_FIELDS, "Collider", 0U, &g_collider_defaults)
 
 // An effect at full volume and as recorded, not playing until the game
@@ -111,7 +112,8 @@ bool nph_collider_shape(const NphCollider *c, NphVec3 scale, NphPhysicsGeometry 
                         NphPhysicsPose *out_pose)
 {
     NPH_ASSERT(c != NULL && out_geometry != NULL && out_pose != NULL);
-    const NphVec3 s = nph_vec3(size_of(scale.x), size_of(scale.y), size_of(scale.z));
+    const NphVec3 magnitude = nph_vec3_abs(scale);
+    const NphVec3 s = nph_vec3(size_of(magnitude.x), size_of(magnitude.y), size_of(magnitude.z));
     switch (c->shape) {
     case NPH_COLLIDER_SPHERE:
         *out_geometry = nph_physics_geometry_sphere(size_of(c->radius) *
@@ -129,7 +131,8 @@ bool nph_collider_shape(const NphCollider *c, NphVec3 scale, NphPhysicsGeometry 
     default:
         return false;
     }
-    const NphVec3 center = nph_vec3_mul(c->center, s);
+    // The centre where the entity's frame puts it: mirrored with it.
+    const NphVec3 center = nph_vec3_mul(c->center, scale);
     out_pose->position = nph_vec3_is_finite(center) ? center : nph_vec3_zero();
     // A rotation as it is when unit to rounding, normalised otherwise (the
     // identity for zero or non-finite).

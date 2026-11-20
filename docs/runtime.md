@@ -549,10 +549,29 @@ after the game's systems and before the transform system:
 | Component | |
 |---|---|
 | `RigidBody` | the body: static, kinematic, or dynamic; its mass (0: the Collider's), velocities, damping, gravity scale, locks, `bullet` (swept against moving bodies too), `can_sleep` |
-| `Collider` | its shape: a sphere, a capsule along Y, or a box, at a centre and rotation in the entity's frame, scaled by the entity's world scale (a box per axis, a sphere by the largest, a capsule's core by Y and its radius by the larger of X and Z); its density, friction, restitution; its filter (category, mask, group); hit events |
+| `Collider` | its shape: a sphere, a capsule along Y, or a box, at a centre and rotation in the entity's frame, scaled by the entity's world scale (a box per axis, a sphere by the largest, a capsule's core by Y and its radius by the larger of X and Z); or every shape of a collision asset (`ASSET`, `collision`: below); its density, friction, restitution; its filter (category, mask, group); hit events |
 
 A Collider alone is a static body (the level); a RigidBody alone, a point
 of 1 kg (or of its `mass`).
+
+**Collision assets** ([ADR-0108](adr/0108-physics-in-levels.md)). An
+`ASSET` Collider's shapes are every shape of its `collision` asset
+(asset.md "Collision": the cooker's convex hulls and triangle meshes, in
+the frame of what collides), turned by the Collider's rotation, then
+scaled by the entity's world scale along each of its axes and mirrored
+where it mirrors, at its centre. The bridge holds each asset while the
+world plays and checks its blocks once with the physics module's
+validators; at a scale of one they are used in place, and at any other
+the shape is a copy, a hull built again from its moved points or a mesh
+from its moved vertices (wound again where the scale mirrors), shared by
+every Collider of the same asset, scale, and turn, and freed with the last.
+A mesh is left out of a dynamic body (logged): meshes collide with what
+moves. Assets load before the first step when play begins; one first
+named during play loads in the background, its body asleep until its
+shapes come. A missing or damaged asset makes no shapes (logged). Cooked
+scenes bring their collision: `nph_scene_import_cooked` gives each node
+the scene's `COLS` names an `ASSET` Collider and no RigidBody, a static
+shape until a designer adds one.
 
 **Compounds** ([ADR-0108](adr/0108-physics-in-levels.md)). A Collider
 without a RigidBody below an entity with one, no closer one between them,
@@ -874,7 +893,7 @@ instance):
 | `engine_frame_physics_1k_spinning` | 120.6 µs | 1,000 bodies turning in place, each moved, written back, and composed every step |
 | `engine_frame_physics_1k_compounds_spinning` | 248 µs | the same with two boxes a body, its children (ADR-0108): 2,000 parts; as bodies of their own following their parents (before compounds), 1.64 ms |
 | `engine_frame_physics_1k_compounds_deep_spinning` | 412 µs | each part under an entity of its own: 2,000 chains hashed every step (85 ns each; composed every step, 215 ns) |
-| `engine_frame_physics_10k_static_reparent` | 3.16 ms | 10,000 static Colliders in 100 groups, one given another parent every frame: a full pass, every Collider looked at again (asking for a body above each costs it 1 %) |
+| `engine_frame_physics_10k_static_reparent` | 3.33 ms | 10,000 static Colliders in 100 groups, one given another parent every frame: a full pass, every Collider looked at again (3.14 ms before ADR-0108's compounds and collision assets, which cost it 6 %; the frames above are unchanged) |
 | `physics_step_1k_spinning` | 68.1 µs | the same bodies stepped in a physics world of their own |
 | `scene_sync_10k_moving` | 79 ns | the scene renderer bringing a moved instance up to date |
 | `scene_interpolate_10k_moving` | 262 ns | the same, captured and drawn between its states |

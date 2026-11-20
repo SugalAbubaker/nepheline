@@ -99,6 +99,17 @@ What there is today:
    - A mesh shape on a dynamic body is refused with a warning: meshes collide only with what moves.
    - **Cooked scenes bring their collision.** `nph_scene_import_cooked` gives each node that `COLS` names a `Collider`
      of its asset and no `RigidBody`, so the shape is static. A designer makes a prop move by adding a `RigidBody`.
+   - **Built:**
+     - A copy bakes the entity's scale after the Collider's turn into its points. That is exact for hulls and meshes,
+       mirroring included (the primitives keep their per-axis sizes). A copy is keyed by the asset, the shape, and
+       the scale and turn bits, and counted, so a scale that keeps changing frees each copy with its last shape.
+     - Scales are signed through the bridge's poses: Z is negative where a frame mirrors. Primitives' centres and
+       compounds' parts follow a mirrored entity too.
+     - A body waiting for its asset sleeps, and wakes with its shapes. Tested: 35 frames of a background load, the
+       crate unmoved, then falling.
+     - **Measured:** the steady frames are unchanged (1000 resting bodies ×1.007, 1000 spinning ×0.996). A full pass
+       over 10k grouped Colliders, which a change of parent starts, costs 6 % more than before this decision and
+       decision 3: 3.33 ms against 3.14.
 5. **Triggers.**
    - `Collider`'s `trigger` makes its shapes sensors.
    - After each step the runtime reports the entities that entered and left each trigger (the trigger's entity and the
