@@ -561,7 +561,8 @@ category must be in the other's mask (Box2D's rule). Shapes of one body
 never meet, and neither do two bodies that are not dynamic. A pair's
 friction is the geometric mean of the two coefficients and its restitution
 the larger, so a frictionless surface makes every contact on it
-frictionless and a bouncy ball bounces on any floor.
+frictionless and a bouncy ball bounces on any floor. A sensor or a ghost
+touches nothing ("Sensors and ghosts" below).
 
 **Compounds** are bodies with several shapes (ADR-0046 §11, as PhysX and
 Box2D do it): each shape is placed by its pose on the body, the body's
@@ -959,13 +960,69 @@ shapes with `contact_events`), hits (a contact that began at a speed above
 the hit threshold, with the point and the speed, for sounds and effects;
 for shapes with `hit_events`), and moves (every awake body's new pose and
 velocities, zero for one that fell asleep that step: how the runtime
-mirrors physics into the scene). Nothing calls back into user code during
+mirrors physics into the scene), and what began and ended overlapping
+sensors (below). Nothing calls back into user code during
 a step, so nothing can change the world while it is in flight.
 
 `nph_physics_world_draw` draws shapes (a mesh as its triangles' edges, the
 inactive ones dimmed), broadphase boxes, contact points and normals, and
 centres of mass through a line callback, in 32-bit coordinates relative to
 the renderer's debug origin.
+
+## Sensors and ghosts
+
+A **sensor** (shape.h `sensor`; [ADR-0108](adr/0108-physics-in-levels.md))
+is a convex shape (a sphere, capsule, box, or hull) that touches nothing
+and reports what overlaps it: a trigger. It has no contacts and no mass,
+and queries skip it unless their filter's `sensors` asks for it. After
+each step's solve, with the step's poses and boxes final, each sensor finds
+what it overlaps by the world's own overlap query: the kinematic and
+dynamic trees under the sensor's box, each candidate's tight box against
+it, then the exact test (GJK's distance at zero). Its visitors are shapes:
+
+- of dynamic and kinematic bodies other than its own (a static shape never
+  moves into a volume);
+- that are not sensors (a sensor sees no other);
+- with `sensor_events`, on by default (off for debris no trigger needs);
+- whose category meets the sensor's mask. The visitor's own mask is not
+  asked, so a shape that touches nothing is still seen.
+
+Each sensor keeps its visitors sorted by handle, and the step reports what
+began and ended overlapping (`sensor_begin` and `sensor_end` in
+`nph_physics_world_events`) with both shapes' user data: in the sensors'
+slot order, then the visitors' handle order, after the ends of sensors
+destroyed since the last step. Box2D 3.1 finds its sensors' overlaps the
+same way, at the end of the step, where 3.0 kept them as contacts (Catto,
+2025); PhysX keeps its triggers' overlaps as broadphase pairs, tested in
+its narrow phase.
+
+The pass runs on the job system. Each sensor writes its own room of one
+buffer (the power of two that holds the most it has found, never
+shrinking) and its own count, so the sets are the same, to their order,
+whatever the threads do (tested on four workers). A sensor that finds more
+than its room gets one that holds them and the pass runs again, which
+happens only when a sensor's population passes its record. Sets are sorted
+in place (by insertion up to 16, else by a heap sort), so a step allocates
+only when a set or an event array outgrows its last size.
+
+Destroying a shape costs the sensors nothing. A destroyed visitor drops out
+of the next step's sets, whose walk against the last step's ends it with
+the handle and user data that set kept. A destroyed sensor's ends are made
+at once, while its handle and user data hold, and reported by the next step
+that succeeds. A step that fails reports no
+sensor events and keeps the sets of the last that succeeded, so the next
+that succeeds reports every change since (tested at each allocation the
+step makes).
+
+A **ghost** (shape.h `ghost`) touches nothing either and has no mass, but
+queries and sensors see it by its filter, as any shape. It is a character
+controller's body (ADR-0108 decision 8): a ray finds the player and a
+trigger sees them come in, while the controller moves the capsule and
+pushes what it walks into itself. A shape is not both.
+
+Debug drawing shows sensors in yellow and ghosts in violet
+(`NPH_PHYSICS_DRAW_SENSOR_RGBA`, `NPH_PHYSICS_DRAW_GHOST_RGBA`), whatever
+their bodies.
 
 ## Queries
 
@@ -1055,7 +1112,9 @@ boxes are walked grown by the 32-bit stand-in's rounding. The same world
 answers the same 10 000 km out as at the origin (tested). The filter is
 Box2D's query filter (a shape is seen when its category meets the query's
 mask and its mask the query's category), plus the kinds of bodies wanted
-(which trees to walk) and a body to ignore. A hit is per shape and a
+(which trees to walk), a body to ignore, and whether sensors are seen
+(`sensors`, off by default; ghosts are seen as any shape). An overlap tests
+each candidate's tight box before the exact test. A hit is per shape and a
 shape's answer its own: each test sees the whole motion and the nearest
 hit so far as a limit, never a motion shortened to it, so the trees' order
 cannot change it. Callbacks return the fraction to clip the search to:
@@ -1293,6 +1352,7 @@ is the point; world query rows are per query):
 | `world_mesh_pile_1000_st` / `_mt` (the same pile on a mesh floor) | 4 600 000 / 775 000 |
 | `world_terrain_pile_1000_mt` (the pile dropped on a rolling terrain) | 857 000 |
 | `world_heightfield_pile_1000_mt` (the same surface as a heightfield) | 840 000 |
+| `world_pile_1000_sensors_64_st` / `_mt` (the pile with 64 sensors tiling its bin: 1973 visitors) | 5 040 000 / 868 000 |
 | `world_sleeping_10k` (10k asleep, one ball awake) | 3 190 |
 | `world_chains_st` (16 chains of 25 links, 400 ball joints, swinging) | 586 000 |
 | `world_chains_mt` | 166 000 |
@@ -1305,6 +1365,16 @@ is the point; world query rows are per query):
 | `world_overlap_sphere_10k` / `world_overlap_aabb_10k` | 152 / 122 |
 | `world_terrain_collide_capsule` / `_cast_capsule` (a character on a rocky heightfield: its contacts, a step) | 1 720 / 2 350 |
 | `character_walk_flat` / `_terrain` (64 characters walking, a move each: a flat floor; the rocky heightfield) | 2 100 / 13 100 |
+
+Sensors (ADR-0108) cost the pile, every shape of which lies in one of 64,
+1.5 ms a step on one thread (0.76 µs a visitor, its share of the tree query
+included) and 0.18 ms on the job system, against the same pile
+without them; no other row moved by more than the noise. The first form
+queried each sensor twice on the stepping thread, to count and then to
+fill (as the pairs are found), and tested each candidate exactly: 1.86 ms
+a step. Testing each candidate's tight box first took it to 1.45 ms,
+running the sensors on the job system to 0.33 ms, and one query a sensor
+into its own room to 0.18 ms.
 
 Impacts and continuous collision (ADR-0048) cost the resting scenes 0 to
 3 % against the same build without them, measured side by side (two lane
@@ -1339,7 +1409,7 @@ reference CPU class.
 
 ## Testing
 
-`physics_tests` (232 tests):
+`physics_tests` (246 tests):
 
 - Hulls on known solids (box, tetrahedron and its inertia, cylinder with
   merged caps), random clouds (every point inside, every vertex an input
@@ -1528,6 +1598,20 @@ reference CPU class.
   pushing a box ahead of it; pushed out of a wall and a floor it starts in;
   the same path 10 000 km out; a box and a ball walking and climbing too;
   and descriptions refused.
+- Sensors and ghosts (`test_sensor.c`, ADR-0108): a ball falling through
+  a sensor, beginning and ending once each with both shapes' user data;
+  what a sensor sees (moving shapes its mask meets, their own masks not
+  asked) and does not (static shapes, other categories, other sensors,
+  shapes without `sensor_events`); a ghost a ball falls through but a ray
+  and a sensor find; neither adding mass; queries skipping sensors unless
+  asked; visitors destroyed by shape and by body, their slots taken again
+  before the step, and a destroyed sensor, ending their overlaps with their
+  user data; 100 shapes in one sensor reported once each in handle order,
+  and half of them destroyed; a step failing at each of its allocations
+  reporting nothing and the next reporting every change; sensors and
+  ghosts drawn in their colours; a mesh sensor and a sensor ghost refused;
+  a character walking through a sensor; and the same events on one thread
+  and on four workers.
 - Margins and surfaces (`test_cast.c`, `test_geometry.c`, `test_query.c`,
   `test_collide_mesh.c`): casts with a margin stopping within the touch of
   it for every kind of pair (480 random ones) and over a mesh and a

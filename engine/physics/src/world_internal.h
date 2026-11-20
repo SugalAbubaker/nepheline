@@ -10,6 +10,7 @@
 #include <nepheline/core/hashmap.h>
 #include <nepheline/physics/aabb_tree.h>
 #include <nepheline/physics/joint.h>
+#include <nepheline/physics/query.h>
 #include <nepheline/physics/shape.h>
 
 #include "physics_internal.h"
@@ -110,7 +111,30 @@ enum {
     PHYS_SHAPE_HIT_EVENTS = 1U << 1U,
     PHYS_SHAPE_ENLARGED = 1U << 2U, // its proxy grew this step
     PHYS_SHAPE_IN_MOVE_BUFFER = 1U << 3U,
+    PHYS_SHAPE_SENSOR = 1U << 4U,        // shape.h `sensor`
+    PHYS_SHAPE_GHOST = 1U << 5U,         // shape.h `ghost`
+    PHYS_SHAPE_SENSOR_EVENTS = 1U << 6U, // shape.h `sensor_events`
 };
+
+// What touches nothing: no contacts, no mass (ADR-0108).
+#define PHYS_SHAPE_UNTOUCHABLE ((u32)PHYS_SHAPE_SENSOR | (u32)PHYS_SHAPE_GHOST)
+
+// A sensor (sensor.c): its shape's slot; its visitors of the last step that succeeded, `count`
+// entries of the world's sensor_visitors from `first`, sorted by handle; and its room in the
+// step's buffer (a power of two, from PHYS_SENSOR_FIRST_ROOM, never shrinking).
+#define PHYS_SENSOR_FIRST_ROOM 4U
+typedef struct PhysSensor {
+    u32 shape;
+    u32 first;
+    u32 count;
+    u32 room;
+} PhysSensor;
+
+typedef struct PhysSensorVisitor {
+    u32 handle;
+    u32 pad;
+    u64 user_data;
+} PhysSensorVisitor;
 
 typedef struct PhysShape {
     u32 handle; // 0 for a free slot
@@ -503,6 +527,9 @@ typedef NPH_ARRAY(NphPhysicsContactBeginEvent) PhysBeginEventArray;
 typedef NPH_ARRAY(NphPhysicsContactEndEvent) PhysEndEventArray;
 typedef NPH_ARRAY(NphPhysicsContactHitEvent) PhysHitEventArray;
 typedef NPH_ARRAY(NphPhysicsBodyMoveEvent) PhysMoveEventArray;
+typedef NPH_ARRAY(NphPhysicsSensorEvent) PhysSensorEventArray;
+typedef NPH_ARRAY(PhysSensor) PhysSensorArray;
+typedef NPH_ARRAY(PhysSensorVisitor) PhysSensorVisitorArray;
 
 typedef struct PhysPair {
     u32 shape_a;
@@ -571,6 +598,16 @@ struct NphPhysicsWorld {
     PhysEndEventArray end_events;
     PhysHitEventArray hit_events;
     PhysMoveEventArray move_events;
+    PhysSensorEventArray sensor_begin_events;
+    PhysSensorEventArray sensor_end_events;
+    PhysSensorEventArray sensor_pending_ends; // of sensors destroyed since a step succeeded
+
+    // Sensors (sensor.c), sorted by their shapes' slots.
+    PhysSensorArray sensors;
+    PhysSensorVisitorArray sensor_visitors; // the last step's sets
+    PhysSensorVisitorArray sensor_next;     // this step's, then swapped in
+    NphArrayU32 sensor_place;               // per sensor, where its room in sensor_next starts
+    NphArrayU32 sensor_found;               // per sensor, what its query found this step
 
     NphPhysicsStats stats;
     u32 split_candidate;
@@ -595,6 +632,22 @@ NphPhysicsShape phys_shape_handle(const NphPhysicsWorld *w, u32 slot);
 // Recomputes a body's mass properties from its shapes (unless set) and
 // its centre of mass in the world.
 void phys_body_update_mass(NphPhysicsWorld *w, PhysBody *b);
+
+// Sensors (sensor.c; ADR-0108). phys_sensor_add registers a sensor's shape, its room
+// reserved beforehand (phys_sensor_reserve); phys_sensor_shape_gone, for a sensor being
+// destroyed, ends its overlaps for the next step's events while its handle and user data still
+// hold (a visitor's end the next step finds itself); phys_sensors_step finds this step's
+// overlaps and reports what changed.
+NphResult phys_sensor_reserve(NphPhysicsWorld *w);
+void phys_sensor_add(NphPhysicsWorld *w, u32 shape_slot);
+void phys_sensor_shape_gone(NphPhysicsWorld *w, u32 shape_slot);
+NphResult phys_sensors_step(NphPhysicsWorld *w, NphJobSystem *js);
+
+// The world's overlap query for a sensor (query.c): during the step, and one way (a shape's
+// category against the filter's mask, its own mask not asked).
+void phys_overlap_one_way(const NphPhysicsWorld *w, const NphPhysicsGeometry *geometry,
+                          NphDVec3 position, NphQuat rotation, const NphPhysicsQueryFilter *filter,
+                          NphPhysicsQueryShapeFn fn, void *user);
 // The world pose of a shape's frame relative to `origin` (32-bit).
 NphPhysicsPose phys_shape_pose_relative(const PhysBody *b, const PhysShape *s, NphDVec3 origin);
 // Box `rel`, relative to `origin`, in the world's frame: rounded outward to

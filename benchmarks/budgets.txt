@@ -310,6 +310,8 @@ world_pyramid_20_mt            700000
 world_pyramids_16_mt           4950000
 world_pile_1000_st             10200000
 world_pile_1000_mt             3300000
+world_pile_1000_sensors_64_st  14700000
+world_pile_1000_sensors_64_mt  4320000
 world_mesh_pile_1000_st        13740000
 world_mesh_pile_1000_mt        3850000
 world_terrain_pile_1000_mt     4275000

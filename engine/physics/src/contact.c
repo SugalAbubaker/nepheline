@@ -718,6 +718,10 @@ static bool pair_callback(u32 proxy, u64 user_data, void *context)
     if (s->body == o->body) {
         return true;
     }
+    // Sensors and ghosts touch nothing (ADR-0108).
+    if (((s->flags | o->flags) & PHYS_SHAPE_UNTOUCHABLE) != 0U) {
+        return true;
+    }
     const PhysBody *bs = &w->bodies.data[s->body];
     const PhysBody *bo = &w->bodies.data[o->body];
     if (bs->type != NPH_PHYSICS_BODY_DYNAMIC && bo->type != NPH_PHYSICS_BODY_DYNAMIC) {

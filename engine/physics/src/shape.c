@@ -36,6 +36,7 @@ NphPhysicsShapeDesc nph_physics_shape_desc_default(NphPhysicsGeometry geometry)
     d.friction = 0.6F;
     d.filter = nph_physics_filter_default();
     d.contact_events = 1;
+    d.sensor_events = 1;
     return d;
 }
 
@@ -176,10 +177,16 @@ NphResult nph_physics_shape_create(NphPhysicsWorld *world, NphPhysicsBody body,
         return NPH_RESULT_NOT_FOUND;
     }
     // A mesh or a heightfield bounds no volume, so it has no mass to move a body with
-    // (ADR-0046 §1).
+    // (ADR-0046 §1), and no inside for a sensor to find what enters (ADR-0108).
     if (!nph_physics_shape_type_is_convex(desc->geometry.type) &&
-        b->type == NPH_PHYSICS_BODY_DYNAMIC) {
+        (b->type == NPH_PHYSICS_BODY_DYNAMIC || desc->sensor != 0)) {
         return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if (desc->sensor != 0 && desc->ghost != 0) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    if (desc->sensor != 0) {
+        NPH_TRY(phys_sensor_reserve(world));
     }
     const u32 body_slot = phys_handle_slot(body.value);
     u32 slot = 0U;
@@ -207,7 +214,10 @@ NphResult nph_physics_shape_create(NphPhysicsWorld *world, NphPhysicsBody body,
     s->restitution = desc->restitution;
     s->filter = desc->filter;
     s->flags = (desc->contact_events != 0 ? PHYS_SHAPE_CONTACT_EVENTS : 0U) |
-               (desc->hit_events != 0 ? PHYS_SHAPE_HIT_EVENTS : 0U);
+               (desc->hit_events != 0 ? PHYS_SHAPE_HIT_EVENTS : 0U) |
+               (desc->sensor != 0 ? PHYS_SHAPE_SENSOR : 0U) |
+               (desc->ghost != 0 ? PHYS_SHAPE_GHOST : 0U) |
+               (desc->sensor_events != 0 ? PHYS_SHAPE_SENSOR_EVENTS : 0U);
     s->user_data = desc->user_data;
     s->proxy = PHYS_NULL;
     s->next = b->shape_head;
@@ -223,6 +233,9 @@ NphResult nph_physics_shape_create(NphPhysicsWorld *world, NphPhysicsBody body,
         return r;
     }
     s->handle = phys_handle(slot, generation);
+    if ((s->flags & PHYS_SHAPE_SENSOR) != 0U) {
+        phys_sensor_add(world, slot);
+    }
     if (b->type != NPH_PHYSICS_BODY_STATIC) {
         NPH_IGNORE_RESULT(phys_wake_body(world, body_slot));
     }
@@ -260,6 +273,7 @@ void nph_physics_shape_destroy(NphPhysicsWorld *world, NphPhysicsShape shape)
     }
     const u32 slot = phys_handle_slot(shape.value);
     const u32 body_slot = s->body;
+    phys_sensor_shape_gone(world, slot);
     phys_shape_destroy_contacts(world, slot);
     phys_shape_destroy_proxy(world, slot);
     PhysBody *b = &world->bodies.data[body_slot];
