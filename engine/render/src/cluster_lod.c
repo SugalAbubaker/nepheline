@@ -393,9 +393,11 @@ typedef struct Build {
     // read them, and stay put while a level's groups are built.
     NPH_ARRAY(NphVec3) grown_positions;
     NPH_ARRAY(NphVec2) grown_uvs;
+    NPH_ARRAY(NphVec2) grown_uvs1; // the second set's, with the input's (ADR-0107)
     NPH_ARRAY(NphVec3) grown_normals;
     const NphVec3 *normals; // per vertex, those added too, or NULL
     const NphVec2 *uvs;
+    const NphVec2 *uvs1; // the second set per vertex, those added too, or NULL
 } Build;
 
 // What one group of a level makes, in arrays of its own (offsets into
@@ -1719,6 +1721,7 @@ static NphResult group_build(Build *b, u32 level, const u32 *cl, u32 count, u32 
         si.locked = b->locked;
         si.target_triangles = (tris + 1U) / 2U;
         si.uvs = b->uvs;
+        si.uvs1 = b->uvs1;
         si.normals = b->normals;
         si.added = &o->added;
         si.orphans = &o->orphans;
@@ -1867,6 +1870,10 @@ static NphResult group_join(Build *b, const u32 *cl, u32 count, const GroupOut *
         NPH_TRY(lod_mesh_add_vertex(&b->mesh, b->alloc, b->mesh.class_of[a.position]));
         NPH_TRY(NPH_ARRAY_PUSH(&b->grown_positions, at));
         NPH_TRY(NPH_ARRAY_PUSH(&b->grown_uvs, a.uv));
+        if (b->uvs1 != NULL) {
+            NPH_TRY(NPH_ARRAY_PUSH(&b->grown_uvs1, a.uv1));
+            b->uvs1 = b->grown_uvs1.data;
+        }
         if (b->normals != NULL) {
             // Read first: the array may move as it grows.
             const NphVec3 normal = b->grown_normals.data[a.source];
@@ -2182,6 +2189,7 @@ static void level_costs(void *user, u32 begin, u32 end)
             si.triangle_count = submeshes.len;
             si.locked = b->locked;
             si.uvs = b->uvs;
+            si.uvs1 = b->uvs1;
             si.normals = b->normals;
             si.scratch = b->alloc;
             si.borders = 1;
@@ -2862,6 +2870,7 @@ static void build_free(Build *b)
     NPH_ARRAY_FREE(&b->next_sources);
     NPH_ARRAY_FREE(&b->grown_positions);
     NPH_ARRAY_FREE(&b->grown_uvs);
+    NPH_ARRAY_FREE(&b->grown_uvs1);
     NPH_ARRAY_FREE(&b->grown_normals);
     grid_free(a, &b->ground);
     lod_mesh_free(&b->mesh, a);
@@ -2891,6 +2900,7 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
     NPH_ARRAY_INIT(&b.next_sources, b.alloc);
     NPH_ARRAY_INIT(&b.grown_positions, b.alloc);
     NPH_ARRAY_INIT(&b.grown_uvs, b.alloc);
+    NPH_ARRAY_INIT(&b.grown_uvs1, b.alloc);
     NPH_ARRAY_INIT(&b.grown_normals, b.alloc);
     NPH_ARRAY_INIT(&b.ground.items, b.alloc);
     NPH_ARRAY_INIT(&b.ground.owned, b.alloc);
@@ -2926,9 +2936,13 @@ NphResult nph_render_cluster_lods_build(const NphRenderClusterLodInput *in,
         if (r == NPH_RESULT_OK) {
             r = NPH_ARRAY_PUSH_N(&b.grown_uvs, in->uvs, in->vertex_count);
         }
+        if (r == NPH_RESULT_OK && in->uvs1 != NULL) {
+            r = NPH_ARRAY_PUSH_N(&b.grown_uvs1, in->uvs1, in->vertex_count);
+        }
         if (r == NPH_RESULT_OK) {
             b.mesh.positions = b.grown_positions.data;
             b.uvs = b.grown_uvs.data;
+            b.uvs1 = in->uvs1 != NULL ? b.grown_uvs1.data : NULL;
         }
     }
     if (r == NPH_RESULT_OK && in->normals != NULL && in->vertex_count != 0U) {

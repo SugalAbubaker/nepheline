@@ -35,7 +35,8 @@ NPH_STATIC_ASSERT(sizeof(NphVisTransform) == 64U, "NphVisTransform matches its G
 NPH_STATIC_ASSERT(sizeof(NphVisInstance) == 80U, "NphVisInstance matches its GLSL layout");
 NPH_STATIC_ASSERT(sizeof(NphVisInstanceUpdate) == 96U,
                   "NphVisInstanceUpdate matches its GLSL layout");
-NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 224U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(sizeof(NphVisMesh) == 240U, "NphVisMesh matches its GLSL layout");
+NPH_STATIC_ASSERT(offsetof(NphVisMesh, uv1) % 8U == 0U, "NphVisMesh.uv1 is 8-byte aligned");
 NPH_STATIC_ASSERT(offsetof(NphVisMesh, blas_own) % 8U == 0U &&
                       offsetof(NphVisMesh, rays) % 8U == 0U,
                   "addresses are aligned");
@@ -751,6 +752,7 @@ static NphResult upload_mesh(NphRenderer *r, RenderMesh *m, u32 slot, const NphR
     rec.sphere = nph_vec4_from_vec3(m->sphere.center, m->sphere.radius);
     rec.positions = m->positions_address;
     rec.attribs = m->attribs_address;
+    rec.uv1 = m->uv1_address;
     rec.meshlets = nph_gpu_buffer_address(r->dev, m->meshlets);
     rec.meshlet_bounds = nph_gpu_buffer_address(r->dev, m->meshlet_bounds);
     rec.meshlet_vertices = nph_gpu_buffer_address(r->dev, m->meshlet_vertices);

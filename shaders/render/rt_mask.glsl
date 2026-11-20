@@ -25,6 +25,10 @@
 #ifndef NPH_RT_MASK_HAS_UV
 #define NPH_RT_MASK_HAS_UV(flags) nph_material_has_uv(flags)
 #endif
+// And whether a slot reads the second set (ADR-0107), likewise.
+#ifndef NPH_RT_MASK_HAS_UV1
+#define NPH_RT_MASK_HAS_UV1(flags) nph_material_has_uv1(flags)
+#endif
 
 bool nph_ray_candidate_covers(VisViewRef view, rayQueryEXT q)
 {
@@ -57,6 +61,15 @@ bool nph_ray_candidate_covers(VisViewRef view, rayQueryEXT q)
     if (tex != NPH_RENDER_NO_TEXTURE) {
         // The material's coordinates, where it has a transform (ADR-0105).
         vec2 uv = mat3x2(unpackHalf2x16(a0.z), unpackHalf2x16(a1.z), unpackHalf2x16(a2.z)) * b;
+        // The base colour's set (ADR-0107): the second where it reads one and the mesh has it.
+        if (NPH_RT_MASK_HAS_UV1(materials.m[mi].flags) && mesh.uv1 != 0ul &&
+            nph_material_slot_uv1(materials.m[mi].wrap, NPH_RENDER_TEX_BASE_COLOR)) {
+            WordsRef uv1 = WordsRef(mesh.uv1);
+            uv = mat3x2(unpackHalf2x16(uv1.w[indices.v[first]]),
+                        unpackHalf2x16(uv1.w[indices.v[first + 1u]]),
+                        unpackHalf2x16(uv1.w[indices.v[first + 2u]])) *
+                 b;
+        }
         if (NPH_RT_MASK_HAS_UV(materials.m[mi].flags)) {
             uv = nph_material_uv(materials.m[mi].uv_u, materials.m[mi].uv_v, uv);
         }

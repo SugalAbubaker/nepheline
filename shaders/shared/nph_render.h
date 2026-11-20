@@ -32,6 +32,10 @@
 // Changed in place this frame (nph_render_material_update): the pixels whose nearest surface
 // draws it take no temporal history (NPH_VIS_CLUSTER_FRESH; ADR-0105).
 #define NPH_RENDER_MATERIAL_CHANGED 32
+// A slot with a texture reads the second texture coordinate set (ADR-0107): its bit in `wrap`,
+// NPH_RENDER_MATERIAL_SET1_SHIFT + the slot, says which.
+#define NPH_RENDER_MATERIAL_UV1        64
+#define NPH_RENDER_MATERIAL_SET1_SHIFT 20
 
 // Material texture slots (NphRenderMaterialData.textures / samplers).
 #define NPH_RENDER_TEX_BASE_COLOR         0
@@ -150,8 +154,7 @@ NPH_SHARED_STRUCT(NphRenderDrawData)
     u64 attribs_address;    // NphRenderVertexAttrib[] (normal, tangent, uv0, colour)
     u32 material_index;
     u32 instance_index;
-    u32 pad0;
-    u32 pad1;
+    u64 uv1_address; // the second texture coordinate set (u32 f16x2[], ADR-0107), 0 without one
 };
 
 // A metallic-roughness material (glTF 2.0).
@@ -172,7 +175,8 @@ NPH_SHARED_STRUCT(NphRenderMaterialData)
     // to its first resident level this frame (texture_paging.glsl).
     u32 samplers[5];
     // How each slot's sampler addresses: bits 4s..4s+1 its u, 4s+2..4s+3 its
-    // v (NPH_RENDER_WRAP_*), which paged textures' requests follow.
+    // v (NPH_RENDER_WRAP_*), which paged textures' requests follow; bit 20 + s set where it
+    // reads the second texture coordinate set (NPH_RENDER_MATERIAL_UV1).
     u32 wrap;
     // The id the renderer gives the material's alpha key (NphRenderMaterialDesc.alpha_key) on a
     // frame whose rays read the level the key was made of, its base colour texture's finest

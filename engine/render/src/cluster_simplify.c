@@ -564,6 +564,7 @@ typedef struct Simp {
     LodMesh *mesh;
     const u8 *locked;
     const NphVec2 *uvs;     // per vertex of the mesh (NULL: no vertex is added)
+    const NphVec2 *uvs1;    // the second set per vertex, or NULL
     const NphVec3 *normals; // per vertex of the mesh, or NULL
     b32 borders;
     // Local wedges (their first vertex, or LOD_ADDED_BASE and their place in
@@ -571,6 +572,7 @@ typedef struct Simp {
     NphArrayU32 wedge_vertex;
     NphArrayU32 wedge_class; // local class
     NPH_ARRAY(NphVec2) wedge_uv;
+    NPH_ARRAY(NphVec2) wedge_uv1; // the second set's (zero without one)
     NphRenderLodAddedVertexArray added;
     NphArrayU32 class_mesh;  // mesh class
     NphVec3 *class_position; // relative to the mesh's origin
@@ -1053,11 +1055,13 @@ static bool evaluate(Simp *s, u32 from, u32 to, u32 r, Collapse *out)
 
 // The texture coordinates a surface of class `from` (its wedge, in its submesh)
 // has where class `to` stands: its largest triangle there, carried along its
-// plane. The wedge's own where no triangle holds them.
-static NphVec2 carried_uv(const Simp *s, u32 from, u32 to, u32 wedge, u32 submesh)
+// plane. The wedge's own where no triangle holds them. Both sets, with the same weights.
+static void carried_uv(const Simp *s, u32 from, u32 to, u32 wedge, u32 submesh, NphVec2 *out_uv,
+                       NphVec2 *out_uv1)
 {
     const NphVec3 q = class_pos(s, to);
     NphVec2 out = s->wedge_uv.data[wedge];
+    NphVec2 out1 = s->wedge_uv1.data[wedge];
     f32 largest = 0.0F;
     for (u32 i = s->around_start[from]; i < s->around_start[from + 1U]; ++i) {
         const u32 t = s->around[i];
@@ -1087,29 +1091,39 @@ static NphVec2 carried_uv(const Simp *s, u32 from, u32 to, u32 wedge, u32 submes
                 const NphVec2 uc = s->wedge_uv.data[wc];
                 out = nph_vec2(own.x + a * (ub.x - own.x) + b * (uc.x - own.x),
                                own.y + a * (ub.y - own.y) + b * (uc.y - own.y));
+                const NphVec2 own1 = s->wedge_uv1.data[wedge];
+                const NphVec2 ub1 = s->wedge_uv1.data[wb];
+                const NphVec2 uc1 = s->wedge_uv1.data[wc];
+                out1 = nph_vec2(own1.x + a * (ub1.x - own1.x) + b * (uc1.x - own1.x),
+                                own1.y + a * (ub1.y - own1.y) + b * (uc1.y - own1.y));
                 largest = area;
             }
             break;
         }
     }
-    return out;
+    *out_uv = out;
+    *out_uv1 = out1;
 }
 
 // A wedge added to class `to` for a surface of `from`.
 static NphResult add_wedge(Simp *s, u32 from, u32 to, u32 wedge, u32 submesh, u32 *out)
 {
-    const NphVec2 uv = carried_uv(s, from, to, wedge, submesh);
+    NphVec2 uv;
+    NphVec2 uv1;
+    carried_uv(s, from, to, wedge, submesh, &uv, &uv1);
     const u32 v = s->wedge_vertex.data[wedge];
     NphRenderLodAddedVertex a;
     a.source = v >= LOD_ADDED_BASE ? s->added.data[v - LOD_ADDED_BASE].source : v;
     a.position = s->mesh->class_vertex[s->class_mesh.data[to]];
     a.uv = uv;
+    a.uv1 = uv1;
     const u32 k = s->added.len;
     NPH_TRY(NPH_ARRAY_PUSH(&s->added, a));
     *out = s->wedge_vertex.len;
     const u32 added_vertex = LOD_ADDED_BASE + k;
     NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_vertex, added_vertex));
     NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_class, to));
+    NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_uv1, uv1));
     return NPH_ARRAY_PUSH(&s->wedge_uv, uv);
 }
 
@@ -1212,6 +1226,7 @@ static void simp_free(Simp *s)
     NPH_ARRAY_FREE(&s->wedge_vertex);
     NPH_ARRAY_FREE(&s->wedge_class);
     NPH_ARRAY_FREE(&s->wedge_uv);
+    NPH_ARRAY_FREE(&s->wedge_uv1);
     NPH_ARRAY_FREE(&s->added);
     NPH_ARRAY_FREE(&s->class_mesh);
     NPH_ARRAY_FREE(&s->edges);
@@ -1253,6 +1268,8 @@ static NphResult simp_number(Simp *s, const LodSimplifyInput *in, NphHashMap *we
         NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_class, local_class));
         const NphVec2 uv = s->uvs != NULL ? s->uvs[v] : nph_vec2(0.0F, 0.0F);
         NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_uv, uv));
+        const NphVec2 uv1 = s->uvs1 != NULL ? s->uvs1[v] : nph_vec2(0.0F, 0.0F);
+        NPH_TRY(NPH_ARRAY_PUSH(&s->wedge_uv1, uv1));
         s->tri[i] = local_wedge;
     }
     return NPH_RESULT_OK;
@@ -1328,12 +1345,14 @@ static NphResult simp_begin(Simp *s, const LodSimplifyInput *in, const NphVec2 *
     s->mesh = in->mesh;
     s->locked = in->locked;
     s->uvs = uvs;
+    s->uvs1 = uvs != NULL ? in->uvs1 : NULL; // carried only where the first set is
     s->normals = in->normals;
     s->borders = in->borders;
     s->sub = in->submeshes;
     NPH_ARRAY_INIT(&s->wedge_vertex, s->alloc);
     NPH_ARRAY_INIT(&s->wedge_class, s->alloc);
     NPH_ARRAY_INIT(&s->wedge_uv, s->alloc);
+    NPH_ARRAY_INIT(&s->wedge_uv1, s->alloc);
     NPH_ARRAY_INIT(&s->added, s->alloc);
     NPH_ARRAY_INIT(&s->class_mesh, s->alloc);
     NPH_ARRAY_INIT(&s->edges, s->alloc);

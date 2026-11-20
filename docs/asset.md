@@ -221,7 +221,7 @@ from a READY asset and checks every count against its blob and every
 index and range against the array it addresses, so a view that resolves
 can be handed to the renderer without further checks:
 
-- **Mesh** (`mesh.h`, type version 8; earlier versions without voxels still read): `HEAD`
+- **Mesh** (`mesh.h`, type version 9; earlier versions without voxels still read): `HEAD`
   (counts, bounds, sphere, position quantisation), `POSN` (16-bit unorm
   positions across the bounds, 8 bytes each, separate from the other
   attributes so the visibility-buffer pass of §8.6.4 reads positions
@@ -307,13 +307,20 @@ can be handed to the renderer without further checks:
   0 first, up to `NPH_MESH_SLOT_MATERIALS_MAX` (8), a null GUID naming none.
   An entity draws a slot's material where its MeshRenderer names none for
   it (docs/runtime.md). The view checks that it holds 1 to 8 whole GUIDs and
-  is of version 8 or later.
+  is of version 8 or later. From version 9, a mesh whose materials read a
+  second texture coordinate set
+  ([ADR-0107](adr/0107-the-blender-round-trip.md); glTF's `TEXCOORD_1`)
+  holds it as `UV1 `: a half-float pair a vertex (`u32`), the levels' added
+  vertices too, apart from `ATTR` so that a mesh without one reads its 16
+  bytes a vertex as before. `NPH_MESH_FLAG_HAS_UV1` says it is there. The
+  view refuses the flag before version 9 or on a mesh without vertices, the
+  blob without the flag, and one not a value a vertex.
 - **Texture** (`texture.h`): `HEAD` (extent, mips, layers, format, kind,
   flags) and one `MIP ` blob per level holding every layer, exactly the
   bytes the format and extent imply (whole 4x4 blocks for BC formats).
   Formats: R8, RG8, RGBA8 (UNORM and sRGB), RGBA16F, BC4, BC5, BC6H, BC7
   (UNORM and sRGB).
-- **Material** (`material.h`, type version 3; versions 1 and 2 still read): one
+- **Material** (`material.h`, type version 4; versions 1 to 3 still read): one
   `HEAD` with glTF's metallic-roughness parameters, alpha mode and cutoff,
   flags, and five texture references (GUID, UV set, wrap modes, filter,
   scale). From version 2, an alpha-tested material may carry its alpha key
@@ -327,7 +334,10 @@ can be handed to the renderer without further checks:
   texture coordinate of the material goes through before it is sampled,
   composed as `KHR_texture_transform`'s; a material without it has the
   identity. The view refuses one before version 3, of another size, not
-  finite, or whose linear part is singular.
+  finite, or whose linear part is singular. From version 4, a texture
+  reference's set may be 1 (ADR-0107): the mesh's `UV1 `, or its first set
+  where the mesh has none. The transform applies to either set. The view
+  refuses a set past 1, and 1 before version 4.
 - **Scene** (`scene.h`, type version 3; versions 1 and 2 still read): `HEAD`,
   `NODE` (parent-before-child hierarchy with local TRS, child and sibling
   links, names), `INST` (a mesh GUID at a node with a range of material

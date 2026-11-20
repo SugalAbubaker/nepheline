@@ -1044,6 +1044,104 @@ NTEST(gltf, texture_transforms_are_baked_into_the_coordinates)
     cook_gltf_free(&scene);
 }
 
+NTEST(gltf, a_second_set_is_read_where_a_material_samples_it)
+{
+    NphAllocator *alloc = nph_allocator_system();
+    u8 rgba[4 * 4 * 4];
+    memset(rgba, 200, sizeof rgba);
+    u8 tga[18 + 64];
+    const u64 tga_size = test_write_tga(rgba, 4U, 4U, tga);
+    char tga64[256];
+    test_base64(tga, tga_size, tga64);
+    struct {
+        f32 pos[9];
+        f32 uv0[6];
+        f32 uv1[6];
+    } buf = {{0, 0, 0, 1, 0, 0, 0, 1, 0},
+             {0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 1.0F},
+             {0.5F, 0.5F, 0.75F, 0.5F, 0.5F, 0.75F}};
+    char buf64[512];
+    test_base64((const u8 *)&buf, sizeof buf, buf64);
+    // Material 0: its base colour on TEXCOORD_1 with a transform of its own, its occlusion on
+    // TEXCOORD_0. Material 1: KHR_texture_transform's override takes its base colour to
+    // TEXCOORD_1. Material 2: a normal map on TEXCOORD_1. Material 3: TEXCOORD_2, which is not.
+    // Mesh 0 (material 0) has both sets; mesh 1 (material 1) only the first; mesh 2 (material 3)
+    // and mesh 3 (material 2) both.
+    char doc[6144];
+    snprintf(doc, sizeof doc,
+             "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":[\"KHR_texture_transform\"],"
+             "\"textures\":[{\"source\":0}],\"images\":[{\"uri\":\"data:image/tga;base64,%s\"}],"
+             "\"materials\":["
+             "{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0,\"texCoord\":1,"
+             "\"extensions\":{\"KHR_texture_transform\":{\"scale\":[2,2]}}}},"
+             "\"occlusionTexture\":{\"index\":0}},"
+             "{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0,"
+             "\"extensions\":{\"KHR_texture_transform\":{\"texCoord\":1}}}}},"
+             "{\"normalTexture\":{\"index\":0,\"texCoord\":1}},"
+             "{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0,\"texCoord\":2}}}],"
+             "\"meshes\":["
+             "{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"TEXCOORD_0\":1,\"TEXCOORD_1\":2},"
+             "\"material\":0}]},"
+             "{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"TEXCOORD_0\":1},\"material\":1}]},"
+             "{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"TEXCOORD_0\":1,\"TEXCOORD_1\":2},"
+             "\"material\":3}]},"
+             "{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"TEXCOORD_0\":1,\"TEXCOORD_1\":2},"
+             "\"material\":2}]}],"
+             "\"accessors\":["
+             "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+             "\"min\":[0,0,0],\"max\":[1,1,0]},"
+             "{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC2\"},"
+             "{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC2\"}],"
+             "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":36,"
+             "\"byteLength\":24},{\"buffer\":0,\"byteOffset\":60,\"byteLength\":24}],"
+             "\"buffers\":[{\"byteLength\":84,"
+             "\"uri\":\"data:application/octet-stream;base64,%s\"}]}",
+             tga64, buf64);
+    CookGltfScene scene;
+    NTEST_ASSERT_EQ_INT(cook_gltf_load_memory(alloc, doc, strlen(doc), NULL, &scene),
+                        NPH_RESULT_OK);
+    // TEXCOORD_2, the missing second set, and the normal map on it.
+    NTEST_EXPECT_EQ_UINT(scene.warnings, 3U);
+    NTEST_ASSERT_EQ_UINT(scene.material_count, 4U);
+    const NphMaterialTextureRef *t0 = scene.materials[0].header.textures;
+    NTEST_EXPECT_EQ_UINT(t0[NPH_MATERIAL_TEXTURE_BASE_COLOR].texcoord, 1U);
+    NTEST_EXPECT_EQ_UINT(t0[NPH_MATERIAL_TEXTURE_OCCLUSION].texcoord, 0U);
+    NTEST_EXPECT_EQ_UINT(
+        scene.materials[1].header.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texcoord, 1U);
+    NTEST_EXPECT_EQ_UINT(scene.materials[2].header.textures[NPH_MATERIAL_TEXTURE_NORMAL].texcoord,
+                         1U);
+    NTEST_EXPECT_EQ_UINT(
+        scene.materials[3].header.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texcoord, 0U);
+    // Mesh 0: its second set through its own transform, the first as it was.
+    const CookMesh *m0 = &scene.meshes[0].mesh;
+    NTEST_EXPECT_TRUE((m0->flags & (u32)COOK_MESH_HAS_UV1) != 0U);
+    for (u32 k = 0; k < m0->vertices.len; ++k) {
+        const CookVertex *v = &m0->vertices.data[k];
+        // The source vertex it is: the search stops at the last, and the match is checked.
+        u32 src = 0U;
+        while (src < 2U &&
+               !nph_vec2_near(v->uv0, nph_vec2(buf.uv0[(u64)src * 2U], buf.uv0[(u64)src * 2U + 1U]),
+                              0.0F)) {
+            ++src;
+        }
+        NTEST_ASSERT_TRUE(nph_vec2_near(
+            v->uv0, nph_vec2(buf.uv0[(u64)src * 2U], buf.uv0[(u64)src * 2U + 1U]), 0.0F));
+        const NphVec2 want =
+            nph_vec2(2.0F * buf.uv1[(u64)src * 2U], 2.0F * buf.uv1[(u64)src * 2U + 1U]);
+        NTEST_EXPECT_TRUE(nph_vec2_near(v->uv1, want, 1e-6F));
+    }
+    // Mesh 1: its material samples the second set, which it has not: its first in its place.
+    const CookMesh *m1 = &scene.meshes[1].mesh;
+    NTEST_EXPECT_TRUE((m1->flags & (u32)COOK_MESH_HAS_UV1) != 0U);
+    for (u32 k = 0; k < m1->vertices.len; ++k) {
+        NTEST_EXPECT_TRUE(nph_vec2_near(m1->vertices.data[k].uv1, m1->vertices.data[k].uv0, 0.0F));
+    }
+    // Mesh 2: TEXCOORD_1 that no texture of its reads is left; mesh 3 keeps it for its normals.
+    NTEST_EXPECT_EQ_UINT(scene.meshes[2].mesh.flags & (u32)COOK_MESH_HAS_UV1, 0U);
+    NTEST_EXPECT_TRUE((scene.meshes[3].mesh.flags & (u32)COOK_MESH_HAS_UV1) != 0U);
+    cook_gltf_free(&scene);
+}
+
 NTEST(gltf, extensions_required_and_merely_used)
 {
     NphAllocator *alloc = nph_allocator_system();
@@ -1173,5 +1271,37 @@ NTEST(gltf, the_fuzz_corpus_imports)
         cook_gltf_free(&scene);
         nph_file_free_all(alloc, bytes, size);
     }
+    // The second set's seed (ADR-0107): its occlusion and emissive on TEXCOORD_1, the emissive
+    // by KHR_texture_transform's texCoord with a transform of its own (warned: the occlusion's is
+    // the set's), the second primitive's material reading the set it has not (warned: its first).
+    char path[1024];
+    snprintf(path, sizeof path, "%s/gltf/second_set", NPH_FUZZ_CORPUS_DIR);
+    void *bytes = NULL;
+    u64 size = 0U;
+    NTEST_ASSERT_EQ_INT(nph_file_read_all(path, alloc, &bytes, &size), NPH_RESULT_OK);
+    CookGltfScene scene;
+    NTEST_ASSERT_EQ_INT(cook_gltf_load_memory(alloc, bytes, size, NULL, &scene), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(scene.mesh_count, 1U);
+    NTEST_ASSERT_EQ_UINT(scene.material_count, 2U);
+    NTEST_EXPECT_EQ_UINT(scene.warnings, 3U);
+    for (u32 m = 0; m < 2U; ++m) {
+        const NphMaterialTextureRef *t = scene.materials[m].header.textures;
+        NTEST_EXPECT_EQ_UINT(t[NPH_MATERIAL_TEXTURE_BASE_COLOR].texcoord, 0U);
+        NTEST_EXPECT_EQ_UINT(t[NPH_MATERIAL_TEXTURE_OCCLUSION].texcoord, 1U);
+        NTEST_EXPECT_EQ_UINT(t[NPH_MATERIAL_TEXTURE_EMISSIVE].texcoord, 1U);
+    }
+    const CookMesh *mesh = &scene.meshes[0].mesh;
+    NTEST_ASSERT_TRUE((mesh->flags & (u32)COOK_MESH_HAS_UV1) != 0U);
+    NTEST_ASSERT_EQ_UINT(mesh->vertices.len, 8U);
+    for (u32 v = 0; v < 8U; ++v) {
+        // The first primitive's own second set (0.5 to 0.75), the second's its first (0 to 1).
+        const CookVertex *x = &mesh->vertices.data[v];
+        const NphVec2 want =
+            v < 4U ? nph_vec2(0.5F + 0.25F * x->uv0.x, 0.5F + 0.25F * x->uv0.y) : x->uv0;
+        NTEST_EXPECT_NEAR_F32(x->uv1.x, want.x, 1e-6F);
+        NTEST_EXPECT_NEAR_F32(x->uv1.y, want.y, 1e-6F);
+    }
+    cook_gltf_free(&scene);
+    nph_file_free_all(alloc, bytes, size);
 }
 #endif

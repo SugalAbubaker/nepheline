@@ -148,6 +148,7 @@ typedef struct NphRenderLodAddedVertex {
     u32 source;   // its attributes are this vertex's, but for the texture coordinates
     u32 position; // it stands where this vertex stands
     NphVec2 uv;   // its texture coordinates
+    NphVec2 uv1;  // its second set, carried as `uv` is (zero without input `uvs1`)
 } NphRenderLodAddedVertex;
 
 typedef NPH_ARRAY(NphRenderLodAddedVertex) NphRenderLodAddedVertexArray;
@@ -188,6 +189,10 @@ typedef struct NphRenderClusterLodInput {
     // hard and textures do not smear (ADR-0069; `added` in the output). NULL: such
     // corners never move, and no vertex is added.
     const NphVec2 *uvs;
+    // Each vertex's second texture coordinate set (ADR-0107), or NULL: an added vertex's is
+    // carried along its plane with the same weights as its first. Its seams are the caller's
+    // to put in `attribs`.
+    const NphVec2 *uvs1;
     // Each vertex's shading normal (unit), or NULL: a collapse then counts what it does to
     // the surface's shading, which positions alone do not show (ADR-0069). With `voxels`,
     // `uvs` are not read and corners never move: such a mesh keeps the rest of the simplifier

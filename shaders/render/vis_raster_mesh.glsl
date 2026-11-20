@@ -64,6 +64,11 @@ void main()
     // Its coordinates' transform, where it has one (ADR-0105); the cluster's, so the same in
     // every invocation.
     const bool transformed = nph_material_has_uv(materials.m[cluster.material].flags);
+    // The base colour's set (ADR-0107): the second where it reads one and the mesh has it.
+    const uint64_t uv1 =
+        nph_material_slot_uv1(materials.m[cluster.material].wrap, NPH_RENDER_TEX_BASE_COLOR)
+            ? mesh.uv1
+            : 0ul;
     vec4 uv_u = vec4(1.0, 0.0, 0.0, 0.0);
     vec4 uv_v = vec4(0.0, 1.0, 0.0, 0.0);
     if (transformed) {
@@ -81,7 +86,7 @@ void main()
         s_clip[i] = clip;
 #if VIS_MASKED
         const uvec4 a = AttribsRef(mesh.attribs).a[vertex];
-        vec2 uv = unpackHalf2x16(a.z);
+        vec2 uv = nph_uv1(uv1, vertex, unpackHalf2x16(a.z));
         if (transformed) {
             uv = nph_material_uv(uv_u, uv_v, uv);
         }

@@ -384,6 +384,7 @@ NphResult render_assets_mesh_desc(const NphMeshView *mv, NphRenderSubmesh *subs,
     const void *attribs = mv->attribs;
     d->positions = positions;
     d->attribs = attribs;
+    d->uv1 = mv->uv1; // the second set where a slot reads one (ADR-0107), else NULL
     d->indices = mv->indices;
     d->submeshes = subs;
     d->submesh_count = h->submesh_count;
@@ -473,13 +474,16 @@ static void material_desc(const RenderAssetCache *c, const NphMaterialHeader *h,
         d.textures[t].wrap_u = (NphRenderWrap)ref->wrap_u;
         d.textures[t].wrap_v = (NphRenderWrap)ref->wrap_v;
         d.textures[t].nearest = ref->nearest != 0U;
+        d.textures[t].texcoord = ref->texcoord;
     }
     // The cooker's key of its alpha test (ADR-0096), where it reads the texture the key was
     // made of: an alpha-tested material whose base colour texture this device took. The
     // renderer holds its instances' rays to it on the frames they read that texture's finest
     // level, paged or whole (ADR-0098).
+    // The cooker makes keys of the first set alone (cook/ray_trim.h).
     if (h->alpha_mode == (u32)NPH_MATERIAL_ALPHA_MASK &&
-        d.textures[NPH_RENDER_SLOT_BASE_COLOR].texture.value != 0U) {
+        d.textures[NPH_RENDER_SLOT_BASE_COLOR].texture.value != 0U &&
+        d.textures[NPH_RENDER_SLOT_BASE_COLOR].texcoord == 0U) {
         d.alpha_key = h->alpha_key;
     }
     // The key is of the test the mesh's own coordinates read: a transformed material has none.

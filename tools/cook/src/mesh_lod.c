@@ -15,6 +15,10 @@
 #include <stddef.h>
 #include <string.h>
 
+// The bytes a vertex's seams are told by where the mesh has a second set: its attributes, then
+// that set (ADR-0107).
+#define WEDGE_UV1 ((u32)(sizeof(NphMeshAttrib) + sizeof(u32)))
+
 NPH_STATIC_ASSERT(sizeof(NphMeshClusterLod) == sizeof(NphRenderClusterLod) &&
                       offsetof(NphMeshClusterLod, group) == offsetof(NphRenderClusterLod, group) &&
                       offsetof(NphMeshClusterLod, parent) ==
@@ -185,7 +189,8 @@ static void log_cuts(const CookMesh *mesh, const NphRenderClusterLods *l, NphAll
 
 NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlets,
                                const NphVec3 *positions, const NphMeshAttrib *attribs,
-                               const NphMeshletBounds *bounds, const CookMeshSettings *settings,
+                               const u32 *uv1, const NphMeshletBounds *bounds,
+                               const CookMeshSettings *settings,
                                const struct CookVoxelMaterials *voxels, NphJobSystem *jobs,
                                NphRenderClusterLods *out)
 {
@@ -202,7 +207,7 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
         if (surfaces == NULL) {
             return NPH_RESULT_OUT_OF_MEMORY;
         }
-        cook_voxel_sampler_init(&cvs, mesh, voxels, positions, attribs, surfaces, &sampler);
+        cook_voxel_sampler_init(&cvs, mesh, voxels, positions, attribs, uv1, surfaces, &sampler);
     }
     // Level 0 as the builder takes it: the meshlets with the bounds of the
     // dequantised positions.
@@ -214,11 +219,23 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
     const u32 vn = mesh->vertices.len;
     NphVec2 *uvs = NPH_ALLOC_ARRAY(alloc, NphVec2, nph_max_u32(vn, 1U));
     NphVec3 *normals = NPH_ALLOC_ARRAY(alloc, NphVec3, nph_max_u32(vn, 1U));
-    NphResult r =
-        ranges != NULL && uvs != NULL && normals != NULL ? NPH_RESULT_OK : NPH_RESULT_OUT_OF_MEMORY;
+    // With a second set (ADR-0107): its coordinates carried as the first's, and its seams in
+    // the bytes the builder compares (the attributes, then the second set).
+    NphVec2 *uvs1 = uv1 != NULL ? NPH_ALLOC_ARRAY(alloc, NphVec2, nph_max_u32(vn, 1U)) : NULL;
+    u8 *wedges =
+        uv1 != NULL ? NPH_ALLOC_ARRAY(alloc, u8, (u64)nph_max_u32(vn, 1U) * WEDGE_UV1) : NULL;
+    NphResult r = ranges != NULL && uvs != NULL && normals != NULL &&
+                          (uv1 == NULL || (uvs1 != NULL && wedges != NULL))
+                      ? NPH_RESULT_OK
+                      : NPH_RESULT_OUT_OF_MEMORY;
     for (u32 v = 0; v < vn && r == NPH_RESULT_OK; ++v) {
         uvs[v] = nph_unpack_f16x2(attribs[v].uv0);
         normals[v] = nph_oct_decode_snorm16(attribs[v].normal);
+        if (uv1 != NULL) {
+            uvs1[v] = nph_unpack_f16x2(uv1[v]);
+            memcpy(wedges + (u64)v * WEDGE_UV1, &attribs[v], sizeof(NphMeshAttrib));
+            memcpy(wedges + (u64)v * WEDGE_UV1 + sizeof(NphMeshAttrib), &uv1[v], sizeof(u32));
+        }
     }
     const u32 mn = meshlets->meshlets.len;
     if (r == NPH_RESULT_OK) {
@@ -246,9 +263,10 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
         memset(&in, 0, sizeof in);
         in.positions = positions;
         // Seams where vertices at one position differ in what the GPU reads.
-        in.attribs = attribs;
-        in.attrib_stride = (u32)sizeof(NphMeshAttrib);
+        in.attribs = wedges != NULL ? (const void *)wedges : (const void *)attribs;
+        in.attrib_stride = wedges != NULL ? WEDGE_UV1 : (u32)sizeof(NphMeshAttrib);
         in.uvs = uvs;
+        in.uvs1 = uvs1;
         // A voxel cook's surfaces count their normals only where asked (CookMeshSettings).
         in.normals = with_voxels && settings->voxel_normals == 0 ? NULL : normals;
         in.vertex_count = mesh->vertices.len;
@@ -271,6 +289,12 @@ NphResult cook_mesh_build_lods(const CookMesh *mesh, const CookMeshlets *meshlet
     }
     if (surfaces != NULL) {
         NPH_FREE_ARRAY(alloc, u8, surfaces, nph_max_u32(sn, 1U));
+    }
+    if (uvs1 != NULL) {
+        NPH_FREE_ARRAY(alloc, NphVec2, uvs1, nph_max_u32(vn, 1U));
+    }
+    if (wedges != NULL) {
+        NPH_FREE_ARRAY(alloc, u8, wedges, (u64)nph_max_u32(vn, 1U) * WEDGE_UV1);
     }
     if (ranges != NULL) {
         NPH_FREE_ARRAY(alloc, NphRenderIndexRange, ranges, nph_max_u32(sn, 1U));

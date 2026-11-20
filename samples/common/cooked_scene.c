@@ -285,8 +285,11 @@ static u64 material_alpha_key(const CookedScene *s, const NphMaterialHeader *h)
     if (h->alpha_key == 0U) {
         return 0U;
     }
-    const u32 t = find_asset(s, h->textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texture);
-    return t != NPH_U32_MAX && s->textures[t].value != 0U ? h->alpha_key : 0U;
+    // Keys are of the first set alone (cook/ray_trim.h).
+    const NphMaterialTextureRef *base = &h->textures[NPH_MATERIAL_TEXTURE_BASE_COLOR];
+    const u32 t = find_asset(s, base->texture);
+    return t != NPH_U32_MAX && s->textures[t].value != 0U && base->texcoord == 0U ? h->alpha_key
+                                                                                  : 0U;
 }
 
 // The render mesh of a mesh asset (a head of levels apart has none: its
@@ -324,6 +327,7 @@ static NphResult create_mesh_of(CookedScene *s, const NphAsset *asset, NphRender
     const void *attribs = mv.attribs;
     d.positions = positions;
     d.attribs = attribs;
+    d.uv1 = mv.uv1;
     d.indices = mv.indices;
     d.submeshes = subs;
     d.submesh_count = h->submesh_count;
@@ -478,6 +482,7 @@ static NphResult create_material(CookedScene *s, const NphAsset *asset, f32 emis
         d.textures[t].wrap_u = (NphRenderWrap)ref->wrap_u;
         d.textures[t].wrap_v = (NphRenderWrap)ref->wrap_v;
         d.textures[t].nearest = ref->nearest != 0U;
+        d.textures[t].texcoord = ref->texcoord;
     }
     return nph_render_material_create(s->renderer, &d, out);
 }

@@ -166,6 +166,20 @@ def mesh_slot_blobs():
     return mesh_blobs() + [("SLMT", 0, 0, 16, slots, slots)]
 
 
+def mesh_uv1_blobs():
+    """The triangle with a second texture coordinate set (mesh.h version 9, UV1; ADR-0107): its
+    flag in the header and a value a vertex."""
+    blobs = mesh_blobs()
+    head = blobs[0]
+    header = bytearray(head[4])
+    flags = struct.unpack_from("<I", header, 24)[0] | (1 << 6)  # NPH_MESH_FLAG_HAS_UV1
+    struct.pack_into("<I", header, 24, flags)
+    header = bytes(header)
+    blobs[0] = (head[0], head[1], head[2], head[3], header, header)
+    uv1 = struct.pack("<3I", 0x00003C00, 0x3C003C00, 0x3C000000)  # (1,0) (1,1) (0,1) in f16
+    return blobs + [("UV1 ", 0, 0, 16, uv1, uv1)]
+
+
 def preview_blobs(lz):
     """A material preview (tools/cook/preview.h; ADR-0105): a texture of one 128x128 RGBA8 sRGB
     level (texture.h format 4, kind 2D), its pixels stored or LZ-coded."""
@@ -282,13 +296,14 @@ def texture_blobs():
     ]
 
 
-def material_blobs(alpha_mode=0, alpha_key=0):
-    """A material (material.h); from version 2 an alpha-tested one may carry its alpha key."""
+def material_blobs(alpha_mode=0, alpha_key=0, texcoords=(0, 0, 0, 0, 0)):
+    """A material (material.h); from version 2 an alpha-tested one may carry its alpha key, from
+    version 4 a slot may read the second texture coordinate set (`texcoords`, a set a slot)."""
     header = struct.pack("<4f", 1, 1, 1, 1) + struct.pack("<3f", 0, 0, 0) + struct.pack("<f", 1)
     header += struct.pack("<3f", 1, 1, 0.5) + struct.pack("<2I", alpha_mode, 0)
     header += struct.pack("<IQ", 0, alpha_key)
-    for _ in range(5):
-        header += bytes(16) + struct.pack("<I4BfI", 0, 0, 0, 0, 0, 1.0, 0)
+    for texcoord in texcoords:
+        header += bytes(16) + struct.pack("<I4BfI", texcoord, 0, 0, 0, 0, 1.0, 0)
     assert len(header) == 224
     return [("HEAD", 0, 0, 16, header, header)]
 
@@ -569,6 +584,7 @@ def main():
           nph_file(fourcc("MESH"), 6, mesh_levels_head_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_rays"), nph_file(fourcc("MESH"), 7, mesh_ray_blobs()))
     write(os.path.join(CORPUS, "nph", "mesh_slots"), nph_file(fourcc("MESH"), 8, mesh_slot_blobs()))
+    write(os.path.join(CORPUS, "nph", "mesh_uv1"), nph_file(fourcc("MESH"), 9, mesh_uv1_blobs()))
     # The material previews' cache (tools/cook/preview.h): read for their header's key.
     write(os.path.join(CORPUS, "preview", "stored"), nph_file(fourcc("TEX "), 1, preview_blobs(False)))
     write(os.path.join(CORPUS, "preview", "lz"), nph_file(fourcc("TEX "), 1, preview_blobs(True)))
@@ -580,6 +596,9 @@ def main():
     uv = struct.pack("<6f", 2, 0, 0.25, 0, 3, 0.5)
     write(os.path.join(CORPUS, "nph", "material_uv"),
           nph_file(fourcc("MATL"), 3, material_blobs() + [("UVTR", 0, 0, 16, uv, uv)]))
+    # Version 4: the occlusion and emissive slots on the second set (ADR-0107).
+    write(os.path.join(CORPUS, "nph", "material_uv1"),
+          nph_file(fourcc("MATL"), 4, material_blobs(texcoords=(0, 0, 0, 1, 1))))
     write(os.path.join(CORPUS, "nph", "scene"), nph_file(fourcc("SCEN"), 1, scene_blobs()))
     write(os.path.join(CORPUS, "nph", "scene_cells"), nph_file(fourcc("SCEN"), 2, scene_cell_blobs()))
     write(os.path.join(CORPUS, "nph", "scene_collision"),

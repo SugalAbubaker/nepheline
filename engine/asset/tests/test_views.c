@@ -361,6 +361,94 @@ static void begin_cube(NphAssetWriter *w, NphAllocator *alloc, u32 type_version)
     image_asset_free(&plain);
 }
 
+// The cube of `type_version` with a second set of `entries` values (none: no blob), its header
+// saying so where `flag`.
+static void build_cube_uv1(ImageAsset *ia, u32 type_version, u32 entries, bool flag)
+{
+    NphAssetWriter w;
+    begin_cube(&w, ia->alloc, type_version);
+    u32 uv1[9];
+    for (u32 i = 0; i < 9U; ++i) {
+        uv1[i] = nph_pack_f16x2(nph_vec2(0.125F * (f32)i, 1.0F - 0.125F * (f32)i));
+    }
+    if (entries != 0U) {
+        add(&w, NPH_MESH_TAG_UV1, 0U, uv1, (u64)entries * sizeof uv1[0]);
+    }
+    image_asset_finish(ia, &w);
+    if (flag) {
+        NphMeshHeader *h = (NphMeshHeader *)blob_bytes(ia, NPH_MESH_TAG_HEADER, 0U);
+        h->flags |= (u32)NPH_MESH_FLAG_HAS_UV1;
+    }
+}
+
+NTEST(views, mesh_view_takes_a_second_set_from_version_9)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    // A value a vertex, and the flag: read.
+    build_cube_uv1(&ia, NPH_MESH_TYPE_VERSION, 8U, true);
+    NphMeshView v;
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_ASSERT_NOT_NULL(v.uv1);
+    NTEST_EXPECT_TRUE(nph_vec2_near(nph_unpack_f16x2(v.uv1[3]), nph_vec2(0.375F, 0.625F), 0.0F));
+    image_asset_free(&ia);
+    // None: no set (and none read).
+    build_cube_uv1(&ia, NPH_MESH_TYPE_VERSION, 0U, false);
+    NTEST_ASSERT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_NULL(v.uv1);
+    image_asset_free(&ia);
+    // The flag without its blob, the blob without the flag, a value too many, or before 9.
+    build_cube_uv1(&ia, NPH_MESH_TYPE_VERSION, 0U, true);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    build_cube_uv1(&ia, NPH_MESH_TYPE_VERSION, 8U, false);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    build_cube_uv1(&ia, NPH_MESH_TYPE_VERSION, 9U, true);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    build_cube_uv1(&ia, 8U, 8U, true);
+    NTEST_EXPECT_EQ_INT(nph_mesh_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+}
+
+// A material of `type_version` whose base colour reads set `texcoord`.
+static void build_material_set(ImageAsset *ia, u32 type_version, u32 texcoord)
+{
+    memset(ia, 0, sizeof *ia);
+    ia->alloc = nph_allocator_system();
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, NPH_ASSET_TYPE_MATERIAL, type_version,
+                          nph_guid_from_cstr("mat"), 1U);
+    NphMaterialHeader h;
+    nph_material_header_default(&h);
+    h.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texture = nph_guid_from_cstr("base");
+    h.textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texcoord = texcoord;
+    add(&w, NPH_MATERIAL_TAG_HEADER, 0U, &h, sizeof h);
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, material_slots_read_the_second_set_from_version_4)
+{
+    ImageAsset ia;
+    NphMaterialView v;
+    build_material_set(&ia, NPH_MATERIAL_TYPE_VERSION, 1U);
+    NTEST_ASSERT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(v.header->textures[NPH_MATERIAL_TEXTURE_BASE_COLOR].texcoord, 1U);
+    image_asset_free(&ia);
+    // No third set; none before version 4.
+    build_material_set(&ia, NPH_MATERIAL_TYPE_VERSION, 2U);
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    build_material_set(&ia, 3U, 1U);
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    image_asset_free(&ia);
+    build_material_set(&ia, 3U, 0U);
+    NTEST_EXPECT_EQ_INT(nph_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+}
+
 // The cube with triangles for the rays alone (version 7): its one submesh's run of two, parts
 // of its first and its last triangle, for the alpha test of key 7.
 static void build_cube_with_rays(ImageAsset *ia, u32 type_version, bool header, bool ranges,

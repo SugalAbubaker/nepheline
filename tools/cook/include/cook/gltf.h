@@ -10,7 +10,8 @@
 //
 // What is imported:
 // - triangle primitives (lists, strips, and fans are triangulated) with
-//   POSITION, NORMAL, TANGENT, TEXCOORD_0, COLOR_0, in any component type
+//   POSITION, NORMAL, TANGENT, TEXCOORD_0, COLOR_0, and TEXCOORD_1 where the
+//   primitive's material has a texture on it (ADR-0107), in any component type
 //   the specification allows (KHR_mesh_quantization included) and from
 //   sparse accessors;
 // - per primitive, the rules of glTF 2.0 §3.7.2.1: without NORMAL, flat
@@ -28,9 +29,12 @@
 // - node TRS or matrices, cameras (a camera or light used by several nodes
 //   is instanced at each), and the default scene (or the first scene, or
 //   every root node when the document declares none).
-// Skins, morph targets, animations, points and lines, TEXCOORD_1 and
-// above, KHR_texture_transform, and the other extensions are skipped with
-// a warning when the document merely uses them; a document that
+// - KHR_texture_transform, baked into the set its textures read (one
+//   transform a material and set: the first texture's on it, with a warning
+//   where the others differ), its texCoord naming a texture's set.
+// Skins, morph targets, animations, points and lines, TEXCOORD_2 and
+// above, and the other extensions are skipped with a warning when the
+// document merely uses them; a document that
 // *requires* an extension the importer does not implement is refused
 // with NPH_RESULT_UNSUPPORTED, because skipping it would change the asset.
 //

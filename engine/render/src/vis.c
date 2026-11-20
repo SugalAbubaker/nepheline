@@ -447,7 +447,7 @@ NphResult render_vis_create(NphRenderer *r)
                 if (g == 0U || r->gi.supported) {
                     NPH_TRY(render_forward_pipeline(
                         r, (u32)NPH_RENDER_ALPHA_BLEND, (u32)RENDER_CULL_BACK_CCW, v->hdr_format,
-                        rt != 0U, map != 0U, true, g, &v->blend_pipelines[g][rt][map]));
+                        rt != 0U, map != 0U, true, g, false, &v->blend_pipelines[g][rt][map]));
                 }
             }
         }
@@ -506,6 +506,7 @@ void render_vis_destroy(NphRenderer *r)
         for (u32 map = 0; map < 2U; ++map) {
             for (u32 g = 0; g < 3U; ++g) {
                 nph_gpu_pipeline_destroy(dev, v->blend_pipelines[g][rt][map]);
+                nph_gpu_pipeline_destroy(dev, v->blend_pipelines_uv1[g][rt][map]);
             }
         }
     }
@@ -1663,18 +1664,36 @@ static void blend_draw(NphRenderer *r, NphGpuRenderGraph *graph, NphGpuCmd *cmd,
         ARGS_OFFSET(blend_args), r->desc.max_blend_draws, (u32)sizeof(NphVisDraw));
 }
 
-// Over the resolved image.
+// Over the resolved image, by the pipeline the frame chose (render_vis_declare_transparent).
 static void transparent_execute(NphGpuRenderGraph *graph, NphGpuCmd *cmd, void *user)
 {
     NphRenderer *r = (NphRenderer *)user;
-    // A frame that traces shadow rays, or has the sun's virtual shadow map, or
-    // the radiance cache, uses the pipeline that does; one whose only light is
-    // the cache's, the pipeline for that (the debug views want the rest).
+    blend_draw(r, graph, cmd, r->vis.frame.blend_pipeline);
+}
+
+// The pipeline that draws the frame's blended surfaces. A frame that traces shadow rays, or has
+// the sun's virtual shadow map, or the radiance cache, uses the one that does; one whose only
+// light is the cache's, the one for that (the debug views want the rest). While a material reads
+// the second texture coordinate set, the one that reads it (k_uv1; ADR-0107), made the first time
+// a frame needs it.
+static NphResult select_blend_pipeline(NphRenderer *r, NphGpuPipeline *out)
+{
+    RenderVis *v = &r->vis;
     const u32 rt = r->rt.frame_shadows != 0 ? 1U : 0U;
     const u32 vsm = r->vsm.frame_active != 0 ? 1U : 0U;
-    const bool cache_only = r->many.frame_no_other_light && !r->vis.debug_view;
+    const bool cache_only = r->many.frame_no_other_light && !v->debug_view;
     const u32 gi = r->gi.frame_active != 0 ? (cache_only ? 2U : 1U) : 0U;
-    blend_draw(r, graph, cmd, r->vis.blend_pipelines[gi][rt][vsm]);
+    if (r->uv1_materials == 0U) {
+        *out = v->blend_pipelines[gi][rt][vsm];
+        return NPH_RESULT_OK;
+    }
+    NphGpuPipeline *p = &v->blend_pipelines_uv1[gi][rt][vsm];
+    if (p->value == 0U) {
+        NPH_TRY(render_forward_pipeline(r, (u32)NPH_RENDER_ALPHA_BLEND, (u32)RENDER_CULL_BACK_CCW,
+                                        v->hdr_format, rt != 0U, vsm != 0U, true, gi, true, p));
+    }
+    *out = *p;
+    return NPH_RESULT_OK;
 }
 
 // Again, asking for the pages of the sun's virtual shadow map their shading
@@ -2677,6 +2696,7 @@ NphResult render_vis_declare_transparent(NphRenderer *r, NphGpuRenderGraph *grap
     if (!f->blend) {
         return NPH_RESULT_OK;
     }
+    NPH_TRY(select_blend_pipeline(r, &f->blend_pipeline));
     NphGpuRgPass *p =
         add_pass(graph, r, "transparent", NPH_GPU_RG_PASS_GRAPHICS, transparent_execute);
     if (p == NULL) {

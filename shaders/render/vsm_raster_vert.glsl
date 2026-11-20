@@ -51,6 +51,10 @@ void main()
     const uvec4 a = AttribsRef(mesh.attribs).a[vertex];
     // The material's coordinates (ADR-0105).
     vec2 uv = unpackHalf2x16(a.z);
+    // The base colour's set (ADR-0107).
+    if (nph_material_slot_uv1(materials.m[material].wrap, NPH_RENDER_TEX_BASE_COLOR)) {
+        uv = nph_uv1(mesh.uv1, vertex, uv);
+    }
     if (nph_material_has_uv(materials.m[material].flags)) {
         uv = nph_material_uv(materials.m[material].uv_u, materials.m[material].uv_v, uv);
     }

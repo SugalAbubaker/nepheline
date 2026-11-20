@@ -40,6 +40,10 @@ void main()
     // The material's coordinates (ADR-0105), field by field (docs/build.md "Shaders").
     MaterialsRef materials = MaterialsRef(view.v.materials);
     vec2 uv = unpackHalf2x16(a.z);
+    // The base colour's set (ADR-0107).
+    if (nph_material_slot_uv1(materials.m[cluster.material].wrap, NPH_RENDER_TEX_BASE_COLOR)) {
+        uv = nph_uv1(mesh.uv1, vertex, uv);
+    }
     if (nph_material_has_uv(materials.m[cluster.material].flags)) {
         uv = nph_material_uv(materials.m[cluster.material].uv_u, materials.m[cluster.material].uv_v,
                              uv);

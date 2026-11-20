@@ -239,6 +239,9 @@ static void canonicalize(CookVertex *v, u32 flags)
     if ((flags & (u32)COOK_MESH_HAS_UV0) == 0U) {
         v->uv0 = nph_vec2_zero();
     }
+    if ((flags & (u32)COOK_MESH_HAS_UV1) == 0U) {
+        v->uv1 = nph_vec2_zero();
+    }
     if ((flags & (u32)COOK_MESH_HAS_COLORS) == 0U) {
         v->color = nph_vec4_one();
     }
@@ -343,6 +346,7 @@ void cook_proxy_source_init(CookProxySource *s, NphAllocator *alloc)
     nph_render_cluster_lods_init(&s->lods, alloc);
     NPH_ARRAY_INIT(&s->positions, alloc);
     NPH_ARRAY_INIT(&s->attribs, alloc);
+    NPH_ARRAY_INIT(&s->uv1, alloc);
     cook_mesh_init(&s->slots, alloc);
 }
 
@@ -354,6 +358,7 @@ void cook_proxy_source_free(CookProxySource *s)
     nph_render_cluster_lods_free(&s->lods);
     NPH_ARRAY_FREE(&s->positions);
     NPH_ARRAY_FREE(&s->attribs);
+    NPH_ARRAY_FREE(&s->uv1);
     cook_mesh_free(&s->slots);
 }
 
@@ -367,10 +372,22 @@ void cook_proxy_source_free(CookProxySource *s)
 // already do.
 static NphResult append_added_vertices(NphAllocator *alloc, const NphRenderClusterLods *lods,
                                        NphVec3 **positions, NphMeshPosition **posn,
-                                       NphMeshAttrib **attr, u32 *vertices_held)
+                                       NphMeshAttrib **attr, u32 **uv1, u32 *vertices_held)
 {
     const u32 old_count = *vertices_held;
     const u32 count = old_count + lods->added.len;
+    if (*uv1 != NULL) {
+        u32 *grown = NPH_ALLOC_ARRAY(alloc, u32, nph_max_u32(count, 1U));
+        if (grown == NULL) {
+            return NPH_RESULT_OUT_OF_MEMORY;
+        }
+        memcpy(grown, *uv1, (size_t)old_count * sizeof *grown);
+        for (u32 i = 0; i < lods->added.len; ++i) {
+            grown[old_count + i] = nph_pack_f16x2(lods->added.data[i].uv1);
+        }
+        NPH_FREE_ARRAY(alloc, u32, *uv1, nph_max_u32(old_count, 1U));
+        *uv1 = grown;
+    }
     NphVec3 *new_positions = NPH_ALLOC_ARRAY(alloc, NphVec3, nph_max_u32(count, 1U));
     NphMeshPosition *new_posn = NPH_ALLOC_ARRAY(alloc, NphMeshPosition, nph_max_u32(count, 1U));
     NphMeshAttrib *new_attr = NPH_ALLOC_ARRAY(alloc, NphMeshAttrib, nph_max_u32(count, 1U));
@@ -409,8 +426,8 @@ static NphResult append_added_vertices(NphAllocator *alloc, const NphRenderClust
 static NphResult keep_proxy_source(const CookMesh *mesh, const CookMeshlets *meshlets,
                                    const NphMeshletBounds *mbounds,
                                    const NphRenderClusterLods *lods, const NphVec3 *positions,
-                                   const NphMeshAttrib *attr, u32 vn, NphSphere sphere,
-                                   f32 min_error, CookProxySource *out)
+                                   const NphMeshAttrib *attr, const u32 *uv1, u32 vn,
+                                   NphSphere sphere, f32 min_error, CookProxySource *out)
 {
     NphRenderClusterLods *l = &out->lods;
     NphAllocator *a = mesh->alloc;
@@ -506,6 +523,9 @@ static NphResult keep_proxy_source(const CookMesh *mesh, const CookMeshlets *mes
                 if (r == NPH_RESULT_OK) {
                     r = NPH_ARRAY_PUSH(&out->attribs, attr[v]);
                 }
+                if (r == NPH_RESULT_OK && uv1 != NULL) {
+                    r = NPH_ARRAY_PUSH(&out->uv1, uv1[v]);
+                }
             }
             if (r == NPH_RESULT_OK) {
                 r = NPH_ARRAY_PUSH(&l->clusters.vertices, remap[v]);
@@ -576,6 +596,7 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     h.flags =
         ((mesh->flags & (u32)COOK_MESH_HAS_TANGENTS) != 0U ? (u32)NPH_MESH_FLAG_HAS_TANGENTS : 0U) |
         ((mesh->flags & (u32)COOK_MESH_HAS_UV0) != 0U ? (u32)NPH_MESH_FLAG_HAS_UV0 : 0U) |
+        ((mesh->flags & (u32)COOK_MESH_HAS_UV1) != 0U ? (u32)NPH_MESH_FLAG_HAS_UV1 : 0U) |
         ((mesh->flags & (u32)COOK_MESH_NO_RAYS) != 0U ? (u32)NPH_MESH_FLAG_NO_RAYS : 0U) |
         ((mesh->flags & (u32)COOK_MESH_HAS_COLORS) != 0U ? (u32)NPH_MESH_FLAG_HAS_COLORS : 0U);
     h.position_offset = box.min;
@@ -584,10 +605,14 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     NphVec3 *positions = NPH_ALLOC_ARRAY(alloc, NphVec3, nph_max_u32(vn, 1U));
     NphMeshPosition *posn = NPH_ALLOC_ARRAY(alloc, NphMeshPosition, nph_max_u32(vn, 1U));
     NphMeshAttrib *attr = NPH_ALLOC_ARRAY(alloc, NphMeshAttrib, nph_max_u32(vn, 1U));
+    // The second set (f16x2), its own stream (NPH_MESH_TAG_UV1), where a slot reads one.
+    const bool with_uv1 = (mesh->flags & (u32)COOK_MESH_HAS_UV1) != 0U;
+    u32 *uv1 = with_uv1 ? NPH_ALLOC_ARRAY(alloc, u32, nph_max_u32(vn, 1U)) : NULL;
     NphSubmesh *subs = NPH_ALLOC_ARRAY_ZEROED(alloc, NphSubmesh, nph_max_u32(sn, 1U));
     NphMeshletBounds *mbounds = NPH_ALLOC_ARRAY(alloc, NphMeshletBounds, nph_max_u32(mn, 1U));
     NphResult r = NPH_RESULT_OK;
-    if (positions == NULL || posn == NULL || attr == NULL || subs == NULL || mbounds == NULL) {
+    if (positions == NULL || posn == NULL || attr == NULL || subs == NULL || mbounds == NULL ||
+        (with_uv1 && uv1 == NULL)) {
         r = NPH_RESULT_OUT_OF_MEMORY;
     }
     if (r == NPH_RESULT_OK) {
@@ -604,6 +629,9 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
             attr[i].tangent =
                 nph_pack_snorm8x4(nph_vec4_from_vec3(t, v->tangent.w < 0.0F ? -1.0F : 1.0F));
             attr[i].uv0 = nph_pack_f16x2(v->uv0);
+            if (uv1 != NULL) {
+                uv1[i] = nph_pack_f16x2(v->uv1);
+            }
             attr[i].color = (mesh->flags & (u32)COOK_MESH_HAS_COLORS) != 0U
                                 ? nph_pack_unorm8x4(v->color)
                                 : 0xFFFFFFFFU;
@@ -685,11 +713,11 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     u32 vertices_held = vn;
     if (r == NPH_RESULT_OK && !settings->no_lods && mn > 1U) {
         const u64 lods_start = nph_time_now_ns();
-        r = cook_mesh_build_lods(mesh, meshlets, positions, attr, mbounds, settings, voxels, jobs,
-                                 &lods);
+        r = cook_mesh_build_lods(mesh, meshlets, positions, attr, uv1, mbounds, settings, voxels,
+                                 jobs, &lods);
         with_lods = r == NPH_RESULT_OK && lods.levels > 1U;
         if (r == NPH_RESULT_OK && lods.added.len != 0U) {
-            r = append_added_vertices(alloc, &lods, &positions, &posn, &attr, &vertices_held);
+            r = append_added_vertices(alloc, &lods, &positions, &posn, &attr, &uv1, &vertices_held);
             h.vertex_count = vertices_held;
         }
         if (stats != NULL) {
@@ -699,7 +727,7 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     }
     if (r == NPH_RESULT_OK && proxy != NULL) {
         r = keep_proxy_source(mesh, meshlets, mbounds, with_lods ? &lods : NULL, positions, attr,
-                              vertices_held, h.sphere, min_error, proxy);
+                              uv1, vertices_held, h.sphere, min_error, proxy);
     }
     // The voxels compact, as the renderer draws them (render/voxel.h "The
     // compact form"; ADR-0063): each voxel cluster's triangle_offset then
@@ -762,6 +790,10 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     if (r == NPH_RESULT_OK) {
         r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_ATTRIBS, 0U, attr,
                                       (u64)vertices_held * sizeof *attr, NPH_ASSET_CODEC_LZ, 0U);
+    }
+    if (r == NPH_RESULT_OK && uv1 != NULL) {
+        r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_UV1, 0U, uv1,
+                                      (u64)vertices_held * sizeof *uv1, NPH_ASSET_CODEC_LZ, 0U);
     }
     if (r == NPH_RESULT_OK) {
         r = nph_asset_writer_add_blob(writer, NPH_MESH_TAG_INDICES, 0U, mesh->indices.data,
@@ -862,6 +894,9 @@ static NphResult mesh_write(const CookMesh *mesh, const CookMeshlets *meshlets,
     }
     if (attr != NULL) {
         NPH_FREE_ARRAY(alloc, NphMeshAttrib, attr, nph_max_u32(vertices_held, 1U));
+    }
+    if (uv1 != NULL) {
+        NPH_FREE_ARRAY(alloc, u32, uv1, nph_max_u32(vertices_held, 1U));
     }
     if (subs != NULL) {
         NPH_FREE_ARRAY(alloc, NphSubmesh, subs, nph_max_u32(sn, 1U));

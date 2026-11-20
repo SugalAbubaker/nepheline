@@ -79,6 +79,18 @@ GiTable gi_table(GiViewRef g)
 #ifndef NPH_GI_HIT_HAS_UV
 #define NPH_GI_HIT_HAS_UV(flags) nph_material_has_uv(flags)
 #endif
+// And whether a slot reads the second set (ADR-0107), likewise.
+#ifndef NPH_GI_HIT_HAS_UV1
+#define NPH_GI_HIT_HAS_UV1(flags) nph_material_has_uv1(flags)
+#endif
+
+// The area a triangle's texture coordinates span, for the level its texels are read at.
+float gi_hit_uv_area(mat3x2 uvs)
+{
+    const vec2 duv1 = uvs[1] - uvs[0];
+    const vec2 duv2 = uvs[2] - uvs[0];
+    return abs(duv1.x * duv2.y - duv1.y * duv2.x);
+}
 
 // The ray query's committed hit, met along `w`. Its textures are read at the level whose texels
 // are `footprint` wide there, the width the ray stands for (ADR-0089); 0: the size of the hit's
@@ -132,6 +144,18 @@ GiHit hit_surface(VisViewRef view, ViewRef rview, GiViewRef g, GiTable table, ra
     const vec2 duv1 = uvs[1] - uvs[0];
     const vec2 duv2 = uvs[2] - uvs[0];
     float uv_area = abs(duv1.x * duv2.y - duv1.y * duv2.x);
+    // The second set (ADR-0107) where the material reads it: the mesh's, else the first's. The
+    // base colour's coordinates and area are its where that slot reads it; the emissive's set is
+    // taken below.
+    const bool second = NPH_GI_HIT_HAS_UV1(materials.m[mi].flags);
+    mat3x2 uvs1 = uvs;
+    if (second) {
+        uvs1 = nph_uv1s(mesh.uv1, vtx, uvs);
+        if (nph_material_slot_uv1(materials.m[mi].wrap, NPH_RENDER_TEX_BASE_COLOR)) {
+            uv = uvs1 * b;
+            uv_area = gi_hit_uv_area(uvs1);
+        }
+    }
     // The material's coordinates where it has a transform (ADR-0105): their area grows by the
     // size of the linear part's determinant, which the level follows.
     if (NPH_GI_HIT_HAS_UV(materials.m[mi].flags)) {
@@ -142,6 +166,24 @@ GiHit hit_surface(VisViewRef view, ViewRef rview, GiViewRef g, GiTable table, ra
     }
     const float lod =
         log2(cell) + 0.5 * log2(max(uv_area, 1e-12) / max(length(edge_normal), 1e-12));
+    // The emissive's coordinates and level: the base colour's, but where the material reads the
+    // second set and the two slots read different sets.
+    vec2 uv_emissive = uv;
+    float lod_emissive = lod;
+    if (second && nph_material_slot_uv1(materials.m[mi].wrap, NPH_RENDER_TEX_EMISSIVE) !=
+                      nph_material_slot_uv1(materials.m[mi].wrap, NPH_RENDER_TEX_BASE_COLOR)) {
+        const mat3x2 uvs_emissive =
+            nph_material_slot_uv1(materials.m[mi].wrap, NPH_RENDER_TEX_EMISSIVE) ? uvs1 : uvs;
+        uv_emissive = uvs_emissive * b;
+        float area = gi_hit_uv_area(uvs_emissive);
+        if (NPH_GI_HIT_HAS_UV(materials.m[mi].flags)) {
+            const vec4 uv_u = materials.m[mi].uv_u;
+            const vec4 uv_v = materials.m[mi].uv_v;
+            uv_emissive = nph_material_uv(uv_u, uv_v, uv_emissive);
+            area *= abs(uv_u.x * uv_v.y - uv_u.y * uv_v.x);
+        }
+        lod_emissive = log2(cell) + 0.5 * log2(max(area, 1e-12) / max(length(edge_normal), 1e-12));
+    }
     // What it reflects evenly of the light it receives: its base colour, a metal's too. A metal
     // reflects by its base colour as a mirror or a lobe does, not evenly; sent on evenly it is
     // the same light in all, where a hit that reflected nothing left metal black in what
@@ -157,7 +199,8 @@ GiHit hit_surface(VisViewRef view, ViewRef rview, GiViewRef g, GiTable table, ra
             .rgb;
     const vec3 emissive = materials.m[mi].emissive.rgb *
                           material_texel(materials.m[mi].textures[NPH_RENDER_TEX_EMISSIVE],
-                                         materials.m[mi].samplers[NPH_RENDER_TEX_EMISSIVE], uv, lod)
+                                         materials.m[mi].samplers[NPH_RENDER_TEX_EMISSIVE],
+                                         uv_emissive, lod_emissive)
                               .rgb;
 
     // The sun's light it reflects, and the cache's (the bounces before this frame) where the

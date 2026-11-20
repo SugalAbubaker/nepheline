@@ -77,15 +77,19 @@ What there is today:
    optional `COLS` blob (a node and a GUID), so an empty with proxies collides too. Step four (ADR-0102 §1.4) makes
    colliders of them in the runtime.
 
-3. **A second texture-coordinate set.** `TEXCOORD_1` is read, and each texture slot names its set (a texture info's
-   `texCoord`, 0 or 1, written to `NphMaterialTextureRef.texcoord`; material type version 4 lets it be 1). Mesh type
-   version 9 adds an optional stream, `UV1 ` (`f16x2` a vertex, `NPH_MESH_FLAG_HAS_UV1`), apart from the 16-byte
-   attributes, so a mesh without one costs what it does today. The levels of detail carry it through their
-   simplification, the voxel bake and the rays' trims sample each slot with its set, and the renderer binds the stream
-   per mesh. Every shader that samples a material texture picks the slot's set under a specialization constant, made
-   lazily the first time a material reads set 1 (#189's precedent), so frames without such materials run today's code.
-   Tangents stay set 0's: a normal map on set 1 is read in set 0's tangent frame, with a warning (glTF exporters keep
-   normal maps on the set the tangents were made for).
+3. **A second texture-coordinate set.** `TEXCOORD_1` is read where a primitive's material has a texture on it, and
+   each texture slot names its set (a texture info's `texCoord`, or `KHR_texture_transform`'s override, 0 or 1, written
+   to `NphMaterialTextureRef.texcoord`; material type version 4 lets it be 1). Mesh type version 9 adds an optional
+   stream, `UV1 ` (`f16x2` a vertex, `NPH_MESH_FLAG_HAS_UV1`), apart from the 16-byte attributes, so a mesh without one
+   costs what it does today. The levels of detail carry it through their simplification and keep its seams, the voxel
+   bake samples each slot with its set, and the renderer binds the stream per mesh. The shaders take a slot's set where
+   ADR-0105 takes the coordinates' transform, and as it does: the resolve, the radiance cache's update and the
+   reflections' rays under their `k_uv` variants, and the forward pair under a `k_uv1` of its own, each variant made the
+   first time a frame needs it, so frames without such materials run today's code; the rasters' and the rays' alpha
+   tests and the page requests test the material's bit where they run. An alpha key (ADR-0096) is the first set's: a
+   material whose base colour reads the second has none, and the rays take its test in full. Tangents stay set 0's: a
+   normal map on set 1 is read in set 0's tangent frame, with a warning (glTF exporters keep normal maps on the set the
+   tangents were made for). Materials made in the editor (`.nmat`) read the first set.
 
 4. **Glass, and the material extensions the renderer can draw.**
    - **IOR and specular:** `KHR_materials_ior` and the factor of `KHR_materials_specular` give each material its F0,
@@ -145,13 +149,21 @@ in one window.
 - **New formats:** scene import settings version 1, the collision asset type version 1, scene type version 3 (`COLS`),
   mesh type version 9 (`UV1 `), material type version 4 (`texcoord` 1). Each is versioned and fuzzed, and the older
   versions still read. Mesh type version 9 cooks every mesh again once: the reference scenes' next nightly run takes
-  the hour a change of the cooker's output takes there.
+  the hour a change of the cooker's output takes there. It changes no picture: Bistro cooked by both cookers is the
+  same in every blob, its 551 meshes and 254 materials apart only in their headers' type versions.
 - **Collision is in the frame of what collides.** An entity drawn at a scale other than one needs its geometry scaled:
   the physics geometry has no scale (ADR-0042), so step four makes scaled copies of hulls and scales meshes where it
   creates shapes.
 - **Tinted glass changes pictures** where coloured transmissive materials are drawn; it waits for the user's word, with
   its pictures and its cost on the reference scenes.
-- **A material reading set 1 pays** one more stream read in the resolve and a variant of each shader that samples it;
-  the reference scenes read none and pay nothing.
+- **The second set costs the reference scenes nothing measurable.** On the RTX 3060 Ti over the 18 reference views at
+  1440p, against 7c87711, four rounds in alternating order: the frame −0.005 ms on average (−0.018 to +0.009 ms), the
+  CPU +0.0001 ms. All but three of the pipelines `render_perf` reports (70 in Bistro and the interior) have the base's
+  registers, binary size and memory. The three test the set where they run: the masked software raster (82 registers,
+  from 78; +0.0004 ms a view), the voxel resolve's ray-traced variants (16 more bytes of spill), and AO with the sun's
+  rays, an option that is off by default. Before the forward pair had `k_uv1`, passing the set cost the blended surfaces
+  7 % (+0.01 to +0.025 ms a view). Each pass that reads the mesh table declares 0.26 MB more (its 16,384 records are 16
+  bytes longer, `NphVisMesh` 240 bytes); Bistro's 551 meshes read 8.8 KB more at most, through L2. A material that reads
+  set 1 pays one more stream read where its slots sample it, and on its first frame the variants' compiles.
 - **Sub-asset keys stay index-based** (`mesh/<i>`, `collision/node/<i>`), as glTF's are: a re-export that reorders
   meshes or nodes renames their assets, as it does today.
