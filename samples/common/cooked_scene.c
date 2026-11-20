@@ -468,6 +468,10 @@ static NphResult create_material(CookedScene *s, const NphAsset *asset, f32 emis
     d.transmissive = (h->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE) != 0U;
     d.normal_scale = h->textures[NPH_MATERIAL_TEXTURE_NORMAL].scale;
     d.occlusion_strength = h->textures[NPH_MATERIAL_TEXTURE_OCCLUSION].scale;
+    // F0 and glass's tint (ADR-0107).
+    const NphMaterialOptics optics = nph_material_view_optics(&mv);
+    d.f0 = optics.f0;
+    d.transmission = d.transmissive ? optics.transmission : nph_vec3_zero();
     d.alpha_key = material_alpha_key(s, h);
     // Its coordinates' transform (ADR-0105); the key is of the untransformed test.
     const NphMaterialUvTransform uv = nph_material_view_uv(&mv);

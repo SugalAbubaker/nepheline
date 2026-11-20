@@ -362,6 +362,12 @@ of glTF 2.0:
   differ only to second order in the frame's spread across a triangle.
   Two-channel maps (BC5, RG8) rebuild z. Meshes without tangents get a
   frame from screen-space derivatives (Schüler 2006).
+- **F0:** a material's dielectric part reflects head on its own share
+  (`NphRenderMaterialDesc.f0`, the record's `emissive.w`; glTF's
+  `KHR_materials_ior` and the factor of `KHR_materials_specular`; ADR-0107),
+  0.04 by default, an index of refraction of 1.5: a metal's F0 is its base
+  colour, mixed by metalness as before. The forward pass and the resolve read
+  it; the voxel far field keeps 0.04, its format holding no room for it.
 - **Occlusion** applies to indirect light only (glTF), and also drives
   specular occlusion (Lagarde & de Rousiers 2014). On the production path
   the screen's ambient occlusion multiplies it, the diffuse light's with
@@ -374,7 +380,17 @@ of glTF 2.0:
   (`NphRenderMaterialDesc.transmissive`) is a blended material whose alpha is the
   share its body keeps: what it shades, its reflection with it, is added whole,
   and what is behind it shows less by that share and by what its surface turns
-  back ([ADR-0094](adr/0094-glass-blended-casters-and-the-grazing-sun.md)). A
+  back ([ADR-0094](adr/0094-glass-blended-casters-and-the-grazing-sun.md)).
+  What is behind is kept by the shader's second output, channel by channel
+  (dual-source blending: `dst = src0 + dst * src1`; ADR-0107): one minus the
+  first's alpha, as "over" composites, but where glass is tinted
+  (`NphRenderMaterialDesc.transmission`, `NPH_RENDER_MATERIAL_TINTED`), whose
+  share is times its tint, its vertex colour and its base colour texture, and
+  so coloured. The pipelines that blend so are variants (`k_tint`), drawn while
+  tinted glass is live (`NphRenderer.tinted_materials`: the production path's
+  frame, the reference renderer's draw), each made the first time a frame needs
+  it; the others blend "over" by the first output's alpha, as before. Blending
+  every blended surface so cost 5 to 8 % of the blended pass. A
   blended surface casts no shadow in the sun's map and stops no ray: glass, and
   a decal a hair before its wall. Double-sided materials flip the whole tangent
   frame on back faces.

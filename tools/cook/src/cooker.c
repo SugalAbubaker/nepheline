@@ -1219,7 +1219,7 @@ static NphResult cook_scene_textures(Cooker *c, const char *key, CookGltfScene *
 
 static NphResult cook_material(Cooker *c, const char *key, const char *sub, const char *file,
                                const NphMaterialHeader *h, const NphMaterialUvTransform *uv,
-                               u64 content_hash, NphGuid guid)
+                               const NphMaterialOptics *optics, u64 content_hash, NphGuid guid)
 {
     const u64 shash = settings_hash(c, NPH_ASSET_TYPE_MATERIAL);
     if (is_current(c, key, sub, content_hash, shash)) {
@@ -1233,6 +1233,11 @@ static NphResult cook_material(Cooker *c, const char *key, const char *sub, cons
                                             NPH_ASSET_CODEC_NONE, 0U);
     if (r == NPH_RESULT_OK && uv != NULL) {
         r = nph_asset_writer_add_blob(&w, NPH_MATERIAL_TAG_UV, 0U, uv, sizeof *uv,
+                                      NPH_ASSET_CODEC_NONE, 0U);
+    }
+    // Its optics where they are not the default (ADR-0107).
+    if (r == NPH_RESULT_OK && optics != NULL && !nph_material_optics_is_default(optics)) {
+        r = nph_asset_writer_add_blob(&w, NPH_MATERIAL_TAG_OPTICS, 0U, optics, sizeof *optics,
                                       NPH_ASSET_CODEC_NONE, 0U);
     }
     if (r == NPH_RESULT_OK) {
@@ -1327,7 +1332,7 @@ NphResult cooker_cook_material(Cooker *c, const char *source_path)
         cook_material_source_header(&m, textures, &h);
         const NphMaterialUvTransform uv = cook_material_source_uv(&m);
         r = cook_material(c, key, "material", "material", &h,
-                          nph_material_uv_is_identity(&uv) ? NULL : &uv, content_hash,
+                          nph_material_uv_is_identity(&uv) ? NULL : &uv, NULL, content_hash,
                           asset_guid(key, "material"));
     }
     if (r != NPH_RESULT_OK) {
@@ -2640,7 +2645,7 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         char file[COOK_GLTF_NAME_MAX + 32U];
         snprintf(file, sizeof file, "material_%u_%s", m, mat->name);
         material_guids[m] = asset_guid(key, sub);
-        r = cook_material(c, key, sub, file, &mat->header, NULL, scene.content_hash,
+        r = cook_material(c, key, sub, file, &mat->header, NULL, &mat->optics, scene.content_hash,
                           material_guids[m]);
         if (r == NPH_RESULT_OK) {
             r = NPH_ARRAY_PUSH(&produced, material_guids[m]);
@@ -2660,7 +2665,7 @@ NphResult cooker_cook_gltf(Cooker *c, const char *source_path)
         NphMaterialHeader h;
         nph_material_header_default(&h);
         default_material = asset_guid(key, "material/default");
-        r = cook_material(c, key, "material/default", "material_default", &h, NULL,
+        r = cook_material(c, key, "material/default", "material_default", &h, NULL, NULL,
                           scene.content_hash, default_material);
         if (r == NPH_RESULT_OK) {
             r = NPH_ARRAY_PUSH(&produced, default_material);

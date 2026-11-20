@@ -99,6 +99,14 @@ layout(location = 3) in vec2 in_uv;
 layout(location = 4) in vec4 in_color;
 layout(location = 6) in vec2 in_uv1;
 layout(location = 0) out vec4 out_color;
+#if NPH_FORWARD_ALPHA_MODE == 2
+// What of the light behind the surface passes, channel by channel: the blend's second source
+// (dual-source blending; ADR-0107), the destination's factor, written in the variants that blend
+// so (k_tint): those drawn while a tinted material is live (renderer.c render_forward_pipeline's
+// `tint`). The others blend "over" by the first output's alpha, as before.
+layout(location = 0, index = 1) out vec4 out_transmit;
+layout(constant_id = 6) const bool k_tint = false;
+#endif
 
 #if NPH_FORWARD_ALPHA_MODE == 2
 // A blended surface's colour as the pipeline composites it, "over" with the colour multiplied
@@ -108,15 +116,37 @@ layout(location = 0) out vec4 out_color;
 // surface's, added as shaded; what is behind it shows less by what the surface turns back too,
 // a dielectric's share at the angle it is seen from (Schlick, "An Inexpensive BRDF Model for
 // Physically-Based Rendering", 1994; 4 % head on).
-vec4 forward_blended(NphRenderMaterialData m, NphSurface s, vec3 color, float alpha)
+//
+// The light behind passes by the second output, channel by channel (ADR-0107): one minus the
+// first's alpha, as "over" composites, but where glass is tinted (NPH_RENDER_MATERIAL_TINTED),
+// whose share is then times its tint, its vertex colour and its base colour texture (glTF tints
+// what glass lets through by its base colour), and so coloured.
+void forward_blended(NphRenderMaterialData m, NphSurface s, vec3 color, float alpha)
 {
     if ((m.flags & NPH_RENDER_MATERIAL_TRANSMISSIVE) == 0u) {
-        return vec4(color * alpha, alpha);
+        out_color = vec4(color * alpha, alpha);
+        if (k_tint) {
+            out_transmit = vec4(vec3(1.0 - out_color.a), 0.0);
+        }
+        return;
     }
     const vec3 n = normalize(s.face_normal);
     const vec3 v = normalize(-s.position);
-    const float turned = 0.04 + 0.96 * pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 5.0);
-    return vec4(color, 1.0 - (1.0 - alpha) * (1.0 - turned));
+    // Schlick's share at the angle it is seen from, from the material's F0.
+    const float f0 = m.emissive.w;
+    const float turned = f0 + (1.0 - f0) * pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 5.0);
+    out_color = vec4(color, 1.0 - (1.0 - alpha) * (1.0 - turned));
+    if (!k_tint) {
+        return;
+    }
+    out_transmit = vec4(vec3(1.0 - out_color.a), 0.0);
+    if ((m.flags & NPH_RENDER_MATERIAL_TINTED) != 0u) {
+        vec3 tint = m.transmission.rgb * s.color.rgb;
+        if (nph_material_has(m, NPH_RENDER_TEX_BASE_COLOR)) {
+            tint *= nph_surface_sample(m, NPH_RENDER_TEX_BASE_COLOR, s).rgb;
+        }
+        out_transmit.rgb = (1.0 - alpha) * (1.0 - turned) * tint;
+    }
 }
 #endif
 
@@ -219,14 +249,16 @@ void main()
 #if NPH_FORWARD_ALPHA_MODE == 2
     if (k_cache_only) {
         const float metallic = m.metallic;
-        const vec3 albedo = base.rgb * (1.0 - metallic) * 0.96 + mix(vec3(0.04), base.rgb, metallic);
+        const float f0 = m.emissive.w; // the material's (ADR-0107; 0.04 by default)
+        const vec3 albedo =
+            base.rgb * (1.0 - metallic) * (1.0 - f0) + mix(vec3(f0), base.rgb, metallic);
         vec3 emissive = m.emissive.rgb;
         if (nph_material_has(m, NPH_RENDER_TEX_EMISSIVE)) {
             emissive *= nph_surface_sample(m, NPH_RENDER_TEX_EMISSIVE, s).rgb;
         }
         color = min((albedo * g_gi_cell.rgb * (NPH_INV_PI * g_gi_cell.w) + emissive) * view.v.exposure,
                     vec3(NPH_RENDER_HALF_MAX));
-        out_color = forward_blended(m, s, color, base.a);
+        forward_blended(m, s, color, base.a);
         return;
     }
 #endif
@@ -236,7 +268,7 @@ void main()
         color = nph_surface_shade(view, m, s, base);
     }
 #if NPH_FORWARD_ALPHA_MODE == 2
-    out_color = forward_blended(m, s, color, base.a);
+    forward_blended(m, s, color, base.a);
 #else
     out_color = vec4(color, 1.0);
 #endif

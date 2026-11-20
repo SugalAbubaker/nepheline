@@ -296,11 +296,11 @@ def texture_blobs():
     ]
 
 
-def material_blobs(alpha_mode=0, alpha_key=0, texcoords=(0, 0, 0, 0, 0)):
+def material_blobs(alpha_mode=0, alpha_key=0, texcoords=(0, 0, 0, 0, 0), flags=0):
     """A material (material.h); from version 2 an alpha-tested one may carry its alpha key, from
     version 4 a slot may read the second texture coordinate set (`texcoords`, a set a slot)."""
     header = struct.pack("<4f", 1, 1, 1, 1) + struct.pack("<3f", 0, 0, 0) + struct.pack("<f", 1)
-    header += struct.pack("<3f", 1, 1, 0.5) + struct.pack("<2I", alpha_mode, 0)
+    header += struct.pack("<3f", 1, 1, 0.5) + struct.pack("<2I", alpha_mode, flags)
     header += struct.pack("<IQ", 0, alpha_key)
     for texcoord in texcoords:
         header += bytes(16) + struct.pack("<I4BfI", texcoord, 0, 0, 0, 0, 1.0, 0)
@@ -596,6 +596,11 @@ def main():
     uv = struct.pack("<6f", 2, 0, 0.25, 0, 3, 0.5)
     write(os.path.join(CORPUS, "nph", "material_uv"),
           nph_file(fourcc("MATL"), 3, material_blobs() + [("UVTR", 0, 0, 16, uv, uv)]))
+    # Version 5: optics (OPTC; ADR-0107), a tinted glass's F0 and tint (blended, transmissive).
+    optics = struct.pack("<4f", 0.02, 1.0, 0.5, 0.25)
+    write(os.path.join(CORPUS, "nph", "material_optics"),
+          nph_file(fourcc("MATL"), 5, material_blobs(alpha_mode=2, flags=4) +
+                   [("OPTC", 0, 0, 16, optics, optics)]))
     # Version 4: the occlusion and emissive slots on the second set (ADR-0107).
     write(os.path.join(CORPUS, "nph", "material_uv1"),
           nph_file(fourcc("MATL"), 4, material_blobs(texcoords=(0, 0, 0, 1, 1))))

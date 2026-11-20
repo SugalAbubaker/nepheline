@@ -574,6 +574,27 @@ def gltf_second_set():
     return doc
 
 
+def gltf_optics():
+    """The materials' optics (ADR-0107): KHR_materials_ior and _specular (with a colour the
+    importer warns of), and glass tinted by its base colour and KHR_materials_volume."""
+    return {
+        "asset": {"version": "2.0", "generator": "nepheline fuzz seeds"},
+        "extensionsUsed": ["KHR_materials_ior", "KHR_materials_specular",
+                           "KHR_materials_transmission", "KHR_materials_volume"],
+        "materials": [
+            {"name": "water", "extensions": {
+                "KHR_materials_ior": {"ior": 1.33},
+                "KHR_materials_specular": {"specularFactor": 0.5,
+                                           "specularColorFactor": [1, 0.9, 0.8]}}},
+            {"name": "amber", "pbrMetallicRoughness": {"baseColorFactor": [1, 0.9, 0.7, 1]},
+             "extensions": {
+                 "KHR_materials_transmission": {"transmissionFactor": 1.0},
+                 "KHR_materials_volume": {"thicknessFactor": 0.02, "attenuationDistance": 0.01,
+                                          "attenuationColor": [0.5, 1, 1]}}},
+        ],
+    }
+
+
 def gltf_seeds():
     triangle, triangle_buf = gltf_triangle()
     return {
@@ -585,6 +606,7 @@ def gltf_seeds():
         "foliage_masked": _dump(gltf_foliage()),
         "collision": _dump(gltf_collision()),
         "second_set": _dump(gltf_second_set()),
+        "optics": _dump(gltf_optics()),
     }
 
 

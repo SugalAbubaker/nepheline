@@ -105,8 +105,9 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
                                   bool ray_query, bool vsm, bool vis_depth, u32 gi, bool uv1,
-                                  NphGpuPipeline *out)
+                                  bool tint, NphGpuPipeline *out)
 {
+    NPH_ASSERT(!tint || alpha == (u32)NPH_RENDER_ALPHA_BLEND);
     NPH_ASSERT(!vis_depth || alpha == (u32)NPH_RENDER_ALPHA_BLEND);
     NPH_ASSERT(gi == 0U || vis_depth);
     static const RenderShader frags[2][3] = {
@@ -144,11 +145,12 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
     }
     if (alpha == (u32)NPH_RENDER_ALPHA_BLEND) {
         // "Over" compositing of a colour its shader has multiplied by its alpha already
-        // (forward_frag.glsl forward_blended: glass adds what it reflects whole); blended
-        // surfaces do not occlude.
+        // (forward_frag.glsl forward_blended: glass adds what it reflects whole); in the k_tint
+        // variants what is behind is kept by the shader's second output, channel by channel, so
+        // glass tints it (ADR-0107). Blended surfaces do not occlude.
         d.blend[0].enable = 1;
         d.blend[0].src_color = NPH_GPU_BLEND_ONE;
-        d.blend[0].dst_color = NPH_GPU_BLEND_ONE_MINUS_SRC_ALPHA;
+        d.blend[0].dst_color = tint ? NPH_GPU_BLEND_SRC1_COLOR : NPH_GPU_BLEND_ONE_MINUS_SRC_ALPHA;
         d.blend[0].color_op = NPH_GPU_BLEND_OP_ADD;
         d.blend[0].src_alpha = NPH_GPU_BLEND_ONE;
         d.blend[0].dst_alpha = NPH_GPU_BLEND_ONE_MINUS_SRC_ALPHA;
@@ -165,7 +167,8 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
     d.specialization[3] = gi == 2U ? 1U : 0U;
     d.specialization[4] = vis_depth ? 1U : 0U;
     d.specialization[5] = uv1 ? 1U : 0U;
-    d.specialization_count = uv1 ? 6U : vis_depth ? 5U : (vsm ? 1U : 0U);
+    d.specialization[6] = tint ? 1U : 0U; // forward_frag.glsl's k_tint
+    d.specialization_count = tint ? 7U : uv1 ? 6U : vis_depth ? 5U : (vsm ? 1U : 0U);
     return nph_gpu_pipeline_create_graphics(r->dev, &d, out);
 }
 
@@ -175,10 +178,11 @@ static NphResult create_forward_pipelines(NphRenderer *r)
     for (u32 alpha = 0; alpha < 3U; ++alpha) {
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
             NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false, false,
-                                            0U, false, &r->forward[alpha][cull]));
+                                            0U, false, false, &r->forward[alpha][cull]));
             if (rt) {
                 NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true, false,
-                                                false, 0U, false, &r->forward_rt[alpha][cull]));
+                                                false, 0U, false, false,
+                                                &r->forward_rt[alpha][cull]));
             }
         }
     }
@@ -203,11 +207,35 @@ NphResult render_forward_uv1_pipelines(NphRenderer *r)
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
             if (r->forward_uv1[alpha][cull].value == 0U) {
                 NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false,
-                                                false, 0U, true, &r->forward_uv1[alpha][cull]));
+                                                false, 0U, true, false,
+                                                &r->forward_uv1[alpha][cull]));
             }
             if (rt && r->forward_rt_uv1[alpha][cull].value == 0U) {
                 NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true, false,
-                                                false, 0U, true, &r->forward_rt_uv1[alpha][cull]));
+                                                false, 0U, true, false,
+                                                &r->forward_rt_uv1[alpha][cull]));
+            }
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
+NphResult render_forward_tint_pipelines(NphRenderer *r)
+{
+    // Each one not made yet: a call that failed part way makes the rest the next time.
+    const bool rt = r->rt.supported != 0;
+    const u32 blend = (u32)NPH_RENDER_ALPHA_BLEND;
+    for (u32 uv1 = 0; uv1 < 2U; ++uv1) {
+        for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
+            if (r->forward_tint[uv1][cull].value == 0U) {
+                NPH_TRY(render_forward_pipeline(r, blend, cull, RENDER_HDR_FORMAT, false, false,
+                                                false, 0U, uv1 != 0U, true,
+                                                &r->forward_tint[uv1][cull]));
+            }
+            if (rt && r->forward_rt_tint[uv1][cull].value == 0U) {
+                NPH_TRY(render_forward_pipeline(r, blend, cull, RENDER_HDR_FORMAT, true, false,
+                                                false, 0U, uv1 != 0U, true,
+                                                &r->forward_rt_tint[uv1][cull]));
             }
         }
     }
@@ -692,6 +720,10 @@ void nph_renderer_destroy(NphRenderer *r)
             nph_gpu_pipeline_destroy(dev, r->forward_rt[a][c]);
             nph_gpu_pipeline_destroy(dev, r->forward_uv1[a][c]);
             nph_gpu_pipeline_destroy(dev, r->forward_rt_uv1[a][c]);
+            if (a < 2U) {
+                nph_gpu_pipeline_destroy(dev, r->forward_tint[a][c]);
+                nph_gpu_pipeline_destroy(dev, r->forward_rt_tint[a][c]);
+            }
         }
     }
     nph_gpu_pipeline_destroy(dev, r->sky);
@@ -1637,6 +1669,8 @@ void nph_render_material_desc_default(NphRenderMaterialDesc *desc)
     desc->alpha_cutoff = 0.5F;
     desc->alpha_mode = NPH_RENDER_ALPHA_OPAQUE;
     desc->uv = nph_render_uv_identity();
+    desc->f0 = 0.04F;
+    desc->transmission = nph_vec3_zero();
 }
 
 NphRenderUvTransform nph_render_uv_identity(void)
@@ -1676,6 +1710,12 @@ bool render_material_reads_uv1(const NphRenderMaterialDesc *d)
     return second;
 }
 
+bool render_material_tinted(const NphRenderMaterialDesc *d)
+{
+    const NphVec3 t = d->transmission;
+    return d->transmissive && (t.x != 0.0F || t.y != 0.0F || t.z != 0.0F);
+}
+
 static u32 needs_uv_variants(const NphRenderMaterialDesc *d)
 {
     return !nph_render_uv_is_identity(&d->uv) || render_material_reads_uv1(d) ? 1U : 0U;
@@ -1690,6 +1730,13 @@ static NphResult validate_material(const NphRenderer *r, const NphRenderMaterial
         (d->alpha_key != 0U && d->alpha_mode != NPH_RENDER_ALPHA_MASK) ||
         !uv_transform_valid(&d->uv) || (d->alpha_key != 0U && !nph_render_uv_is_identity(&d->uv)) ||
         (d->alpha_key != 0U && d->textures[NPH_RENDER_SLOT_BASE_COLOR].texcoord != 0U)) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    // F0 and glass's tint (ADR-0107).
+    const NphVec3 tint = d->transmission;
+    const bool tinted = tint.x != 0.0F || tint.y != 0.0F || tint.z != 0.0F;
+    if (!nph_f32_is_finite(d->f0) || d->f0 < 0.0F || d->f0 > 1.0F || !nph_vec3_is_finite(tint) ||
+        tint.x < 0.0F || tint.y < 0.0F || tint.z < 0.0F || (tinted && !d->transmissive)) {
         return NPH_RESULT_INVALID_ARGUMENT;
     }
     for (u32 s = 0; s < (u32)NPH_RENDER_SLOT_COUNT; ++s) {
@@ -1730,6 +1777,7 @@ NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc
     r->masked_materials += desc->alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
     r->uv_materials += needs_uv_variants(desc);
     r->uv1_materials += render_material_reads_uv1(desc) ? 1U : 0U;
+    r->tinted_materials += render_material_tinted(desc) ? 1U : 0U;
     out->value = value;
     return NPH_RESULT_OK;
 }
@@ -1798,6 +1846,8 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
     r->uv_materials += needs_uv_variants(desc);
     r->uv1_materials -= render_material_reads_uv1(&r->materials[slot].desc) ? 1U : 0U;
     r->uv1_materials += render_material_reads_uv1(desc) ? 1U : 0U;
+    r->tinted_materials -= render_material_tinted(&r->materials[slot].desc) ? 1U : 0U;
+    r->tinted_materials += render_material_tinted(desc) ? 1U : 0U;
     r->materials[slot].desc = *desc;
     r->materials[slot].desc.name = NULL;
     // The next frame's resolve takes no history where it draws (frame.c write_materials).
@@ -1823,6 +1873,7 @@ void nph_render_material_destroy(NphRenderer *r, NphRenderMaterial material)
     r->masked_materials -= r->materials[slot].desc.alpha_mode == NPH_RENDER_ALPHA_MASK ? 1U : 0U;
     r->uv_materials -= needs_uv_variants(&r->materials[slot].desc);
     r->uv1_materials -= render_material_reads_uv1(&r->materials[slot].desc) ? 1U : 0U;
+    r->tinted_materials -= render_material_tinted(&r->materials[slot].desc) ? 1U : 0U;
     // Its instances draw with the default material from here on, which tests no alpha and
     // holds no mesh's triangles for the rays alone: where the rays held it to a key, the
     // top level's records are written again, and name their meshes' own triangles (ADR-0098).

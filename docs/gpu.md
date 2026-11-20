@@ -32,7 +32,10 @@ timeline semaphores, buffer device address, descriptor indexing with
 update-after-bind and partially bound descriptors, draw indirect count,
 host query reset, scalar block layout, format-less storage images, subgroup
 size control for compute with full subgroups (all of which Vulkan 1.3 makes
-every device have), and 128 bytes of push constants. Optional capabilities are detected and enabled
+every device have), dual-source blending on the first colour attachment
+(`dualSrcBlend`, which the renderer's blended surfaces tint by; ADR-0107;
+`NPH_GPU_BLEND_SRC1_*`, refused on any other attachment or past
+`NphGpuLimits.max_dual_source_attachments`), and 128 bytes of push constants. Optional capabilities are detected and enabled
 when present and reported in `NphGpuFeatures`: mesh shaders (with their
 limits in `NphGpuLimits`), ray queries, 64-bit image and buffer atomics
 (the visibility buffer and the software rasteriser of §8.6.4), min/max

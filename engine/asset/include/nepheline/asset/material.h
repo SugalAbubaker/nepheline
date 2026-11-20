@@ -18,11 +18,17 @@ extern "C" {
 
 // 2: the alpha test's key (NphMaterialHeader.alpha_key). 3: the texture coordinates'
 // transform (UVTR, NphMaterialUvTransform; ADR-0105). 4: a slot may read the second texture
-// coordinate set (NphMaterialTextureRef.texcoord 1; ADR-0107). Versions 1 to 3 still read: they
-// read the first set alone, have no transform before 3, and version 1 no key.
-#define NPH_MATERIAL_TYPE_VERSION 4U
+// coordinate set (NphMaterialTextureRef.texcoord 1; ADR-0107). 5: its optics (OPTC,
+// NphMaterialOptics; ADR-0107). Versions 1 to 4 still read: they read the first set alone
+// before 4, have F0 0.04 and no tint, no transform before 3, and version 1 no key.
+#define NPH_MATERIAL_TYPE_VERSION 5U
 #define NPH_MATERIAL_TAG_HEADER   NPH_FOURCC('H', 'E', 'A', 'D')
 #define NPH_MATERIAL_TAG_UV       NPH_FOURCC('U', 'V', 'T', 'R')
+#define NPH_MATERIAL_TAG_OPTICS   NPH_FOURCC('O', 'P', 'T', 'C')
+
+// The reflectance head on of a material's dielectric part where nothing says otherwise: glTF's,
+// an index of refraction of 1.5.
+#define NPH_MATERIAL_F0_DEFAULT 0.04F
 
 typedef enum NphMaterialAlphaMode {
     NPH_MATERIAL_ALPHA_OPAQUE = 0,
@@ -104,9 +110,26 @@ typedef struct NphMaterialUvTransform {
 
 NPH_STATIC_ASSERT(sizeof(NphMaterialUvTransform) == 24U, "a UV transform is 24 bytes");
 
+// Version 5, optional (OPTC; ADR-0107): what the material's surface reflects head on, and what
+// it lets through when it is glass (NPH_MATERIAL_FLAG_TRANSMISSIVE). A material without it, and
+// every material before version 5, has F0 NPH_MATERIAL_F0_DEFAULT and no tint.
+typedef struct NphMaterialOptics {
+    // The dielectric part's reflectance head on (F0), [0, 1]: KHR_materials_ior's
+    // ((ior - 1) / (ior + 1))^2 times KHR_materials_specular's factor.
+    f32 f0;
+    // Glass's tint, per channel, before the vertex colour and the base colour texture tint it as
+    // they do its base colour: its base colour factor as authored (the header's is scaled by the
+    // share of the light the glass keeps: docs/cook.md "Glass") times KHR_materials_volume's
+    // attenuation. Non-negative and finite; (0, 0, 0): untinted, and on any material not glass.
+    NphVec3 transmission;
+} NphMaterialOptics;
+
+NPH_STATIC_ASSERT(sizeof(NphMaterialOptics) == 16U, "the optics are 16 bytes");
+
 typedef struct NphMaterialView {
     const NphMaterialHeader *header;
     const NphMaterialUvTransform *uv; // NULL: the identity
+    const NphMaterialOptics *optics;  // NULL: NPH_MATERIAL_F0_DEFAULT, untinted
 } NphMaterialView;
 
 NPH_MUST_USE NphResult nph_material_view(const NphAsset *asset, NphMaterialView *out);
@@ -115,6 +138,13 @@ NPH_MUST_USE NphResult nph_material_view(const NphAsset *asset, NphMaterialView 
 NphMaterialUvTransform nph_material_uv_identity(void);
 // The view's transform: its UVTR blob, or the identity.
 NphMaterialUvTransform nph_material_view_uv(const NphMaterialView *view);
+
+// The optics of a material without OPTC: F0 NPH_MATERIAL_F0_DEFAULT, untinted.
+NphMaterialOptics nph_material_optics_default(void);
+// The view's optics: its OPTC blob, or the default.
+NphMaterialOptics nph_material_view_optics(const NphMaterialView *view);
+// Whether `o` is the default (the cooker then writes no OPTC).
+bool nph_material_optics_is_default(const NphMaterialOptics *o);
 // True when `t` is the identity, exactly.
 bool nph_material_uv_is_identity(const NphMaterialUvTransform *t);
 

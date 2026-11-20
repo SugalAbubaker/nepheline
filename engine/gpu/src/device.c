@@ -556,9 +556,10 @@ static void check_baseline(Candidate *c, bool headless)
     }
     if (!f->multiDrawIndirect || !f->shaderStorageImageWriteWithoutFormat ||
         !f->shaderStorageImageReadWithoutFormat || !f->fragmentStoresAndAtomics ||
-        !f->independentBlend) {
-        c->reject = "multiDrawIndirect, format-less storage images, fragment stores, or "
-                    "independent blend missing";
+        !f->independentBlend || !f->dualSrcBlend || p->limits.maxFragmentDualSrcAttachments == 0U) {
+        // Dual-source blending: the blended surfaces' tint (render's forward pipelines; ADR-0107).
+        c->reject = "multiDrawIndirect, format-less storage images, fragment stores, independent "
+                    "blend, or dual-source blend missing";
         return;
     }
     if (p->limits.maxPushConstantsSize < NPH_GPU_PUSH_CONSTANT_BYTES) {
@@ -828,6 +829,7 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     f2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
     f2.features.fragmentStoresAndAtomics = VK_TRUE;
     f2.features.independentBlend = VK_TRUE;
+    f2.features.dualSrcBlend = VK_TRUE;
     f2.features.samplerAnisotropy = hf->samplerAnisotropy;
     f2.features.depthClamp = hf->depthClamp;
     f2.features.shaderClipDistance = hf->shaderClipDistance;
@@ -1136,6 +1138,7 @@ static NphResult create_logical_device(NphGpuDevice *dev, Candidate *c)
     lim->max_image_layers = p->limits.maxImageArrayLayers;
     lim->max_color_attachments =
         nph_min_u32(p->limits.maxColorAttachments, NPH_GPU_MAX_COLOR_ATTACHMENTS);
+    lim->max_dual_source_attachments = p->limits.maxFragmentDualSrcAttachments;
     lim->max_push_constant_bytes = p->limits.maxPushConstantsSize;
     lim->max_draw_indirect_count = p->limits.maxDrawIndirectCount;
     lim->max_compute_workgroup_invocations = p->limits.maxComputeWorkGroupInvocations;

@@ -1034,6 +1034,25 @@ NTEST_F(GpuFixture, pipeline_descriptions_are_validated)
     NTEST_ASSERT_EQ_INT(nph_gpu_pipeline_create_graphics(f->dev, &gd, &p),
                         NPH_RESULT_INVALID_ARGUMENT);
     gd.mesh = NPH_GPU_SHADER_NULL;
+    // Dual-source blending (NPH_GPU_BLEND_SRC1_*; ADR-0107): on the first attachment alone, and
+    // with no more attachments than the device takes; refused before the driver sees it.
+    NTEST_EXPECT_GE_UINT(nph_gpu_device_info(f->dev)->limits.max_dual_source_attachments, 1U);
+    gd.color_formats[1] = NPH_GPU_FORMAT_R8G8B8A8_UNORM;
+    gd.color_count = 2U;
+    gd.blend[1].enable = 1;
+    gd.blend[1].src_color = NPH_GPU_BLEND_ONE;
+    gd.blend[1].dst_color = NPH_GPU_BLEND_SRC1_COLOR;
+    NTEST_EXPECT_EQ_INT(nph_gpu_pipeline_create_graphics(f->dev, &gd, &p),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    gd.blend[1] = gd.blend[0];
+    gd.blend[0].enable = 1;
+    gd.blend[0].src_alpha = NPH_GPU_BLEND_ONE_MINUS_SRC1_ALPHA;
+    if (nph_gpu_device_info(f->dev)->limits.max_dual_source_attachments < 2U) {
+        NTEST_EXPECT_EQ_INT(nph_gpu_pipeline_create_graphics(f->dev, &gd, &p),
+                            NPH_RESULT_INVALID_ARGUMENT);
+    }
+    memset(&gd.blend, 0, sizeof gd.blend);
+    gd.color_count = 1U;
     gd.polygon_mode = NPH_GPU_POLYGON_LINE;
     const NphResult lr = nph_gpu_pipeline_create_graphics(f->dev, &gd, &p);
     if (nph_gpu_device_info(f->dev)->features.fill_mode_non_solid) {

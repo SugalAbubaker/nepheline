@@ -34,7 +34,10 @@
 #define NPH_RENDER_MATERIAL_CHANGED 32
 // A slot with a texture reads the second texture coordinate set (ADR-0107): its bit in `wrap`,
 // NPH_RENDER_MATERIAL_SET1_SHIFT + the slot, says which.
-#define NPH_RENDER_MATERIAL_UV1        64
+#define NPH_RENDER_MATERIAL_UV1 64
+// Glass whose tint is not white (NphRenderMaterialDesc.transmission; ADR-0107): what is behind it
+// passes by NphRenderMaterialData.transmission, its vertex colour and base colour texture too.
+#define NPH_RENDER_MATERIAL_TINTED     128
 #define NPH_RENDER_MATERIAL_SET1_SHIFT 20
 
 // Material texture slots (NphRenderMaterialData.textures / samplers).
@@ -161,7 +164,9 @@ NPH_SHARED_STRUCT(NphRenderDrawData)
 NPH_SHARED_STRUCT(NphRenderMaterialData)
 {
     NphVec4 base_color; // linear RGBA factor
-    NphVec4 emissive;   // rgb: radiance (cd/m^2) = factor * strength; w: unused
+    // rgb: radiance (cd/m^2) = factor * strength; w: the dielectric part's reflectance head on
+    // (F0, NphRenderMaterialDesc.f0; ADR-0107)
+    NphVec4 emissive;
     f32 metallic;
     f32 roughness; // perceptual roughness
     f32 alpha_cutoff;
@@ -190,6 +195,9 @@ NPH_SHARED_STRUCT(NphRenderMaterialData)
     // the table by buffer reference needs.
     NphVec4 uv_u;
     NphVec4 uv_v;
+    // rgb: glass's tint (NphRenderMaterialDesc.transmission), read where it is
+    // NPH_RENDER_MATERIAL_TINTED; w: unused.
+    NphVec4 transmission;
 };
 
 // Paged textures (docs/adr/0065-virtual-texturing.md; texture_paging.glsl):

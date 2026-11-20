@@ -2226,6 +2226,156 @@ NTEST_F(Vis, glass_shows_what_is_behind_it_and_adds_its_own_light_whole)
     }
 }
 
+// Glass tinted (NphRenderMaterialDesc.transmission; ADR-0107) before a wall that glows white, in
+// the reference and the production path: what passes is the wall's light times the share the
+// pane leaves (nine tenths, less the 4 % its surface turns back head on) times the tint, channel
+// by channel, so red, half the green and a quarter the blue. A tint takes a pane that is glass;
+// and the same pane with an F0 of 0 turns nothing back, of 0.5 half.
+NTEST_F(Vis, tinted_glass_colours_what_is_behind_it)
+{
+    REQUIRE_PRODUCTION(f);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.0F, 0.0F, 0.0F, 1.0F);
+    md.emissive = nph_vec3(8.0F, 8.0F, 8.0F);
+    NphRenderMaterial glowing;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &glowing), NPH_RESULT_OK);
+    nph_render_material_desc_default(&md);
+    md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+    md.base_color = nph_vec4(0.0F, 0.0F, 0.0F, 0.1F);
+    md.roughness = 1.0F;
+    md.transmission = nph_vec3(1.0F, 0.5F, 0.25F);
+    NphRenderMaterial refused;
+    NTEST_EXPECT_EQ_INT(nph_render_material_create(f->renderer, &md, &refused),
+                        NPH_RESULT_INVALID_ARGUMENT); // a tint is glass's
+    md.transmissive = 1;
+    NphRenderMaterial tinted;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &tinted), NPH_RESULT_OK);
+    md.transmission = nph_vec3_zero();
+    md.f0 = 0.0F;
+    NphRenderMaterial clear;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &clear), NPH_RESULT_OK);
+    md.f0 = 0.5F;
+    NphRenderMaterial mirror;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &mirror), NPH_RESULT_OK);
+    NphRenderTransform t = nph_render_transform_from_trs(nph_dvec3(0.0, 0.0, -0.5),
+                                                         nph_quat_from_rotation_x(0.5F * NPH_PI),
+                                                         nph_vec3(8.0F, 1.0F, 8.0F));
+    const NphRenderInstance wall = instance(f, plane, glowing, t);
+    t = nph_render_transform_from_trs(nph_dvec3(0.0, 0.0, 0.0),
+                                      nph_quat_from_rotation_x(0.5F * NPH_PI), nph_vec3_one());
+    const NphRenderInstance panes[3] = {instance(f, plane, tinted, t), instance(f, plane, clear, t),
+                                        instance(f, plane, mirror, t)};
+    NphRenderView v;
+    nph_render_view_default(&v, test_camera());
+    v.ev100 = 4.0F;
+    v.background = NPH_RENDER_BACKGROUND_SOLID;
+    v.background_color = nph_vec3_zero();
+    v.tonemapper = NPH_RENDER_TONEMAPPER_NONE; // the target's levels are the light's
+    static u8 image[PIXELS];
+    const u64 centre =
+        ((u64)(TEST_TARGET_SIZE / 2U) * TEST_TARGET_SIZE + TEST_TARGET_SIZE / 2U) * 4U;
+    for (u32 path = 0; path < 2U; ++path) {
+        v.pipeline = path == 0U ? NPH_RENDER_PIPELINE_REFERENCE : NPH_RENDER_PIPELINE_PRODUCTION;
+        // The wall alone, then each pane before it.
+        f32 seen[4][3];
+        for (u32 scene = 0; scene < 4U; ++scene) {
+            nph_render_instance_set_hidden(f->renderer, wall, false);
+            for (u32 k = 0; k < 3U; ++k) {
+                nph_render_instance_set_hidden(f->renderer, panes[k], scene != k + 1U);
+            }
+            (void)render_into(f, &v, 2U, image);
+            for (u32 c = 0; c < 3U; ++c) {
+                seen[scene][c] = level_linear(image[centre + c]);
+            }
+        }
+        NTEST_LOG("%s: the wall %.4f; tinted %.4f %.4f %.4f; F0 0: %.4f, F0 0.5: %.4f",
+                  path == 0U ? "reference" : "production", (f64)seen[0][0], (f64)seen[1][0],
+                  (f64)seen[1][1], (f64)seen[1][2], (f64)seen[2][0], (f64)seen[3][0]);
+        const f32 wall_light = seen[0][0];
+        NTEST_ASSERT_TRUE(wall_light > 0.05F && wall_light < 0.9F);
+        const f32 passes = 0.9F * 0.96F * wall_light;
+        NTEST_EXPECT_NEAR_F32(seen[1][0], passes, 0.03F * wall_light);
+        NTEST_EXPECT_NEAR_F32(seen[1][1], 0.5F * passes, 0.03F * wall_light);
+        NTEST_EXPECT_NEAR_F32(seen[1][2], 0.25F * passes, 0.03F * wall_light);
+        NTEST_EXPECT_NEAR_F32(seen[2][0], 0.9F * wall_light, 0.03F * wall_light);
+        NTEST_EXPECT_NEAR_F32(seen[3][0], 0.9F * 0.5F * wall_light, 0.03F * wall_light);
+    }
+}
+
+// A dielectric's F0 (ADR-0107): a black, fairly smooth plane under a light beside the camera
+// shows its reflection alone, which grows with F0, and none at 0; the default is 0.04, the same
+// image as the description's own 0.04.
+NTEST_F(Vis, a_dielectrics_f0_sets_what_it_reflects)
+{
+    REQUIRE_PRODUCTION(f);
+    const NphRenderMesh plane = mesh_of(f, make_plane);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.base_color = nph_vec4(0.0F, 0.0F, 0.0F, 1.0F);
+    md.roughness = 0.4F;
+    NTEST_EXPECT_NEAR_F32(md.f0, 0.04F, 0.0F);
+    const f32 f0s[4] = {0.0F, 0.04F, 0.2F, 0.04F};
+    NphRenderMaterial mats[4];
+    for (u32 i = 0; i < 4U; ++i) {
+        md.f0 = f0s[i];
+        NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &mats[i]), NPH_RESULT_OK);
+    }
+    md.f0 = 1.5F;
+    NphRenderMaterial refused;
+    NTEST_EXPECT_EQ_INT(nph_render_material_create(f->renderer, &md, &refused),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    const NphRenderTransform t = nph_render_transform_from_trs(
+        nph_dvec3(0.0, 0.0, 0.0), nph_quat_from_rotation_x(0.5F * NPH_PI),
+        nph_vec3(4.0F, 1.0F, 4.0F));
+    NphRenderInstance inst[4];
+    for (u32 i = 0; i < 4U; ++i) {
+        inst[i] = instance(f, plane, mats[i], t);
+    }
+    NphRenderLightDesc ld;
+    memset(&ld, 0, sizeof ld);
+    ld.type = NPH_RENDER_LIGHT_TYPE_POINT;
+    ld.color = nph_vec3_one();
+    ld.intensity = 40.0F;
+    ld.position = nph_dvec3(0.3, 0.2, 2.0);
+    NphRenderLight light;
+    NTEST_ASSERT_EQ_INT(nph_render_light_create(f->renderer, &ld, &light), NPH_RESULT_OK);
+    NphRenderView v;
+    nph_render_view_default(&v, test_camera());
+    v.ev100 = 2.0F;
+    v.background = NPH_RENDER_BACKGROUND_SOLID;
+    v.background_color = nph_vec3_zero();
+    v.tonemapper = NPH_RENDER_TONEMAPPER_NONE;
+    static u8 image[PIXELS];
+    static u8 first_default[PIXELS];
+    for (u32 path = 0; path < 2U; ++path) {
+        v.pipeline = path == 0U ? NPH_RENDER_PIPELINE_REFERENCE : NPH_RENDER_PIPELINE_PRODUCTION;
+        f64 sum[4] = {0.0, 0.0, 0.0, 0.0};
+        for (u32 k = 0; k < 4U; ++k) {
+            for (u32 i = 0; i < 4U; ++i) {
+                nph_render_instance_set_hidden(f->renderer, inst[i], i != k);
+            }
+            (void)render_into(f, &v, 3U, image);
+            for (u64 p = 0; p < PIXELS; p += 4U) {
+                sum[k] += (f64)level_linear(image[p]);
+            }
+            if (k == 1U) {
+                memcpy(first_default, image, sizeof image);
+            }
+            if (k == 3U) {
+                const ImageDiff d = image_diff(first_default, image, 0U);
+                NTEST_EXPECT_EQ_UINT(d.max, 0U); // the default's 0.04 and a description's alike
+            }
+        }
+        NTEST_LOG("%s: what the plane reflects at F0 0 %.3f, 0.04 %.3f, 0.2 %.3f",
+                  path == 0U ? "reference" : "production", sum[0], sum[1], sum[2]);
+        NTEST_EXPECT_TRUE(sum[0] < 0.01 * sum[1] + 1.0);
+        NTEST_EXPECT_TRUE(sum[1] > 1.0);
+        NTEST_EXPECT_TRUE(sum[2] > 3.0 * sum[1]);
+    }
+}
+
 // Blended surfaces in front of opaque ones and behind them: the production
 // path has no depth attachment for them, and their fragment stage tests the
 // visibility buffer's depth itself, where the reference tests a depth

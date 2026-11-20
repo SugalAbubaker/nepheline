@@ -152,6 +152,8 @@ directory.
 | metallic-roughness materials | five textures with their samplers, alpha mode and cutoff, double-sidedness |
 | KHR_materials_pbrSpecularGlossiness | converted to metallic-roughness (below); takes precedence where a material has both |
 | KHR_materials_unlit, KHR_materials_emissive_strength | |
+| KHR_materials_ior, KHR_materials_specular | the material's F0, `((ior - 1) / (ior + 1))^2` times the specular factor (`NphMaterialOptics.f0`, [asset.md](asset.md) material version 5; [ADR-0107](adr/0107-the-blender-round-trip.md)); 0.04 without them. The specular colour and the specular textures are warned about and not drawn |
+| KHR_materials_volume | glass's attenuation over its thickness (below), its thickness texture warned about and not drawn |
 | MSFT_texture_dds | a texture's DDS source replaces its `source`, which is then a fallback the importer does not read |
 | KHR_texture_transform | baked into each primitive's coordinates from its material's transform (offset, rotation, scale, composed as the extension does), into the set its textures read; authored tangents turn with TEXCOORD_0's u axis, and a mirroring transform flips their handedness. Where a material's textures on one set differ, the first's on it is baked (the base colour's on its set), with a warning: a baked transform is one per material and set. A `texCoord` override names the texture's set, as a texture info's `texCoord` does |
 | TEXCOORD_1 | read for a primitive whose material has a texture on it (a texture info's `texCoord` 1, or KHR_texture_transform's override; [ADR-0107](adr/0107-the-blender-round-trip.md)), and stored as the mesh's second set (`UV1 `, [asset.md](asset.md) mesh version 9). A mesh whose materials read none stores none. A primitive whose material reads it but that has none gets its first set there, with a warning. A normal map on it is read in TEXCOORD_0's tangent frame (tangents are the first set's), with a warning. A set past the second is warned about, and TEXCOORD_0 read |
@@ -350,6 +352,16 @@ the rays through it. Drawn opaque, as the extension's fallback has it, Bistro's 
 white walls. A material that lets less through, or whose alpha mode is not OPAQUE, stays as
 written. Materials have a cook version of their own (`COOK_MATERIAL_VERSION`), so a change
 here recooks them alone.
+
+What glass lets through is tinted, as glTF has it, by its base colour
+([ADR-0107](adr/0107-the-blender-round-trip.md)): the factor as authored, before the scaling
+above, times `KHR_materials_volume`'s attenuation over its thickness where it has one (Beer's
+law, `attenuationColor ^ (thickness / attenuationDistance)`), into `NphMaterialOptics.transmission`;
+the renderer tints further by the vertex colour and the base colour texture, as it does the base
+colour. Glass whose factor is white, with no volume and no base colour texture, is untinted, and
+draws as before. In Bistro the street lamps' glass (1.0, 0.9, 0.7) and the two
+`Paris_Glass_Detailed` materials (0.9, 0.9, 1.0) are tinted; its 15 other glass materials are
+not.
 
 ## Editable meshes (`polymesh.h`)
 

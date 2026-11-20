@@ -695,6 +695,15 @@ typedef struct NphRenderMaterialDesc {
     // is added whole, and what is behind it shows less by that too (Schlick's share of a
     // dielectric). A plain blended material is a coverage: all of its light scales with alpha.
     b32 transmissive;
+    // The reflectance head on of its dielectric part (F0; glTF's KHR_materials_ior and the factor
+    // of KHR_materials_specular; ADR-0107), in [0, 1]: 0.04 by default, an index of 1.5.
+    f32 f0;
+    // Glass's tint (`transmissive`), per channel: what is behind it passes by the share its alpha
+    // leaves, less what its surface turns back, times this, times its vertex colour and its base
+    // colour texture (glTF tints what glass lets through by its base colour; with
+    // KHR_materials_volume's attenuation). (0, 0, 0), the default: untinted, one share for all
+    // three. Finite, non-negative, and (0, 0, 0) on a material that is not glass.
+    NphVec3 transmission;
     NphRenderTextureBinding textures[NPH_RENDER_SLOT_COUNT];
     // Its texture coordinates' transform: the identity by default. A material whose transform is
     // not the identity takes its tangent frame from its coordinates' derivatives, not its mesh's

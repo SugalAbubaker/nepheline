@@ -446,10 +446,10 @@ static NphRenderUvTransform render_uv(const NphMaterialUvTransform *t)
     return out;
 }
 
-// The render description of header `h` and transform `uv` (NULL: the identity) with the
-// textures `textures` (cache indices) hold.
+// The render description of header `h`, transform `uv` (NULL: the identity) and optics
+// `optics` (NULL: the default) with the textures `textures` (cache indices) hold.
 static void material_desc(const RenderAssetCache *c, const NphMaterialHeader *h,
-                          const NphMaterialUvTransform *uv,
+                          const NphMaterialUvTransform *uv, const NphMaterialOptics *optics,
                           const u32 textures[RENDER_MATERIAL_TEXTURES], NphRenderMaterialDesc *out)
 {
     NphRenderMaterialDesc d;
@@ -465,6 +465,11 @@ static void material_desc(const RenderAssetCache *c, const NphMaterialHeader *h,
     d.transmissive = (h->flags & (u32)NPH_MATERIAL_FLAG_TRANSMISSIVE) != 0U;
     d.normal_scale = h->textures[NPH_MATERIAL_TEXTURE_NORMAL].scale;
     d.occlusion_strength = h->textures[NPH_MATERIAL_TEXTURE_OCCLUSION].scale;
+    // F0 and glass's tint (ADR-0107).
+    if (optics != NULL) {
+        d.f0 = optics->f0;
+        d.transmission = d.transmissive ? optics->transmission : nph_vec3_zero();
+    }
     for (u32 t = 0; t < (u32)NPH_RENDER_SLOT_COUNT; ++t) {
         const NphMaterialTextureRef *ref = &h->textures[t];
         const RenderAsset *tex = render_asset(c, textures[t]);
@@ -502,7 +507,7 @@ static NphResult create_material(RenderAssetCache *c, RenderAsset *a)
     NphMaterialView mv;
     NPH_TRY(nph_material_view(nph_asset_get(c->loader, a->handle), &mv));
     NphRenderMaterialDesc d;
-    material_desc(c, mv.header, mv.uv, a->textures, &d);
+    material_desc(c, mv.header, mv.uv, mv.optics, a->textures, &d);
     return nph_render_material_create(c->renderer, &d, &a->material);
 }
 
@@ -560,8 +565,9 @@ NphResult render_assets_material_set(RenderAssetCache *c, u32 index, const NphMa
     if (a == NULL || a->kind != (u32)RENDER_ASSET_MATERIAL || a->state != (u32)RENDER_ASSET_READY) {
         return NPH_RESULT_INVALID_STATE;
     }
+    // The editor's edits carry no optics (its materials have the default).
     NphRenderMaterialDesc d;
-    material_desc(c, h, uv, a->textures, &d);
+    material_desc(c, h, uv, NULL, a->textures, &d);
     return nph_render_material_update(c->renderer, a->material, &d);
 }
 
@@ -602,7 +608,7 @@ static void advance_refresh(RenderAssetCache *c, u32 index, NphResult *first)
     }
     NPH_VERIFY(nph_material_view(nph_asset_get(c->loader, a->next), &mv) == NPH_RESULT_OK);
     NphRenderMaterialDesc d;
-    material_desc(c, mv.header, mv.uv, a->next_textures, &d);
+    material_desc(c, mv.header, mv.uv, mv.optics, a->next_textures, &d);
     const NphResult r = nph_render_material_update(c->renderer, a->material, &d);
     if (r != NPH_RESULT_OK) {
         log_failure(a, "is not usable again; the version it had stays", r);

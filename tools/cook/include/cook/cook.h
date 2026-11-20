@@ -66,7 +66,8 @@ NPH_LOG_CATEGORY_DECLARE(NPH_LOG_COOK);
 //   1: glass (KHR_materials_transmission, most light let through) is a blended, transmissive
 //      material (NPH_MATERIAL_FLAG_TRANSMISSIVE).
 //   2: an alpha-tested material's key (material type version 2; ADR-0096).
-#define COOK_MATERIAL_VERSION 2U
+//   3: its optics, F0 and glass's tint (material type version 5; ADR-0107).
+#define COOK_MATERIAL_VERSION 3U
 
 // Sized blocks for libraries that free by pointer alone (cgltf, stb_image):
 // a 16-byte header in front of each block records its size, so the

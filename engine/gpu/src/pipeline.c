@@ -52,8 +52,29 @@ static VkBlendFactor vk_blend_factor(NphGpuBlendFactor f)
         return VK_BLEND_FACTOR_DST_ALPHA;
     case NPH_GPU_BLEND_ONE_MINUS_DST_ALPHA:
         return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    case NPH_GPU_BLEND_SRC1_COLOR:
+        return VK_BLEND_FACTOR_SRC1_COLOR;
+    case NPH_GPU_BLEND_ONE_MINUS_SRC1_COLOR:
+        return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+    case NPH_GPU_BLEND_SRC1_ALPHA:
+        return VK_BLEND_FACTOR_SRC1_ALPHA;
+    case NPH_GPU_BLEND_ONE_MINUS_SRC1_ALPHA:
+        return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
     }
     return VK_BLEND_FACTOR_ONE;
+}
+
+static bool blend_factor_dual(NphGpuBlendFactor f)
+{
+    return f == NPH_GPU_BLEND_SRC1_COLOR || f == NPH_GPU_BLEND_ONE_MINUS_SRC1_COLOR ||
+           f == NPH_GPU_BLEND_SRC1_ALPHA || f == NPH_GPU_BLEND_ONE_MINUS_SRC1_ALPHA;
+}
+
+// Whether a blend state reads the fragment stage's second output.
+static bool blend_dual(const NphGpuBlendState *b)
+{
+    return b->enable && (blend_factor_dual(b->src_color) || blend_factor_dual(b->dst_color) ||
+                         blend_factor_dual(b->src_alpha) || blend_factor_dual(b->dst_alpha));
 }
 
 static VkBlendOp vk_blend_op(NphGpuBlendOp op)
@@ -136,6 +157,17 @@ static NphResult build_graphics(NphGpuDevice *dev, const NphGpuGraphicsPipelineD
     }
     if (d->color_count > NPH_GPU_MAX_COLOR_ATTACHMENTS) {
         return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    // Dual-source blending: on the first attachment alone, within the device's limit (Vulkan's
+    // "Dual-Source Blending").
+    for (u32 i = 0; i < d->color_count; ++i) {
+        if (blend_dual(&d->blend[i]) &&
+            (i != 0U || d->color_count > dev->info.limits.max_dual_source_attachments)) {
+            GPU_LOG_ERROR("pipeline '%s': dual-source blending on attachment %u of %u (the device "
+                          "takes it on the first of %u)",
+                          name, i, d->color_count, dev->info.limits.max_dual_source_attachments);
+            return NPH_RESULT_INVALID_ARGUMENT;
+        }
     }
     VkPipelineShaderStageCreateInfo stages[4];
     u32 stage_count = 0U;

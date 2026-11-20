@@ -67,6 +67,15 @@ typedef enum NphGpuBlendFactor {
     NPH_GPU_BLEND_ONE_MINUS_SRC_ALPHA,
     NPH_GPU_BLEND_DST_ALPHA,
     NPH_GPU_BLEND_ONE_MINUS_DST_ALPHA,
+    // Dual-source blending: the fragment stage's second output at location 0
+    // (`layout(location = 0, index = 1)`), which every device the module takes
+    // has (the baseline's dualSrcBlend). A pipeline takes them on its first
+    // colour attachment alone, and with no more attachments than the device's
+    // NphGpuLimits.max_dual_source_attachments.
+    NPH_GPU_BLEND_SRC1_COLOR,
+    NPH_GPU_BLEND_ONE_MINUS_SRC1_COLOR,
+    NPH_GPU_BLEND_SRC1_ALPHA,
+    NPH_GPU_BLEND_ONE_MINUS_SRC1_ALPHA,
 } NphGpuBlendFactor;
 
 typedef enum NphGpuBlendOp {
