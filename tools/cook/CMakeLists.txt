@@ -52,6 +52,7 @@ set(cook_sources
     src/scene_import.c
     src/sound.c
     src/specgloss.c
+    src/glass.c
     src/texture.c
     src/texture_import.c
 )
@@ -121,6 +122,7 @@ nph_add_test(cook
         tests/test_scene_import.c
         tests/test_sound.c
         tests/test_specgloss.c
+        tests/test_glass.c
         tests/test_texture.c
         tests/test_texture_import.c
         tests/test_voxel.c

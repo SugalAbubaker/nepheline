@@ -102,6 +102,12 @@ NPH_MUST_USE NphResult cook_image_to_f32(NphAllocator *alloc, const CookImage *s
 NPH_MUST_USE NphResult cook_image_to_rgba8(NphAllocator *alloc, const CookImage *src, bool srgb,
                                            CookImage *out);
 
+// The bilinear sample of `img` (RGBA32F) at the centre of texel (x, y) of a `w` x `h` grid over
+// the same uv square, wrapping as a repeating texture does; the texel itself where the image's
+// extent is the grid's. How the material bakes read an input of another extent (specgloss.h,
+// glass.h).
+void cook_image_sample_grid(const CookImage *img, u32 x, u32 y, u32 w, u32 h, f32 out[4]);
+
 // The next mip level of an RGBA32F image: half the size (rounded down,
 // at least 1) by exact area averaging. NPH_RESULT_INVALID_ARGUMENT for a
 // 1x1 source or an 8-bit one.

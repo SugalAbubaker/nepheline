@@ -411,3 +411,38 @@ void cook_image_block_half(const CookImage *img, u32 x, u32 y, CookBlockRgbHalf 
         }
     }
 }
+
+static i64 wrap_index(i64 i, i64 n)
+{
+    const i64 r = i % n;
+    return r < 0 ? r + n : r;
+}
+
+void cook_image_sample_grid(const CookImage *img, u32 x, u32 y, u32 w, u32 h, f32 out[4])
+{
+    NPH_ASSERT(img != NULL && img->format == COOK_IMAGE_RGBA32F && w != 0U && h != 0U);
+    const f32 *px = (const f32 *)img->pixels;
+    if (img->width == w && img->height == h) {
+        memcpy(out, px + ((u64)y * w + x) * 4U, 4U * sizeof(f32));
+        return;
+    }
+    const f32 u = ((f32)x + 0.5F) / (f32)w * (f32)img->width - 0.5F;
+    const f32 v = ((f32)y + 0.5F) / (f32)h * (f32)img->height - 0.5F;
+    const f32 fu = nph_f32_floor(u);
+    const f32 fv = nph_f32_floor(v);
+    const f32 au = u - fu;
+    const f32 av = v - fv;
+    const i64 x0 = wrap_index((i64)fu, img->width);
+    const i64 y0 = wrap_index((i64)fv, img->height);
+    const i64 x1 = wrap_index((i64)fu + 1, img->width);
+    const i64 y1 = wrap_index((i64)fv + 1, img->height);
+    const f32 *t00 = px + ((u64)y0 * img->width + (u64)x0) * 4U;
+    const f32 *t10 = px + ((u64)y0 * img->width + (u64)x1) * 4U;
+    const f32 *t01 = px + ((u64)y1 * img->width + (u64)x0) * 4U;
+    const f32 *t11 = px + ((u64)y1 * img->width + (u64)x1) * 4U;
+    for (u32 c = 0; c < 4U; ++c) {
+        const f32 top = t00[c] + (t10[c] - t00[c]) * au;
+        const f32 bottom = t01[c] + (t11[c] - t01[c]) * au;
+        out[c] = top + (bottom - top) * av;
+    }
+}

@@ -343,6 +343,10 @@ can be handed to the renderer without further checks:
   without it has F0 0.04 (`NPH_MATERIAL_F0_DEFAULT`) and no tint. The view
   refuses one before version 5, of another size, an F0 outside [0, 1], a
   tint negative or not finite, and a tint on a material that is not glass.
+  From version 5, glass may be flagged `NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS`
+  (ADR-0107): its base colour texture's alpha holds the share of the light
+  each texel keeps, and its colour is not scaled by it ahead. The view refuses
+  the flag before version 5, and on a material that is not blended glass.
 - **Scene** (`scene.h`, type version 3; versions 1 and 2 still read): `HEAD`,
   `NODE` (parent-before-child hierarchy with local TRS, child and sibling
   links, names), `INST` (a mesh GUID at a node with a range of material

@@ -37,8 +37,12 @@
 #define NPH_RENDER_MATERIAL_UV1 64
 // Glass whose tint is not white (NphRenderMaterialDesc.transmission; ADR-0107): what is behind it
 // passes by NphRenderMaterialData.transmission, its vertex colour and base colour texture too.
-#define NPH_RENDER_MATERIAL_TINTED     128
-#define NPH_RENDER_MATERIAL_SET1_SHIFT 20
+#define NPH_RENDER_MATERIAL_TINTED 128
+// Glass whose transmission varies per texel (NphRenderMaterialDesc.transmission_texels; ADR-0107):
+// its base colour texture's alpha holds each texel's share, by which the forward pass's k_tint
+// variants scale its colour.
+#define NPH_RENDER_MATERIAL_TRANSMISSION_TEXELS 256
+#define NPH_RENDER_MATERIAL_SET1_SHIFT          20
 
 // Material texture slots (NphRenderMaterialData.textures / samplers).
 #define NPH_RENDER_TEX_BASE_COLOR         0

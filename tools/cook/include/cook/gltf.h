@@ -81,6 +81,13 @@ typedef struct CookGltfMaterial {
     b32 specgloss;
     i32 specgloss_image[2]; // diffuse, specular-glossiness
     CookSpecGloss specgloss_factors;
+    // Glass whose transmission varies per texel (KHR_materials_transmission's texture; ADR-0107):
+    // its base colour texture is made, when the textures are cooked, from its base colour image
+    // (`glass_image[0]`, -1 where it has none) and its transmission image (`glass_image[1]`)
+    // times `glass_factor` (cook/glass.h), and `image` leaves the base colour slot -1. Both -1
+    // for any other material.
+    i32 glass_image[2]; // base colour, transmission
+    f32 glass_factor;
     // Its F0 and glass's tint (ADR-0107): KHR_materials_ior and _specular, and the base colour
     // factor and KHR_materials_volume of glass; the default where it has none of them.
     NphMaterialOptics optics;

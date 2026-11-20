@@ -257,12 +257,26 @@ void main()
 #endif
     vec3 color;
 #if NPH_FORWARD_ALPHA_MODE == 2
+    // Glass whose transmission varies per texel (NPH_RENDER_MATERIAL_TRANSMISSION_TEXELS;
+    // ADR-0107): its colour scaled by its alpha here, texel by texel, as the cooker scales the
+    // factor of glass whose share is one. Only the k_tint variants draw such glass
+    // (render_material_tinted).
+    vec4 lit = base;
+    if (k_tint && (m.flags & NPH_RENDER_MATERIAL_TRANSMISSION_TEXELS) != 0u) {
+        lit.rgb *= base.a;
+    }
+#define NPH_FORWARD_LIT lit
+#else
+#define NPH_FORWARD_LIT base
+#endif
+#if NPH_FORWARD_ALPHA_MODE == 2
     if (k_cache_only) {
         const float metallic = m.metallic;
         vec3 albedo = base.rgb * (1.0 - metallic) * 0.96 + mix(vec3(0.04), base.rgb, metallic);
         if (k_f0) {
-            const float f0 = m.emissive.w; // the material's (ADR-0107)
-            albedo = base.rgb * (1.0 - metallic) * (1.0 - f0) + mix(vec3(f0), base.rgb, metallic);
+            // The material's F0 (ADR-0107), and glass's colour as `lit` scales it per texel.
+            const float f0 = m.emissive.w;
+            albedo = lit.rgb * (1.0 - metallic) * (1.0 - f0) + mix(vec3(f0), lit.rgb, metallic);
         }
         vec3 emissive = m.emissive.rgb;
         if (nph_material_has(m, NPH_RENDER_TEX_EMISSIVE)) {
@@ -280,7 +294,7 @@ void main()
     if (view.v.debug_mode == NPH_RENDER_DEBUG_IRRADIANCE) {
         color = nph_surface_irradiance_view(view, s, vec4(0.0));
     } else {
-        color = nph_surface_shade(view, m, s, base);
+        color = nph_surface_shade(view, m, s, NPH_FORWARD_LIT);
     }
 #if NPH_FORWARD_ALPHA_MODE == 2
     out_color = forward_blended(m, s, color, base.a);

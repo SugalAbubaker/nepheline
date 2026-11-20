@@ -857,6 +857,30 @@ NTEST_F(Frame, materials_of_another_f0_draw_by_the_variants_that_read_it)
     nph_render_material_destroy(f->renderer, opaque);
 }
 
+// Glass whose transmission varies per texel is drawn by the tint variants, which scale its colour
+// texel by texel (render_material_tinted; ADR-0107): counted while it is live, though its tint is
+// white.
+NTEST_F(Frame, glass_kept_per_texel_is_drawn_by_the_tint_variants)
+{
+    REQUIRE_RENDERER(f);
+    NphRenderMaterialDesc md;
+    nph_render_material_desc_default(&md);
+    md.alpha_mode = NPH_RENDER_ALPHA_BLEND;
+    md.transmissive = 1;
+    md.transmission_texels = 1;
+    NphRenderMaterial mat = NPH_RENDER_MATERIAL_NULL;
+    NTEST_ASSERT_EQ_INT(nph_render_material_create(f->renderer, &md, &mat), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 1U);
+    md.transmission_texels = 0;
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, mat, &md), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 0U);
+    md.transmission_texels = 1;
+    NTEST_ASSERT_EQ_INT(nph_render_material_update(f->renderer, mat, &md), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 1U);
+    nph_render_material_destroy(f->renderer, mat);
+    NTEST_EXPECT_EQ_UINT(f->renderer->tinted_materials, 0U);
+}
+
 NTEST_F(Frame, debug_views_show_material_channels)
 {
     REQUIRE_RENDERER(f);

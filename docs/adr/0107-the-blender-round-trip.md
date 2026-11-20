@@ -110,8 +110,11 @@ What there is today:
      The dual-source blend is in variants alone (`k_tint`), drawn while a tinted material is live: blending every
      blended surface so cost 5 to 8 % of the blended pass where no glass was tinted.
    - **`transmission_texture`** is baked into a copy of the base colour texture, texel by texel, as the
-     specular-glossiness conversion bakes its textures. Not built yet: no reference scene has one, and it follows
-     in this step.
+     specular-glossiness conversion bakes its textures. As built (the user's choice, 2026-11-20): the copy keeps
+     the colour as it was and holds each texel's share in its alpha, and the material keeps its factors unscaled,
+     flagged `NPH_MATERIAL_FLAG_TRANSMISSION_TEXELS`; the `k_tint` variants scale its colour by the share before
+     it is shaded. Baking the share into the colour too would have darkened the tint where the glass is clear,
+     for the tint reads the base colour texture. Whether the material is glass still goes by the factor.
    - **Still ignored, with the warning they give today:** clearcoat, sheen, iridescence, anisotropy, dispersion, diffuse
      transmission, the specular colour, refraction.
 

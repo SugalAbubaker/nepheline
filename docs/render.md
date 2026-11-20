@@ -396,7 +396,12 @@ of glTF 2.0:
   tinted glass is live (`NphRenderer.tinted_materials`: the production path's
   frame, the reference renderer's draw), each made the first time a frame needs
   it; the others blend "over" by the first output's alpha, as before. Blending
-  every blended surface so cost 5 to 8 % of the blended pass. A
+  every blended surface so cost 5 to 8 % of the blended pass. Glass whose
+  transmission varies per texel (`NphRenderMaterialDesc.transmission_texels`,
+  `NPH_RENDER_MATERIAL_TRANSMISSION_TEXELS`) holds each texel's share in its
+  base colour texture's alpha and comes with its colour unscaled: the `k_tint`
+  variants, which draw it, scale its colour by that alpha before it is shaded,
+  as the cooker scales the factor of glass of one share. A
   blended surface casts no shadow in the sun's map and stops no ray: glass, and
   a decal a hair before its wall. Double-sided materials flip the whole tangent
   frame on back faces.

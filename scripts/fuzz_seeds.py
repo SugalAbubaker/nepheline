@@ -601,6 +601,9 @@ def main():
     write(os.path.join(CORPUS, "nph", "material_optics"),
           nph_file(fourcc("MATL"), 5, material_blobs(alpha_mode=2, flags=4) +
                    [("OPTC", 0, 0, 16, optics, optics)]))
+    # Version 5: glass whose transmission varies per texel (flags 4 | 8; ADR-0107).
+    write(os.path.join(CORPUS, "nph", "material_glass_texels"),
+          nph_file(fourcc("MATL"), 5, material_blobs(alpha_mode=2, flags=12)))
     # Version 4: the occlusion and emissive slots on the second set (ADR-0107).
     write(os.path.join(CORPUS, "nph", "material_uv1"),
           nph_file(fourcc("MATL"), 4, material_blobs(texcoords=(0, 0, 0, 1, 1))))
