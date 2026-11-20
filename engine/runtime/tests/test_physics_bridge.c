@@ -787,6 +787,211 @@ NTEST(Physics, triggers_name_compound_bodies_and_ignore_remakes)
     finish(&fx);
 }
 
+static NphJoint joint_of_kind(u32 kind)
+{
+    NphJoint j = *(const NphJoint *)NphJoint_component()->defaults;
+    j.kind = kind;
+    return j;
+}
+
+static void add_joint(PhysFixture *f, NphEntity e, const NphJoint *j)
+{
+    NTEST_ASSERT_EQ_INT(nph_world_add(nph_engine_world(f->engine), e, f->ids.joint, j),
+                        NPH_RESULT_OK);
+}
+
+static NphJoint *joint_mut(PhysFixture *f, NphEntity e)
+{
+    return NPH_WORLD_GET_MUT(nph_engine_world(f->engine), e, f->ids.joint, NphJoint);
+}
+
+static f32 hinge_angle(PhysFixture *f, NphEntity e)
+{
+    const NphPhysicsJoint j = nph_engine_physics_joint(f->engine, e);
+    NTEST_ASSERT_FALSE(nph_physics_joint_is_null(j));
+    return nph_physics_joint_hinge_angle(nph_engine_physics(f->engine), j);
+}
+
+// A door hinged to the world along its edge: pushed hard, its limit holds it, its spring closes
+// it, and its edge stays where it was. Its spring's target changed, the joint is made again from
+// the frames it had: the door swings to that angle, not to it from wherever it hangs.
+NTEST(Physics, joints_hinge_a_door_that_its_spring_closes)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    NTEST_EXPECT_TRUE(nph_physics_joint_is_null(nph_engine_physics_joint(e, NPH_ENTITY_NULL)));
+    const NphCollider panel = box_collider(nph_vec3(0.5F, 1.0F, 0.05F));
+    const NphEntity door = spawn(&fx, nph_dvec3(0.5, 1.0, 0.0), NPH_RIGID_BODY_DYNAMIC, &panel);
+    NphJoint hinge = joint_of_kind(NPH_JOINT_HINGE);
+    hinge.anchor = nph_vec3(-0.5F, 0.0F, 0.0F);
+    hinge.axis = nph_vec3_unit_y();
+    hinge.limit = 1;
+    hinge.lower = -0.6F;
+    hinge.upper = 0.6F;
+    hinge.spring = 1;
+    hinge.spring_hertz = 0.5F;
+    hinge.spring_damping = 1.0F;
+    add_joint(&fx, door, &hinge);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    NphPhysicsWorld *pw = nph_engine_physics(e);
+    NTEST_ASSERT_FALSE(nph_physics_joint_is_null(nph_engine_physics_joint(e, door)));
+    rigid(&fx, door)->angular_velocity = nph_vec3(0.0F, 10.0F, 0.0F); // a shove
+    f32 widest = 0.0F;
+    // Six seconds: the spring acts on the hinge's own turn, as if the door turned about its centre
+    // (16.8 kg m^2), but it turns about its edge (66.8): half the frequency and half the damping
+    // ratio asked, measured at 0.24 Hz with a 17 % overshoot (components.h Joint).
+    for (u32 i = 0U; i < 1440U; ++i) {
+        frames(&fx, 1U);
+        widest = nph_f32_max(widest, nph_f32_abs(hinge_angle(&fx, door)));
+    }
+    NTEST_EXPECT_TRUE(widest > 0.5F);                           // it swung out to its limit
+    NTEST_EXPECT_TRUE(widest < 0.6F + 0.03F);                   // and no further
+    NTEST_EXPECT_NEAR_F32(hinge_angle(&fx, door), 0.0F, 0.05F); // closed again
+    const NphDVec3 at = nph_physics_body_position(pw, body_of(&fx, door));
+    NTEST_EXPECT_NEAR_F64(at.y, 1.0, 0.01); // hung on its hinge
+    NTEST_EXPECT_NEAR_F64(nph_dvec3_length(nph_dvec3(at.x, 0.0, at.z)), 0.5, 0.01);
+    joint_mut(&fx, door)->spring_target = 0.3F;
+    frames(&fx, 1440U);
+    NTEST_EXPECT_NEAR_F32(hinge_angle(&fx, door), 0.3F, 0.05F);
+    nph_engine_play_end(e);
+    NTEST_EXPECT_TRUE(nph_physics_joint_is_null(nph_engine_physics_joint(e, door)));
+    finish(&fx);
+}
+
+// A crate hung from a beam by a joint that holds 50 N breaks at once: `broken` written, the crate
+// falling. Written unbroken (and stronger), the joint is made again where the crate is, and holds.
+NTEST(Physics, joints_break_past_their_force_and_join_again)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    const NphCollider slab = box_collider(nph_vec3(1.0F, 0.1F, 1.0F));
+    const NphEntity beam = spawn(&fx, nph_dvec3(0.0, 5.0, 0.0), NO_RIGID_BODY, &slab);
+    const NphCollider cube = box_collider(nph_vec3(0.25F, 0.25F, 0.25F));
+    const NphEntity crate = spawn(&fx, nph_dvec3(0.0, 4.5, 0.0), NPH_RIGID_BODY_DYNAMIC, &cube);
+    NphJoint ball = joint_of_kind(NPH_JOINT_BALL);
+    ball.anchor = nph_vec3(0.0F, 0.25F, 0.0F);
+    ball.other = beam;
+    ball.break_force = 50.0F; // the crate weighs 1226 N
+    add_joint(&fx, crate, &ball);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    NTEST_ASSERT_FALSE(nph_physics_joint_is_null(nph_engine_physics_joint(e, crate)));
+    frames(&fx, 1U);
+    NTEST_EXPECT_EQ_INT(joint_mut(&fx, crate)->broken, 1);
+    NTEST_EXPECT_TRUE(nph_physics_joint_is_null(nph_engine_physics_joint(e, crate)));
+    frames(&fx, 60U);
+    const f64 fallen = local_of(&fx, crate)->translation.y;
+    NTEST_EXPECT_TRUE(fallen < 4.4);
+    NphJoint *j = joint_mut(&fx, crate);
+    j->broken = 0;
+    j->break_force = 0.0F;
+    frames(&fx, 1U);
+    NTEST_ASSERT_FALSE(nph_physics_joint_is_null(nph_engine_physics_joint(e, crate)));
+    const f64 caught = local_of(&fx, crate)->translation.y;
+    frames(&fx, 120U);
+    NTEST_EXPECT_NEAR_F64(local_of(&fx, crate)->translation.y, caught, 0.1); // held where caught
+    NTEST_EXPECT_EQ_INT(joint_mut(&fx, crate)->broken, 0);
+    nph_engine_play_end(e);
+    finish(&fx);
+}
+
+// A door whose body is made again (kinematic, then dynamic) keeps its joint's frames: its angle
+// where it was, not zero. A joint to an entity with no body waits for one.
+NTEST(Physics, joints_keep_their_frames_and_wait_for_their_bodies)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    NphWorld *w = nph_engine_world(e);
+    const NphCollider panel = box_collider(nph_vec3(0.5F, 1.0F, 0.05F));
+    const NphEntity door = spawn(&fx, nph_dvec3(0.5, 1.0, 0.0), NPH_RIGID_BODY_DYNAMIC, &panel);
+    rigid(&fx, door)->angular_damping = 4.0F;
+    NphJoint hinge = joint_of_kind(NPH_JOINT_HINGE);
+    hinge.anchor = nph_vec3(-0.5F, 0.0F, 0.0F);
+    add_joint(&fx, door, &hinge);
+    const NphCollider ball_shape = sphere_collider(0.2F);
+    const NphEntity ball =
+        spawn(&fx, nph_dvec3(3.0, 1.0, 0.0), NPH_RIGID_BODY_DYNAMIC, &ball_shape);
+    const NphEntity post = spawn(&fx, nph_dvec3(3.0, 2.0, 0.0), NO_RIGID_BODY, NULL);
+    NphJoint tie = joint_of_kind(NPH_JOINT_BALL);
+    tie.other = post;
+    add_joint(&fx, ball, &tie);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    rigid(&fx, door)->angular_velocity = nph_vec3(0.0F, 2.0F, 0.0F);
+    frames(&fx, 480U);
+    const f32 open = hinge_angle(&fx, door);
+    NTEST_ASSERT_TRUE(nph_f32_abs(open) > 0.1F);       // pushed open, and stopped there
+    rigid(&fx, door)->type = NPH_RIGID_BODY_KINEMATIC; // no dynamic body: no joint (logged)
+    frames(&fx, 1U);
+    rigid(&fx, door)->type = NPH_RIGID_BODY_DYNAMIC;
+    frames(&fx, 1U);
+    NTEST_EXPECT_NEAR_F32(hinge_angle(&fx, door), open, 0.02F);
+    // The post has no body: the ball's joint waits; a RigidBody on the post makes it.
+    NTEST_EXPECT_TRUE(nph_physics_joint_is_null(nph_engine_physics_joint(e, ball)));
+    NTEST_ASSERT_EQ_INT(nph_world_add(w, post, fx.ids.rigid_body, NULL), NPH_RESULT_OK);
+    rigid(&fx, post)->type = NPH_RIGID_BODY_STATIC;
+    frames(&fx, 2U);
+    NTEST_EXPECT_FALSE(nph_physics_joint_is_null(nph_engine_physics_joint(e, ball)));
+    // Despawned, the ball takes its joint with it.
+    NTEST_ASSERT_EQ_INT(nph_world_despawn(w, ball), NPH_RESULT_OK);
+    frames(&fx, 1U);
+    NTEST_EXPECT_TRUE(nph_physics_joint_is_null(nph_engine_physics_joint(e, ball)));
+    nph_engine_play_end(e);
+    finish(&fx);
+}
+
+// A ball on a rope to a point of the world swings as far from it as it started.
+NTEST(Physics, distance_joints_hold_their_length)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    const NphCollider ball_shape = sphere_collider(0.1F);
+    const NphEntity ball =
+        spawn(&fx, nph_dvec3(1.0, 4.0, 0.0), NPH_RIGID_BODY_DYNAMIC, &ball_shape);
+    NphJoint rope = joint_of_kind(NPH_JOINT_DISTANCE);
+    rope.other_anchor = nph_vec3(0.0F, 5.0F, 0.0F);
+    add_joint(&fx, ball, &rope);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    f64 worst = 0.0;
+    for (u32 i = 0U; i < 240U; ++i) {
+        frames(&fx, 1U);
+        const NphDVec3 at = local_of(&fx, ball)->translation;
+        const f64 d = nph_dvec3_length(nph_dvec3_sub(at, nph_dvec3(0.0, 5.0, 0.0)));
+        worst = nph_f64_max(worst, nph_f64_abs(d - 1.4142135623730951));
+    }
+    NTEST_EXPECT_TRUE(worst < 0.01);
+    NTEST_EXPECT_TRUE(local_of(&fx, ball)->translation.x < 0.9); // it swung
+    nph_engine_play_end(e);
+    finish(&fx);
+}
+
+// A box on a slider along X: held up against gravity, and stopped by its range when thrown along.
+NTEST(Physics, sliders_keep_to_their_axis)
+{
+    static PhysFixture fx;
+    start(&fx);
+    NphEngine *e = fx.engine;
+    const NphCollider cube = box_collider(nph_vec3(0.25F, 0.25F, 0.25F));
+    const NphEntity box = spawn(&fx, nph_dvec3(0.0, 2.0, 0.0), NPH_RIGID_BODY_DYNAMIC, &cube);
+    NphJoint slide = joint_of_kind(NPH_JOINT_SLIDER);
+    slide.axis = nph_vec3_unit_x();
+    slide.limit = 1;
+    slide.lower = -1.0F;
+    slide.upper = 1.0F;
+    add_joint(&fx, box, &slide);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(e, false), NPH_RESULT_OK);
+    rigid(&fx, box)->linear_velocity = nph_vec3(5.0F, 0.0F, 0.0F);
+    frames(&fx, 240U);
+    const NphDVec3 at = local_of(&fx, box)->translation;
+    NTEST_EXPECT_NEAR_F64(at.y, 2.0, 0.01);
+    NTEST_EXPECT_NEAR_F64(at.z, 0.0, 0.01);
+    NTEST_EXPECT_TRUE(at.x > 0.9 && at.x < 1.02);
+    nph_engine_play_end(e);
+    finish(&fx);
+}
+
 NTEST(Physics, a_flood_of_world_events_is_recovered)
 {
     static PhysFixture fx;

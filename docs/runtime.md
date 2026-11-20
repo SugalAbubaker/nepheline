@@ -550,6 +550,7 @@ after the game's systems and before the transform system:
 |---|---|
 | `RigidBody` | the body: static, kinematic, or dynamic; its mass (0: the Collider's), velocities, damping, gravity scale, locks, `bullet` (swept against moving bodies too), `can_sleep` |
 | `Collider` | its shape: a sphere, a capsule along Y, or a box, at a centre and rotation in the entity's frame, scaled by the entity's world scale (a box per axis, a sphere by the largest, a capsule's core by Y and its radius by the larger of X and Z); or every shape of a collision asset (`ASSET`, `collision`: below); its density, friction, restitution; its filter (category, mask, group); hit events; `trigger` (below) |
+| `Joint` | a joint from the entity's body to another's, or the world's: ball, hinge, fixed, slider, or distance, with its limits, motor, spring, and breaking force (below) |
 
 A Collider alone is a static body (the level); a RigidBody alone, a point
 of 1 kg (or of its `mass`).
@@ -586,6 +587,26 @@ step, so a trigger or a visitor made again in place reports nothing, and a
 visitor despawned inside leaves with its stale entity. The events hold
 until the next step, in the step's order; the game's own bodies and
 sensors report through the physics world's events.
+
+**Joints** ([ADR-0108](adr/0108-physics-in-levels.md)). A Joint links
+the body of its entity (its RigidBody's or Collider's, its compound's for
+a part, or the nearest body above it) to the body of `other`, or to the
+world. The bridge makes it once both bodies exist, at the frames its
+anchor and axis give in the world then: both at the anchor with X along
+the axis, but a distance joint's far end at `other_anchor`, held as far
+apart as they are. The frames are kept: a change of its settings (limits,
+motor, spring), or a body made again for the same entity, makes the joint
+again from the frames it had, so a hinge's angle and a rope's length keep
+their zero; a change of its structure (kind, `other`, an anchor, the axis,
+`collide_connected`) takes them anew. Past its `break_force` a joint breaks
+after the step: `broken` is written true, and the joint stays unmade until
+the game writes it false, which joins it again where the bodies are. A
+joint that cannot be made (neither body dynamic, a setting out of range)
+is logged and tried again when its component or a body changes;
+`nph_game_physics_joint` gives the physics joint, for a door's angle or a
+slider's position. A spring has its frequency and damping for the joint's
+own turn or slide as if the body turned about its centre: a door, turning
+about its edge, swings at about half of each.
 
 **Compounds** ([ADR-0108](adr/0108-physics-in-levels.md)). A Collider
 without a RigidBody below an entity with one, no closer one between them,
@@ -907,6 +928,7 @@ instance):
 | `engine_frame_physics_1k_spinning` | 120.6 µs | 1,000 bodies turning in place, each moved, written back, and composed every step |
 | `engine_frame_physics_1k_compounds_spinning` | 248 µs | the same with two boxes a body, its children (ADR-0108): 2,000 parts; as bodies of their own following their parents (before compounds), 1.64 ms |
 | `engine_frame_physics_1k_compounds_deep_spinning` | 412 µs | each part under an entity of its own: 2,000 chains hashed every step (85 ns each; composed every step, 215 ns) |
+| `engine_frame_physics_1k_hinged` | 0.36 ms | 1,000 doors hinged to the world by Joints, swinging, every one breakable: 55 µs of it checking the breaking forces; joints whose bodies did not change since they were settled cost nothing |
 | `engine_frame_physics_10k_static_reparent` | 3.33 ms | 10,000 static Colliders in 100 groups, one given another parent every frame: a full pass, every Collider looked at again (3.14 ms before ADR-0108's compounds and collision assets, which cost it 6 %; the frames above are unchanged) |
 | `physics_step_1k_spinning` | 68.1 µs | the same bodies stepped in a physics world of their own |
 | `scene_sync_10k_moving` | 79 ns | the scene renderer bringing a moved instance up to date |

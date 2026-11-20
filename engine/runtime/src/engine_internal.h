@@ -226,6 +226,8 @@ NphEntity physics_bridge_entity(const PhysicsBridge *b, NphPhysicsBody body);
 const NphPhysicsStats *physics_bridge_stats(const PhysicsBridge *b);
 // The last step's trigger events (game.h nph_game_physics_triggers).
 NphTriggerEvents physics_bridge_triggers(const PhysicsBridge *b);
+// An entity's Joint's joint while it is made (engine.h nph_engine_physics_joint).
+NphPhysicsJoint physics_bridge_joint(const PhysicsBridge *b, NphEntity e);
 
 // ---------------------------------------------------------------------------
 // The audio bridge (audio_bridge.c): the mixer, the streamer, and the device,

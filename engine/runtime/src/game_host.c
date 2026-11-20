@@ -923,6 +923,12 @@ NphPhysicsBody nph_game_physics_body(const NphGame *game, NphEntity entity)
     return nph_engine_physics_body(game->engine, entity);
 }
 
+NphPhysicsJoint nph_game_physics_joint(const NphGame *game, NphEntity entity)
+{
+    NPH_ASSERT(game != NULL);
+    return nph_engine_physics_joint(game->engine, entity);
+}
+
 NphTriggerEvents nph_game_physics_triggers(const NphGame *game)
 {
     NPH_ASSERT(game != NULL);

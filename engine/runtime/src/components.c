@@ -66,6 +66,29 @@ static const NphCollider g_collider_defaults = {(u32)NPH_COLLIDER_BOX,
                                                 0};       // solid, not a trigger
 NPH_COMPONENT_DEFINE(NphCollider, NPH_COLLIDER_FIELDS, "Collider", 0U, &g_collider_defaults)
 
+// A door's hinge: about the entity's Y at its origin, to the world, a quarter
+// turn either way when limited, a spring of 2 Hz critically damped when
+// sprung; nothing limited, driven, sprung, or breakable until asked.
+static const NphJoint g_joint_defaults = {(u32)NPH_JOINT_HINGE,
+                                          {0U},
+                                          {0.0F, 0.0F, 0.0F},
+                                          {0.0F, 1.0F, 0.0F},
+                                          {0.0F, 0.0F, 0.0F},
+                                          0,
+                                          -1.5707964F,
+                                          1.5707964F,
+                                          0,
+                                          0.0F,
+                                          0.0F,
+                                          0,
+                                          2.0F,
+                                          1.0F,
+                                          0.0F,
+                                          0,
+                                          0.0F,
+                                          0};
+NPH_COMPONENT_DEFINE(NphJoint, NPH_JOINT_FIELDS, "Joint", 0U, &g_joint_defaults)
+
 // An effect at full volume and as recorded, not playing until the game
 // says so, in 3D with the mixer's default fall-off (inverse, physical,
 // full within 1 m, down to 50 m; the curve, if chosen, from 0 dB at 1 m to
@@ -159,5 +182,7 @@ NphResult nph_runtime_register_components(NphWorld *world, NphRuntimeComponents 
     NPH_TRY(
         nph_world_register_component(world, NphAudioListener_component(), &out->audio_listener));
     NPH_TRY(nph_world_register_component(world, NphWorldCell_component(), &out->world_cell));
-    return nph_world_register_component(world, NphMeshMaterials_component(), &out->mesh_materials);
+    NPH_TRY(
+        nph_world_register_component(world, NphMeshMaterials_component(), &out->mesh_materials));
+    return nph_world_register_component(world, NphJoint_component(), &out->joint);
 }
