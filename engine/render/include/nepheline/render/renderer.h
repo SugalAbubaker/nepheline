@@ -679,6 +679,9 @@ typedef struct NphRenderUvTransform {
     f32 m10, m11, m12;
 } NphRenderUvTransform;
 
+// The F0 of a material that says none (NphRenderMaterialDesc.f0): a dielectric's of index 1.5.
+#define NPH_RENDER_F0_DEFAULT 0.04F
+
 typedef struct NphRenderMaterialDesc {
     NphVec4 base_color; // linear RGBA
     NphVec3 emissive;   // linear radiance, cd/m^2 (glTF factor times strength, in nits)
@@ -696,7 +699,8 @@ typedef struct NphRenderMaterialDesc {
     // dielectric). A plain blended material is a coverage: all of its light scales with alpha.
     b32 transmissive;
     // The reflectance head on of its dielectric part (F0; glTF's KHR_materials_ior and the factor
-    // of KHR_materials_specular; ADR-0107), in [0, 1]: 0.04 by default, an index of 1.5.
+    // of KHR_materials_specular; ADR-0107), in [0, 1]: NPH_RENDER_F0_DEFAULT by default, an index
+    // of 1.5. The forward passes draw a material of another with variants that read it.
     f32 f0;
     // Glass's tint (`transmissive`), per channel: what is behind it passes by the share its alpha
     // leaves, less what its surface turns back, times this, times its vertex colour and its base

@@ -614,6 +614,7 @@ static void add_instance_draws(NphRenderer *r, const FrameCull *fc, u32 i, DrawL
         c->tint = alpha == (u32)NPH_RENDER_ALPHA_BLEND && md != NULL && render_material_tinted(md)
                       ? 1U
                       : 0U;
+        c->f0 = md != NULL && render_material_reads_f0(md) ? 1U : 0U;
         if (alpha == (u32)NPH_RENDER_ALPHA_BLEND) {
             c->key = depth_key(view_depth, rec);
             list->blend_count += 1U;
@@ -670,12 +671,15 @@ static void record_draws(NphRenderer *r, NphGpuCmd *cmd, u32 first, u32 count,
     const u32 rt = r->rt.frame_shadows != 0 ? 1U : 0U;
     for (u32 i = first; i < first + count; ++i) {
         const RenderDrawCmd *c = &r->draw_cmds[i];
-        // A draw whose material reads the second set, or is tinted glass, by the pipelines that
-        // do (ADR-0107).
+        // A draw whose material reads the second set, is tinted glass, or is of another F0, by the
+        // pipelines that do (ADR-0107).
         NphGpuPipeline p =
             rt != 0U ? r->forward_rt[c->alpha_mode][c->cull] : r->forward[c->alpha_mode][c->cull];
         if (c->tint != 0U) {
             p = rt != 0U ? r->forward_rt_tint[c->uv1][c->cull] : r->forward_tint[c->uv1][c->cull];
+        } else if (c->f0 != 0U) {
+            p = rt != 0U ? r->forward_rt_f0[c->alpha_mode][c->uv1][c->cull]
+                         : r->forward_f0[c->alpha_mode][c->uv1][c->cull];
         } else if (c->uv1 != 0U) {
             p = rt != 0U ? r->forward_rt_uv1[c->alpha_mode][c->cull]
                          : r->forward_uv1[c->alpha_mode][c->cull];
@@ -839,9 +843,12 @@ static NphResult declare_reference(NphRenderer *r, NphGpuRenderGraph *graph, u32
     if (r->uv1_materials != 0U) {
         NPH_TRY(render_forward_uv1_pipelines(r));
     }
-    // And those that blend tinted glass, the first frame one is live.
+    // And those that blend tinted glass, the first frame one is live, and those that read F0.
     if (r->tinted_materials != 0U) {
         NPH_TRY(render_forward_tint_pipelines(r));
+    }
+    if (r->f0_materials != 0U) {
+        NPH_TRY(render_forward_f0_pipelines(r));
     }
 
     NphGpuRgPassDesc pd;

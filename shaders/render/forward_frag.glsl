@@ -88,6 +88,12 @@ vec3 g_tlas_offset; // and the camera's place in it
 // k_uv1): only then does a slot test which set it reads, and the stage read the second.
 layout(constant_id = 5) const bool k_uv1 = false;
 #define NPH_SURFACE_UV1_ACTIVE k_uv1
+// Whether the material's F0 is read (ADR-0107): only in the variants drawn while a material needs
+// one other than 0.04 (renderer.c render_forward_pipeline's `f0`, and its `tint`, which reads it
+// too). The others shade with 0.04, which the compiler folds: a read F0 cost the blended pass a
+// tenth of its time where its surfaces lie many deep.
+layout(constant_id = 7) const bool k_f0 = false;
+#define NPH_SURFACE_F0(m) (k_f0 ? (m).emissive.w : 0.04)
 #include "surface.glsl"
 
 layout(push_constant, scalar) uniform Push { NphRenderPush pc; };
@@ -116,29 +122,33 @@ layout(constant_id = 6) const bool k_tint = false;
 // surface's, added as shaded; what is behind it shows less by what the surface turns back too,
 // a dielectric's share at the angle it is seen from (Schlick, "An Inexpensive BRDF Model for
 // Physically-Based Rendering", 1994; 4 % head on).
-//
-// The light behind passes by the second output, channel by channel (ADR-0107): one minus the
-// first's alpha, as "over" composites, but where glass is tinted (NPH_RENDER_MATERIAL_TINTED),
-// whose share is then times its tint, its vertex colour and its base colour texture (glTF tints
-// what glass lets through by its base colour), and so coloured.
-void forward_blended(NphRenderMaterialData m, NphSurface s, vec3 color, float alpha)
+vec4 forward_blended(NphRenderMaterialData m, NphSurface s, vec3 color, float alpha)
 {
     if ((m.flags & NPH_RENDER_MATERIAL_TRANSMISSIVE) == 0u) {
-        out_color = vec4(color * alpha, alpha);
-        if (k_tint) {
-            out_transmit = vec4(vec3(1.0 - out_color.a), 0.0);
-        }
+        return vec4(color * alpha, alpha);
+    }
+    const vec3 n = normalize(s.face_normal);
+    const vec3 v = normalize(-s.position);
+    const float turned = 0.04 + 0.96 * pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 5.0);
+    return vec4(color, 1.0 - (1.0 - alpha) * (1.0 - turned));
+}
+
+// The k_tint variants' outputs, over forward_blended's (ADR-0107). Glass turns back its own F0's
+// share. The light behind passes by the second output, channel by channel: one minus the first's
+// alpha, as "over" composites, but where glass is tinted (NPH_RENDER_MATERIAL_TINTED), whose share
+// is then times its tint, its vertex colour and its base colour texture (glTF tints what glass
+// lets through by its base colour), and so coloured.
+void forward_blended_tinted(NphRenderMaterialData m, NphSurface s, vec3 color, float alpha)
+{
+    if ((m.flags & NPH_RENDER_MATERIAL_TRANSMISSIVE) == 0u) {
+        out_transmit = vec4(vec3(1.0 - out_color.a), 0.0);
         return;
     }
     const vec3 n = normalize(s.face_normal);
     const vec3 v = normalize(-s.position);
-    // Schlick's share at the angle it is seen from, from the material's F0.
     const float f0 = m.emissive.w;
     const float turned = f0 + (1.0 - f0) * pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 5.0);
     out_color = vec4(color, 1.0 - (1.0 - alpha) * (1.0 - turned));
-    if (!k_tint) {
-        return;
-    }
     out_transmit = vec4(vec3(1.0 - out_color.a), 0.0);
     if ((m.flags & NPH_RENDER_MATERIAL_TINTED) != 0u) {
         vec3 tint = m.transmission.rgb * s.color.rgb;
@@ -249,16 +259,21 @@ void main()
 #if NPH_FORWARD_ALPHA_MODE == 2
     if (k_cache_only) {
         const float metallic = m.metallic;
-        const float f0 = m.emissive.w; // the material's (ADR-0107; 0.04 by default)
-        const vec3 albedo =
-            base.rgb * (1.0 - metallic) * (1.0 - f0) + mix(vec3(f0), base.rgb, metallic);
+        vec3 albedo = base.rgb * (1.0 - metallic) * 0.96 + mix(vec3(0.04), base.rgb, metallic);
+        if (k_f0) {
+            const float f0 = m.emissive.w; // the material's (ADR-0107)
+            albedo = base.rgb * (1.0 - metallic) * (1.0 - f0) + mix(vec3(f0), base.rgb, metallic);
+        }
         vec3 emissive = m.emissive.rgb;
         if (nph_material_has(m, NPH_RENDER_TEX_EMISSIVE)) {
             emissive *= nph_surface_sample(m, NPH_RENDER_TEX_EMISSIVE, s).rgb;
         }
         color = min((albedo * g_gi_cell.rgb * (NPH_INV_PI * g_gi_cell.w) + emissive) * view.v.exposure,
                     vec3(NPH_RENDER_HALF_MAX));
-        forward_blended(m, s, color, base.a);
+        out_color = forward_blended(m, s, color, base.a);
+        if (k_tint) {
+            forward_blended_tinted(m, s, color, base.a);
+        }
         return;
     }
 #endif
@@ -268,7 +283,10 @@ void main()
         color = nph_surface_shade(view, m, s, base);
     }
 #if NPH_FORWARD_ALPHA_MODE == 2
-    forward_blended(m, s, color, base.a);
+    out_color = forward_blended(m, s, color, base.a);
+    if (k_tint) {
+        forward_blended_tinted(m, s, color, base.a);
+    }
 #else
     out_color = vec4(color, 1.0);
 #endif

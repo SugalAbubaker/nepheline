@@ -105,7 +105,7 @@ NphResult render_load_shader(NphRenderer *r, RenderShader shader, const char *fi
 
 NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFormat format,
                                   bool ray_query, bool vsm, bool vis_depth, u32 gi, bool uv1,
-                                  bool tint, NphGpuPipeline *out)
+                                  bool tint, bool f0, NphGpuPipeline *out)
 {
     NPH_ASSERT(!tint || alpha == (u32)NPH_RENDER_ALPHA_BLEND);
     NPH_ASSERT(!vis_depth || alpha == (u32)NPH_RENDER_ALPHA_BLEND);
@@ -160,15 +160,17 @@ NphResult render_forward_pipeline(NphRenderer *r, u32 alpha, u32 cull, NphGpuFor
     }
     d.name = vis_depth ? "forward blended (indirect)" : names[alpha][cull];
     // forward_frag.glsl's k_vsm, k_vis_depth, k_gi and k_cache_only (`gi` 2), forward.vert's
-    // k_indirect, and both stages' k_uv1 (the second texture coordinate set; ADR-0107).
+    // k_indirect, both stages' k_uv1 (the second texture coordinate set; ADR-0107), and the
+    // fragment stage's k_tint and k_f0 (the material's F0, which the tint variants read too).
     d.specialization[0] = vsm ? 1U : 0U;
     d.specialization[1] = vis_depth ? 1U : 0U;
     d.specialization[2] = gi != 0U ? 1U : 0U;
     d.specialization[3] = gi == 2U ? 1U : 0U;
     d.specialization[4] = vis_depth ? 1U : 0U;
     d.specialization[5] = uv1 ? 1U : 0U;
-    d.specialization[6] = tint ? 1U : 0U; // forward_frag.glsl's k_tint
-    d.specialization_count = tint ? 7U : uv1 ? 6U : vis_depth ? 5U : (vsm ? 1U : 0U);
+    d.specialization[6] = tint ? 1U : 0U;
+    d.specialization[7] = tint || f0 ? 1U : 0U;
+    d.specialization_count = tint || f0 ? 8U : uv1 ? 6U : vis_depth ? 5U : (vsm ? 1U : 0U);
     return nph_gpu_pipeline_create_graphics(r->dev, &d, out);
 }
 
@@ -178,10 +180,10 @@ static NphResult create_forward_pipelines(NphRenderer *r)
     for (u32 alpha = 0; alpha < 3U; ++alpha) {
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
             NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false, false,
-                                            0U, false, false, &r->forward[alpha][cull]));
+                                            0U, false, false, false, &r->forward[alpha][cull]));
             if (rt) {
                 NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true, false,
-                                                false, 0U, false, false,
+                                                false, 0U, false, false, false,
                                                 &r->forward_rt[alpha][cull]));
             }
         }
@@ -207,12 +209,12 @@ NphResult render_forward_uv1_pipelines(NphRenderer *r)
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
             if (r->forward_uv1[alpha][cull].value == 0U) {
                 NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false,
-                                                false, 0U, true, false,
+                                                false, 0U, true, false, false,
                                                 &r->forward_uv1[alpha][cull]));
             }
             if (rt && r->forward_rt_uv1[alpha][cull].value == 0U) {
                 NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true, false,
-                                                false, 0U, true, false,
+                                                false, 0U, true, false, false,
                                                 &r->forward_rt_uv1[alpha][cull]));
             }
         }
@@ -229,13 +231,36 @@ NphResult render_forward_tint_pipelines(NphRenderer *r)
         for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
             if (r->forward_tint[uv1][cull].value == 0U) {
                 NPH_TRY(render_forward_pipeline(r, blend, cull, RENDER_HDR_FORMAT, false, false,
-                                                false, 0U, uv1 != 0U, true,
+                                                false, 0U, uv1 != 0U, true, false,
                                                 &r->forward_tint[uv1][cull]));
             }
             if (rt && r->forward_rt_tint[uv1][cull].value == 0U) {
                 NPH_TRY(render_forward_pipeline(r, blend, cull, RENDER_HDR_FORMAT, true, false,
-                                                false, 0U, uv1 != 0U, true,
+                                                false, 0U, uv1 != 0U, true, false,
                                                 &r->forward_rt_tint[uv1][cull]));
+            }
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
+NphResult render_forward_f0_pipelines(NphRenderer *r)
+{
+    // Each one not made yet: a call that failed part way makes the rest the next time.
+    const bool rt = r->rt.supported != 0;
+    for (u32 alpha = 0; alpha < 2U; ++alpha) {
+        for (u32 uv1 = 0; uv1 < 2U; ++uv1) {
+            for (u32 cull = 0; cull < (u32)RENDER_CULL_COUNT; ++cull) {
+                if (r->forward_f0[alpha][uv1][cull].value == 0U) {
+                    NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, false, false,
+                                                    false, 0U, uv1 != 0U, false, true,
+                                                    &r->forward_f0[alpha][uv1][cull]));
+                }
+                if (rt && r->forward_rt_f0[alpha][uv1][cull].value == 0U) {
+                    NPH_TRY(render_forward_pipeline(r, alpha, cull, RENDER_HDR_FORMAT, true, false,
+                                                    false, 0U, uv1 != 0U, false, true,
+                                                    &r->forward_rt_f0[alpha][uv1][cull]));
+                }
             }
         }
     }
@@ -723,6 +748,10 @@ void nph_renderer_destroy(NphRenderer *r)
             if (a < 2U) {
                 nph_gpu_pipeline_destroy(dev, r->forward_tint[a][c]);
                 nph_gpu_pipeline_destroy(dev, r->forward_rt_tint[a][c]);
+                for (u32 u = 0; u < 2U; ++u) {
+                    nph_gpu_pipeline_destroy(dev, r->forward_f0[a][u][c]);
+                    nph_gpu_pipeline_destroy(dev, r->forward_rt_f0[a][u][c]);
+                }
             }
         }
     }
@@ -1669,7 +1698,7 @@ void nph_render_material_desc_default(NphRenderMaterialDesc *desc)
     desc->alpha_cutoff = 0.5F;
     desc->alpha_mode = NPH_RENDER_ALPHA_OPAQUE;
     desc->uv = nph_render_uv_identity();
-    desc->f0 = 0.04F;
+    desc->f0 = NPH_RENDER_F0_DEFAULT;
     desc->transmission = nph_vec3_zero();
 }
 
@@ -1713,7 +1742,13 @@ bool render_material_reads_uv1(const NphRenderMaterialDesc *d)
 bool render_material_tinted(const NphRenderMaterialDesc *d)
 {
     const NphVec3 t = d->transmission;
-    return d->transmissive && (t.x != 0.0F || t.y != 0.0F || t.z != 0.0F);
+    return (d->transmissive && (t.x != 0.0F || t.y != 0.0F || t.z != 0.0F)) ||
+           (d->alpha_mode == NPH_RENDER_ALPHA_BLEND && d->f0 != NPH_RENDER_F0_DEFAULT);
+}
+
+bool render_material_reads_f0(const NphRenderMaterialDesc *d)
+{
+    return d->alpha_mode != NPH_RENDER_ALPHA_BLEND && d->f0 != NPH_RENDER_F0_DEFAULT;
 }
 
 static u32 needs_uv_variants(const NphRenderMaterialDesc *d)
@@ -1778,6 +1813,7 @@ NphResult nph_render_material_create(NphRenderer *r, const NphRenderMaterialDesc
     r->uv_materials += needs_uv_variants(desc);
     r->uv1_materials += render_material_reads_uv1(desc) ? 1U : 0U;
     r->tinted_materials += render_material_tinted(desc) ? 1U : 0U;
+    r->f0_materials += render_material_reads_f0(desc) ? 1U : 0U;
     out->value = value;
     return NPH_RESULT_OK;
 }
@@ -1848,6 +1884,8 @@ NphResult nph_render_material_update(NphRenderer *r, NphRenderMaterial material,
     r->uv1_materials += render_material_reads_uv1(desc) ? 1U : 0U;
     r->tinted_materials -= render_material_tinted(&r->materials[slot].desc) ? 1U : 0U;
     r->tinted_materials += render_material_tinted(desc) ? 1U : 0U;
+    r->f0_materials -= render_material_reads_f0(&r->materials[slot].desc) ? 1U : 0U;
+    r->f0_materials += render_material_reads_f0(desc) ? 1U : 0U;
     r->materials[slot].desc = *desc;
     r->materials[slot].desc.name = NULL;
     // The next frame's resolve takes no history where it draws (frame.c write_materials).
@@ -1874,6 +1912,7 @@ void nph_render_material_destroy(NphRenderer *r, NphRenderMaterial material)
     r->uv_materials -= needs_uv_variants(&r->materials[slot].desc);
     r->uv1_materials -= render_material_reads_uv1(&r->materials[slot].desc) ? 1U : 0U;
     r->tinted_materials -= render_material_tinted(&r->materials[slot].desc) ? 1U : 0U;
+    r->f0_materials -= render_material_reads_f0(&r->materials[slot].desc) ? 1U : 0U;
     // Its instances draw with the default material from here on, which tests no alpha and
     // holds no mesh's triangles for the rays alone: where the rays held it to a key, the
     // top level's records are written again, and name their meshes' own triangles (ADR-0098).
