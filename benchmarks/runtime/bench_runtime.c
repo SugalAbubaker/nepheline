@@ -594,6 +594,156 @@ NBENCH(engine_frame_physics_1k_spinning)
     nph_engine_destroy(e);
 }
 
+// BODIES spinning bodies (gravity and sleep off), each with no Collider of
+// its own and two parts (ADR-0108): two boxes as children, or (`deep`)
+// each under an entity of its own between it and the body, whose frames
+// the bridge checks every step.
+static NphEngine *compound_engine(bool deep)
+{
+    NphEngine *e = headless_engine();
+    nph_engine_play_end(e);
+    NphWorld *w = nph_engine_edit_world(e);
+    const NphRuntimeComponents *ids = nph_engine_components(e);
+    const NphComponentId body_comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                          NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->rigid_body};
+    const NphComponentId part_comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                          NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->collider};
+    const NphComponentId holder_comps[2] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                            NPH_COMPONENT_ID_WORLD_TRANSFORM};
+    for (u32 i = 0; i < BODIES; ++i) {
+        NphEntity body;
+        if (nph_world_spawn(w, body_comps, 3U, &body) != NPH_RESULT_OK) {
+            abort();
+        }
+        NPH_WORLD_GET_MUT(w, body, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+            ->translation = body_position(i, false);
+        NphRigidBody *rb = NPH_WORLD_GET_MUT(w, body, ids->rigid_body, NphRigidBody);
+        rb->gravity_scale = 0.0F;
+        rb->angular_velocity = SPIN_VELOCITY;
+        rb->can_sleep = 0;
+        for (u32 k = 0; k < 2U; ++k) {
+            NphEntity above = body; // the piece's parent: the body, or a holder under it
+            if (deep) {
+                NphEntity holder;
+                if (nph_world_spawn(w, holder_comps, 2U, &holder) != NPH_RESULT_OK ||
+                    nph_world_set_parent(w, holder, body) != NPH_RESULT_OK) {
+                    abort();
+                }
+                above = holder;
+            }
+            NphEntity piece;
+            if (nph_world_spawn(w, part_comps, 3U, &piece) != NPH_RESULT_OK ||
+                nph_world_set_parent(w, piece, above) != NPH_RESULT_OK) {
+                abort();
+            }
+            NPH_WORLD_GET_MUT(w, piece, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+                ->translation = nph_dvec3(k == 0U ? -0.4 : 0.4, 0.0, 0.0);
+            NphCollider *c = NPH_WORLD_GET_MUT(w, piece, ids->collider, NphCollider);
+            c->half_extents = nph_vec3(0.3F, 0.5F, 0.5F);
+        }
+    }
+    if (nph_engine_play_begin(e, false) != NPH_RESULT_OK) {
+        abort();
+    }
+    return e;
+}
+
+// Against engine_frame_physics_1k_spinning (a box each): what two parts a
+// body cost a frame.
+NBENCH(engine_frame_physics_1k_compounds_spinning)
+{
+    NphEngine *e = compound_engine(false);
+    for (u32 i = 0; i < 8U; ++i) {
+        frame(e);
+    }
+    if (nph_engine_physics_stats(e)->shapes != 2U * BODIES) {
+        fail("the compounds' parts are not their bodies' shapes");
+    }
+    while (nbench_keep_running(state)) {
+        frame(e);
+    }
+    nph_engine_destroy(e);
+}
+
+// The same with an entity between each part and its body: 2000 frames
+// checked every step.
+NBENCH(engine_frame_physics_1k_compounds_deep_spinning)
+{
+    NphEngine *e = compound_engine(true);
+    for (u32 i = 0; i < 8U; ++i) {
+        frame(e);
+    }
+    if (nph_engine_physics_stats(e)->shapes != 2U * BODIES) {
+        fail("the compounds' deep parts are not their bodies' shapes");
+    }
+    while (nbench_keep_running(state)) {
+        frame(e);
+    }
+    nph_engine_destroy(e);
+}
+
+// INSTANCES static Colliders, each under one of 100 entities without
+// bodies (a level of grouped props), and one of them given another parent
+// every frame: a change of parent makes the bridge look at every Collider
+// again, which for each asks whether a body is above it (ADR-0108).
+NBENCH(engine_frame_physics_10k_static_reparent)
+{
+    NphEngine *e = headless_engine();
+    nph_engine_play_end(e);
+    NphWorld *w = nph_engine_edit_world(e);
+    const NphRuntimeComponents *ids = nph_engine_components(e);
+    const NphComponentId group_comps[2] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                           NPH_COMPONENT_ID_WORLD_TRANSFORM};
+    const NphComponentId prop_comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                          NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->collider};
+    NphEntity groups[100];
+    for (u32 g = 0; g < 100U; ++g) {
+        if (nph_world_spawn(w, group_comps, 2U, &groups[g]) != NPH_RESULT_OK) {
+            abort();
+        }
+        const u32 row = g / 10U;
+        NPH_WORLD_GET_MUT(w, groups[g], NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+            ->translation = nph_dvec3(20.0 * (f64)(g % 10U), 0.0, 20.0 * (f64)row);
+    }
+    NphEntity first = NPH_ENTITY_NULL;
+    for (u32 i = 0; i < INSTANCES; ++i) {
+        NphEntity prop;
+        if (nph_world_spawn(w, prop_comps, 3U, &prop) != NPH_RESULT_OK ||
+            nph_world_set_parent(w, prop, groups[i % 100U]) != NPH_RESULT_OK) {
+            abort();
+        }
+        const u32 at = i / 100U;
+        const u32 row = at / 10U;
+        NPH_WORLD_GET_MUT(w, prop, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+            ->translation = nph_dvec3(2.0 * (f64)(at % 10U), 0.0, 2.0 * (f64)row);
+        if (i == 0U) {
+            first = prop;
+        }
+    }
+    if (nph_engine_play_begin(e, false) != NPH_RESULT_OK) {
+        abort();
+    }
+    NphWorld *played = nph_engine_world(e); // the edited world itself: its handles hold
+    for (u32 i = 0; i < 8U; ++i) {
+        frame(e);
+    }
+    u32 n = 0U;
+    while (nbench_keep_running(state)) {
+        // The last frame's end is timed; the change of parent is not.
+        if (nph_engine_wait(e) != NPH_RESULT_OK) {
+            abort();
+        }
+        nbench_pause_timing(state);
+        if (nph_world_set_parent(played, first, groups[(n++ & 1U) != 0U ? 1U : 0U]) !=
+            NPH_RESULT_OK) {
+            fail("the prop cannot be given another parent");
+        }
+        nbench_resume_timing(state);
+        frame(e);
+    }
+    nph_engine_destroy(e);
+}
+
 NBENCH(physics_step_1k_spinning)
 {
     NphJobSystemDesc jd;

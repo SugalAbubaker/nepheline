@@ -20,7 +20,15 @@
 // step touches the chunks of moving bodies only, through a query view that
 // stamps them with the run's tick (no per-entity events: a pile of a
 // thousand boxes would overflow the stream every frame).
+//
+// Compounds (ADR-0108): a Collider without a RigidBody under an entity with
+// one, no closer one between them, is a part: a shape of that entity's body
+// rather than a body of its own, placed by the LocalTransforms from the
+// body's entity down to its own (exact inputs, so a moving body's parts read
+// the same every step). Each body's parts are a list through their entity
+// slots, which outlives the body's record when the body is made again.
 #include <nepheline/core/assert.h>
+#include <nepheline/core/hash.h>
 #include <nepheline/core/profile.h>
 #include <nepheline/math/mat.h>
 #include <nepheline/physics/body.h>
@@ -47,6 +55,12 @@ typedef enum BodyFlags {
     // Its entity has a parent (BODY_FOLLOWS too, unless the follow list
     // could not grow): a root's LocalTransform is its pose in the world.
     BODY_PARENTED = 1U << 5U,
+    // A part: a shape of the body of `owner`, an entity above it (no body of
+    // its own; `body` is the owner's).
+    BODY_PART = 1U << 6U,
+    // A part with entities between it and its body, whose changes the bridge
+    // does not see: its frame is checked every step.
+    BODY_DEEP = 1U << 7U,
 } BodyFlags;
 
 typedef struct BodyRecord {
@@ -65,6 +79,14 @@ typedef struct BodyRecord {
     NphQuat rotation;
     NphVec3 scale; // the world scale its shape was made at
     NphCollider collider;
+    // A part's (BODY_PART): the entity whose body it is a shape of, that
+    // entity's slot, the next part of that body (an entity slot, NO_RECORD
+    // for the last), and its frame in the body's.
+    NphEntity owner;
+    u32 owner_slot;
+    u32 part_next;
+    NphPhysicsPose frame;
+    u64 chain_hash; // a deep part's: what its frame was composed from (place_deep_parts)
 } BodyRecord;
 
 struct PhysicsBridge {
@@ -79,8 +101,10 @@ struct PhysicsBridge {
     u32 count;
     u32 cap;
     u32 *slot_record; // per entity slot: its record, or NO_RECORD
+    u32 *slot_parts;  // per entity slot: the first part of its body (a slot), or NO_RECORD
     u32 slot_cap;
     NphArrayU32 follows;       // slots of the records under parents (BODY_FOLLOWS)
+    NphArrayU32 deep_parts;    // slots of the parts checked every step (BODY_DEEP)
     NphArrayU32 targeted;      // entities whose kinematic bodies this step moves to a target
     NphArrayU32 last_targeted; // the last step's
     u32 event_cursor;          // world events read so far
@@ -126,31 +150,87 @@ static void remove_slot(NphArrayU32 *list, u32 slot)
     }
 }
 
-static void destroy_record(PhysicsBridge *b, u32 index)
+static void reweigh(PhysicsBridge *b, NphEntity owner);
+
+// Takes a part out of its body's list.
+static void unlink_part(PhysicsBridge *b, const BodyRecord *part)
+{
+    u32 *at = &b->slot_parts[part->owner_slot];
+    while (*at != NO_RECORD) {
+        if (*at == part->slot) {
+            *at = part->part_next;
+            return;
+        }
+        at = &b->records[b->slot_record[*at]].part_next;
+    }
+}
+
+// Destroys a record and what it made. A body's parts lose their shapes
+// with it: kept to take new ones when the body is made again in place
+// (`keep_parts`), or destroyed for the next step's full pass to make again
+// as whatever they are now (another body's parts, or bodies of their own).
+static void destroy_record(PhysicsBridge *b, u32 index, bool keep_parts)
 {
     NPH_ASSERT(index < b->count);
     BodyRecord *r = &b->records[index];
-    if (b->physics != NULL && !nph_physics_body_is_null(r->body)) {
-        nph_physics_body_destroy(b->physics, r->body); // its shape too
+    const u32 slot = r->slot;
+    const bool part = (r->flags & BODY_PART) != 0U;
+    NphEntity owner = NPH_ENTITY_NULL;
+    if (part) {
+        unlink_part(b, r);
+        if ((r->flags & BODY_DEEP) != 0U) {
+            remove_slot(&b->deep_parts, slot);
+        }
+        if (b->physics != NULL && !nph_physics_shape_is_null(r->shape)) {
+            nph_physics_shape_destroy(b->physics, r->shape);
+            owner = r->owner;
+        }
+    } else {
+        if (b->physics != NULL && !nph_physics_body_is_null(r->body)) {
+            nph_physics_body_destroy(b->physics, r->body); // its shapes, its parts' too
+        }
+        for (u32 s = b->slot_parts[slot]; s != NO_RECORD;) {
+            BodyRecord *p = &b->records[b->slot_record[s]];
+            p->body = NPH_PHYSICS_BODY_NULL;
+            p->shape = NPH_PHYSICS_SHAPE_NULL;
+            s = p->part_next;
+        }
+        if ((r->flags & BODY_FOLLOWS) != 0U) {
+            remove_slot(&b->follows, slot);
+        }
     }
-    if ((r->flags & BODY_FOLLOWS) != 0U) {
-        remove_slot(&b->follows, r->slot);
-    }
-    b->slot_record[r->slot] = NO_RECORD;
+    b->slot_record[slot] = NO_RECORD;
     const u32 last = b->count - 1U;
     if (index != last) {
         b->records[index] = b->records[last];
         b->slot_record[b->records[index].slot] = index;
     }
     b->count = last;
+    if (!nph_entity_is_null(owner)) {
+        reweigh(b, owner); // its body's mass over what is left
+    }
+    if (!part && !keep_parts && b->slot_parts[slot] != NO_RECORD) {
+        u32 s = b->slot_parts[slot];
+        b->slot_parts[slot] = NO_RECORD;
+        while (s != NO_RECORD) {
+            const u32 pi = b->slot_record[s];
+            s = b->records[pi].part_next;
+            destroy_record(b, pi, false); // no shape left, and out of no list
+        }
+        b->full_pass = 1;
+    }
 }
 
 static void destroy_all(PhysicsBridge *b)
 {
     while (b->count > 0U) {
-        destroy_record(b, b->count - 1U);
+        destroy_record(b, b->count - 1U, false);
+    }
+    for (u32 i = 0; i < b->slot_cap; ++i) {
+        b->slot_parts[i] = NO_RECORD;
     }
     NPH_ARRAY_CLEAR(&b->follows);
+    NPH_ARRAY_CLEAR(&b->deep_parts);
     NPH_ARRAY_CLEAR(&b->targeted);
     NPH_ARRAY_CLEAR(&b->last_targeted);
 }
@@ -182,16 +262,26 @@ static NphResult size_slots(PhysicsBridge *b)
         return NPH_RESULT_OK;
     }
     u32 *grown = NPH_ALLOC_ARRAY(b->alloc, u32, cap);
-    if (grown == NULL) {
+    u32 *parts = NPH_ALLOC_ARRAY(b->alloc, u32, cap);
+    if (grown == NULL || parts == NULL) {
+        if (grown != NULL) {
+            NPH_FREE_ARRAY(b->alloc, u32, grown, cap);
+        }
+        if (parts != NULL) {
+            NPH_FREE_ARRAY(b->alloc, u32, parts, cap);
+        }
         return NPH_RESULT_OUT_OF_MEMORY;
     }
     for (u32 i = 0; i < cap; ++i) {
         grown[i] = i < b->slot_cap ? b->slot_record[i] : NO_RECORD;
+        parts[i] = i < b->slot_cap ? b->slot_parts[i] : NO_RECORD;
     }
     if (b->slot_record != NULL) {
         NPH_FREE_ARRAY(b->alloc, u32, b->slot_record, b->slot_cap);
+        NPH_FREE_ARRAY(b->alloc, u32, b->slot_parts, b->slot_cap);
     }
     b->slot_record = grown;
+    b->slot_parts = parts;
     b->slot_cap = cap;
     return NPH_RESULT_OK;
 }
@@ -278,21 +368,27 @@ static NphQuat axes_rotation(NphVec3 xa, NphVec3 ya)
     return nph_quat_normalize(nph_quat_from_mat3(nph_mat3_from_cols(x, y, z)));
 }
 
-static const NphWorldTransform *parent_transform(const PhysicsBridge *b, NphEntity e)
+static const NphWorldTransform *transform_of(const PhysicsBridge *b, NphEntity parent)
 {
-    const NphEntity parent = nph_world_parent(b->world, e);
     if (nph_entity_is_null(parent)) {
         return NULL;
     }
     return NPH_WORLD_GET(b->world, parent, NPH_COMPONENT_ID_WORLD_TRANSFORM, NphWorldTransform);
 }
 
-// Where the entity is in the world: its LocalTransform for a root, composed
-// with its parent's world transform (as of the step's start) otherwise.
-static EntityPose entity_pose(const PhysicsBridge *b, NphEntity e, const NphLocalTransform *local)
+static const NphWorldTransform *parent_transform(const PhysicsBridge *b, NphEntity e)
+{
+    return transform_of(b, nph_world_parent(b->world, e));
+}
+
+// Where an entity under `parent` (none: a root) is in the world: its
+// LocalTransform for a root, composed with its parent's world transform (as
+// of the step's start) otherwise.
+static EntityPose entity_pose_under(const PhysicsBridge *b, NphEntity parent,
+                                    const NphLocalTransform *local)
 {
     EntityPose p;
-    const NphWorldTransform *pw = parent_transform(b, e);
+    const NphWorldTransform *pw = transform_of(b, parent);
     if (pw == NULL) {
         p.position = local->translation;
         p.rotation = body_rotation(local->rotation);
@@ -307,6 +403,11 @@ static EntityPose entity_pose(const PhysicsBridge *b, NphEntity e, const NphLoca
         nph_vec3(nph_vec3_length(w.x_axis), nph_vec3_length(w.y_axis), nph_vec3_length(w.z_axis));
     p.parented = true;
     return p;
+}
+
+static EntityPose entity_pose(const PhysicsBridge *b, NphEntity e, const NphLocalTransform *local)
+{
+    return entity_pose_under(b, nph_world_parent(b->world, e), local);
 }
 
 // The LocalTransform that puts the entity at a body's pose: its
@@ -379,7 +480,7 @@ static void apply_mass(PhysicsBridge *b, const BodyRecord *r, f32 mass)
         return;
     }
     NphPhysicsMassData m = nph_physics_body_mass_data(b->physics, r->body);
-    if (nph_physics_shape_is_null(r->shape) || !(m.mass > 0.0F)) {
+    if (!(m.mass > 0.0F)) { // no shape with mass, its parts' counted
         m.center = nph_vec3_zero();
         m.inertia = nph_mat3_from_diagonal(nph_vec3_splat(0.1F * mass));
     } else {
@@ -387,6 +488,17 @@ static void apply_mass(PhysicsBridge *b, const BodyRecord *r, f32 mass)
     }
     m.mass = mass;
     nph_physics_body_set_mass_data(b->physics, r->body, &m);
+}
+
+// A body's explicit mass (its RigidBody's `mass`) over its shapes as they
+// are now, when it has one.
+static void reweigh(PhysicsBridge *b, NphEntity owner)
+{
+    BodyRecord *o = record_of(b, owner);
+    if (o != NULL && (o->flags & BODY_RIGID) != 0U && !nph_physics_body_is_null(o->body) &&
+        o->rigid.mass > 0.0F) {
+        apply_mass(b, o, o->rigid.mass);
+    }
 }
 
 static NphPhysicsFilter collider_filter(const NphCollider *c)
@@ -408,10 +520,16 @@ static void make_shape(PhysicsBridge *b, BodyRecord *r, const NphCollider *c)
     NphPhysicsPose pose;
     if (!nph_collider_shape(c, r->scale, &g, &pose)) {
         NPH_LOG_WARN(&NPH_LOG_RUNTIME,
-                     "entity 0x%08x: its Collider is no shape at its scale; its body has none",
+                     "entity 0x%08x: its Collider is no shape at its scale; none is made",
                      r->entity.value);
         r->flags |= BODY_UNSHAPED;
         return;
+    }
+    if ((r->flags & BODY_PART) != 0U) {
+        // In its body's frame: the part's frame, then the Collider's place in it.
+        pose.position =
+            nph_vec3_add(r->frame.position, nph_quat_rotate(r->frame.rotation, pose.position));
+        pose.rotation = nph_quat_normalize(nph_quat_mul(r->frame.rotation, pose.rotation));
     }
     NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(g);
     sd.pose = pose;
@@ -427,6 +545,242 @@ static void make_shape(PhysicsBridge *b, BodyRecord *r, const NphCollider *c)
                      nph_result_string(res));
         r->shape = NPH_PHYSICS_SHAPE_NULL;
         r->flags |= BODY_UNSHAPED;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parts (ADR-0108)
+// ---------------------------------------------------------------------------
+
+#define PART_MAX_DEPTH 64U
+
+// The entity whose body a Collider without a RigidBody under `parent` is
+// part of: the nearest above it with a RigidBody (and a LocalTransform), or
+// none. Asked of the bridge's own records, not the world's archetypes, from
+// the parent the visit looks up for the pose anyway: a change pass visits
+// the RigidBodies before the Colliders, so every body has its record by then.
+// Asking the world, and for the parent again, cost a full pass over 10k
+// grouped Colliders 6 %; this costs it 1 % (engine_frame_physics_10k_*).
+static NphEntity find_owner(const PhysicsBridge *b, NphEntity parent)
+{
+    NphEntity p = parent;
+    for (u32 depth = 0U; !nph_entity_is_null(p) && depth < PART_MAX_DEPTH; ++depth) {
+        const BodyRecord *r = record_of(b, p);
+        if (r != NULL && (r->flags & BODY_RIGID) != 0U) {
+            return p;
+        }
+        p = nph_world_parent(b->world, p);
+    }
+    return NPH_ENTITY_NULL;
+}
+
+// The world scale of a part's body's entity: as the body's record last saw
+// it, or from its components before it has one.
+static NphVec3 owner_scale(const PhysicsBridge *b, NphEntity owner)
+{
+    const BodyRecord *o = record_of(b, owner);
+    if (o != NULL) {
+        return o->scale;
+    }
+    const NphLocalTransform *lt =
+        NPH_WORLD_GET(b->world, owner, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    return lt != NULL ? entity_pose(b, owner, lt).scale : nph_vec3_one();
+}
+
+// A part's frame in its body's and its scale: the LocalTransforms from the
+// body's entity down to the part's (`local`), composed under the body's
+// world scale. `out_between` counts the entities between them. False when
+// the body's entity is no longer above it.
+static bool part_frame(const PhysicsBridge *b, const BodyRecord *r, const NphLocalTransform *local,
+                       NphPhysicsPose *out_frame, NphVec3 *out_scale, u32 *out_between)
+{
+    NphEntity chain[PART_MAX_DEPTH];
+    u32 n = 0U;
+    NphEntity p = nph_world_parent(b->world, r->entity);
+    while (p.value != r->owner.value) {
+        if (nph_entity_is_null(p) || n == PART_MAX_DEPTH) {
+            return false;
+        }
+        chain[n++] = p;
+        p = nph_world_parent(b->world, p);
+    }
+    const NphVec3 s = owner_scale(b, r->owner);
+    NphWorldTransform m = nph_world_transform_identity();
+    m.x_axis = nph_vec3(s.x, 0.0F, 0.0F);
+    m.y_axis = nph_vec3(0.0F, s.y, 0.0F);
+    m.z_axis = nph_vec3(0.0F, 0.0F, s.z);
+    for (u32 i = n; i-- > 0U;) {
+        const NphLocalTransform *lt =
+            NPH_WORLD_GET(b->world, chain[i], NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+        if (lt != NULL) {
+            m = nph_world_transform_compose(&m, lt);
+        }
+    }
+    m = nph_world_transform_compose(&m, local);
+    out_frame->position = nph_dvec3_to_vec3(m.translation);
+    out_frame->rotation = axes_rotation(m.x_axis, m.y_axis);
+    *out_scale =
+        nph_vec3(nph_vec3_length(m.x_axis), nph_vec3_length(m.y_axis), nph_vec3_length(m.z_axis));
+    *out_between = n;
+    return true;
+}
+
+static void set_deep(PhysicsBridge *b, BodyRecord *r, bool deep)
+{
+    const bool now = (r->flags & BODY_DEEP) != 0U;
+    if (deep == now) {
+        return;
+    }
+    if (deep) {
+        if (NPH_ARRAY_PUSH(&b->deep_parts, r->slot) != NPH_RESULT_OK) {
+            return; // out of memory: placed again only when its own components change
+        }
+        r->flags |= BODY_DEEP;
+    } else {
+        remove_slot(&b->deep_parts, r->slot);
+        r->flags &= ~(u32)BODY_DEEP;
+    }
+}
+
+// A hash of what a deep part's frame is composed from: the entities between
+// it and its body, their LocalTransforms, and the body's scale (its own
+// LocalTransform changes only through the change pass).
+static u64 chain_hash(const PhysicsBridge *b, const BodyRecord *r)
+{
+    const NphVec3 s = owner_scale(b, r->owner);
+    u64 h = nph_hash64(&s, sizeof s, r->owner.value);
+    NphEntity p = nph_world_parent(b->world, r->entity);
+    for (u32 depth = 0U;
+         !nph_entity_is_null(p) && p.value != r->owner.value && depth < PART_MAX_DEPTH; ++depth) {
+        const NphLocalTransform *lt =
+            NPH_WORLD_GET(b->world, p, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+        h = nph_hash64(&p.value, sizeof p.value, h);
+        if (lt != NULL) { // field by field: the struct's padding is no one's to read
+            h = nph_hash64(&lt->translation, sizeof lt->translation, h);
+            h = nph_hash64(&lt->rotation, sizeof lt->rotation, h);
+            h = nph_hash64(&lt->scale, sizeof lt->scale, h);
+        }
+        p = nph_world_parent(b->world, p);
+    }
+    return h;
+}
+
+// A part placed where its entity is in its body (its shape made again when
+// that moved, or `force`); true when its shape was made again.
+static bool place_part(PhysicsBridge *b, BodyRecord *r, bool force)
+{
+    NphPhysicsPose frame;
+    NphVec3 scale;
+    u32 between = 0U;
+    if (!part_frame(b, r, &r->local, &frame, &scale, &between)) {
+        // Its body's entity is not above it now: the change pass that saw
+        // the hierarchy change makes it again (read_events).
+        return false;
+    }
+    set_deep(b, r, between > 0U);
+    if (between > 0U) {
+        r->chain_hash = chain_hash(b, r);
+    }
+    const bool moved = !vec3_bits_equal(frame.position, r->frame.position) ||
+                       !quat_bits_equal(frame.rotation, r->frame.rotation) ||
+                       !vec3_bits_equal(scale, r->scale);
+    if (!moved && !force) {
+        return false;
+    }
+    r->frame = frame;
+    r->scale = scale;
+    if (b->physics != NULL && !nph_physics_shape_is_null(r->shape)) {
+        nph_physics_shape_destroy(b->physics, r->shape);
+    }
+    r->shape = NPH_PHYSICS_SHAPE_NULL;
+    if (!nph_physics_body_is_null(r->body)) {
+        make_shape(b, r, &r->collider);
+    }
+    return true;
+}
+
+static NphResult create_part(PhysicsBridge *b, NphEntity e, NphEntity owner,
+                             const NphLocalTransform *local, const NphCollider *collider)
+{
+    NPH_TRY(grow_records(b));
+    const u32 index = b->count++;
+    BodyRecord *r = &b->records[index];
+    memset(r, 0, sizeof *r);
+    r->entity = e;
+    r->slot = nph_world_entity_index(b->world, e);
+    b->slot_record[r->slot] = index;
+    r->flags = (u32)BODY_PART | (u32)BODY_SHAPED;
+    r->collider = *collider;
+    r->local = *local;
+    r->owner = owner;
+    r->owner_slot = nph_world_handle_slot(b->world, owner);
+    r->part_next = b->slot_parts[r->owner_slot];
+    b->slot_parts[r->owner_slot] = r->slot;
+    const BodyRecord *o = record_of(b, owner);
+    r->body = o != NULL ? o->body : NPH_PHYSICS_BODY_NULL;
+    r->shape = NPH_PHYSICS_SHAPE_NULL;
+    if (place_part(b, r, true)) {
+        reweigh(b, owner);
+    }
+    return NPH_RESULT_OK;
+}
+
+// A part's components changed: its shape made again where it differs.
+static void update_part(PhysicsBridge *b, BodyRecord *r, const NphLocalTransform *local,
+                        const NphCollider *collider)
+{
+    const bool reshaped = !collider_equal(collider, &r->collider);
+    r->collider = *collider;
+    r->local = *local;
+    if (place_part(b, r, reshaped)) {
+        reweigh(b, r->owner);
+    }
+}
+
+// A body just made takes its parts' shapes (before its explicit mass).
+static void attach_parts(PhysicsBridge *b, const BodyRecord *owner)
+{
+    for (u32 s = b->slot_parts[owner->slot]; s != NO_RECORD;) {
+        BodyRecord *p = &b->records[b->slot_record[s]];
+        p->body = owner->body;
+        p->shape = NPH_PHYSICS_SHAPE_NULL;
+        NPH_IGNORE_RESULT(place_part(b, p, true));
+        s = p->part_next;
+    }
+}
+
+// A body's entity changed scale: its parts placed again.
+static void replace_parts(PhysicsBridge *b, const BodyRecord *owner)
+{
+    bool any = false;
+    for (u32 s = b->slot_parts[owner->slot]; s != NO_RECORD;) {
+        BodyRecord *p = &b->records[b->slot_record[s]];
+        any = place_part(b, p, false) || any;
+        s = p->part_next;
+    }
+    if (any) {
+        reweigh(b, owner->entity);
+    }
+}
+
+// Parts with entities between them and their bodies, whose changes the
+// bridge does not see: their inputs hashed every step, and placed again when
+// those changed (backwards: one that is no longer deep leaves the list). The
+// hash spares the composition: 2000 deep parts cost a step 0.43 ms composed
+// every step, 0.17 ms hashed (engine_frame_physics_1k_compounds_deep_spinning
+// against _compounds_spinning).
+static void place_deep_parts(PhysicsBridge *b)
+{
+    for (u32 i = b->deep_parts.len; i-- > 0U;) {
+        BodyRecord *p = &b->records[b->slot_record[b->deep_parts.data[i]]];
+        const u64 h = chain_hash(b, p);
+        if (h == p->chain_hash) {
+            continue;
+        }
+        p->chain_hash = h;
+        if (place_part(b, p, false)) {
+            reweigh(b, p->owner);
+        }
     }
 }
 
@@ -466,6 +820,7 @@ static NphResult make_body(PhysicsBridge *b, BodyRecord *r)
     if ((r->flags & BODY_SHAPED) != 0U) {
         make_shape(b, r, &r->collider);
     }
+    attach_parts(b, r);
     if (rigid && r->rigid.mass > 0.0F) {
         apply_mass(b, r, r->rigid.mass);
     }
@@ -495,8 +850,9 @@ static void set_follows(PhysicsBridge *b, BodyRecord *r, bool follows)
     }
 }
 
-static NphResult create_record(PhysicsBridge *b, NphEntity e, const NphLocalTransform *local,
-                               const NphRigidBody *rigid, const NphCollider *collider)
+static NphResult create_record(PhysicsBridge *b, NphEntity e, NphEntity parent,
+                               const NphLocalTransform *local, const NphRigidBody *rigid,
+                               const NphCollider *collider)
 {
     NPH_TRY(grow_records(b));
     const u32 index = b->count++;
@@ -514,7 +870,7 @@ static NphResult create_record(PhysicsBridge *b, NphEntity e, const NphLocalTran
         r->collider = *collider;
     }
     r->local = *local;
-    const EntityPose p = entity_pose(b, e, local);
+    const EntityPose p = entity_pose_under(b, parent, local);
     r->position = p.position;
     r->rotation = p.rotation;
     r->scale = p.scale;
@@ -611,21 +967,41 @@ static NphResult visit(PhysicsBridge *b, NphEntity e, const NphLocalTransform *l
                        const NphRigidBody *rigid, const NphCollider *collider, f32 dt)
 {
     BodyRecord *r = record_of(b, e);
-    if (r == NULL) {
-        return create_record(b, e, local, rigid, collider);
+    const NphEntity parent = nph_world_parent(b->world, e);
+    if (rigid == NULL && collider != NULL) {
+        // A Collider alone: a part of the body above it, or a static body of
+        // its own; one that turned from one into the other is made again.
+        const NphEntity owner = find_owner(b, parent);
+        const bool part = !nph_entity_is_null(owner);
+        if (r != NULL &&
+            (((r->flags & BODY_PART) != 0U) != part || (part && r->owner.value != owner.value))) {
+            destroy_record(b, b->slot_record[r->slot], false);
+            r = NULL;
+        }
+        if (part) {
+            if (r == NULL) {
+                return create_part(b, e, owner, local, collider);
+            }
+            update_part(b, r, local, collider);
+            return NPH_RESULT_OK;
+        }
     }
-    // A body type changes in the physics world only as a new body.
+    if (r == NULL) {
+        return create_record(b, e, parent, local, rigid, collider);
+    }
+    // A body type changes in the physics world only as a new body, which
+    // takes its parts' shapes.
     const bool remake = (r->flags & BODY_FAILED) != 0U ||
                         (rigid != NULL && body_type(rigid) != body_type(&r->rigid));
     if (remake) {
         const u32 index = b->slot_record[r->slot];
-        destroy_record(b, index);
-        return create_record(b, e, local, rigid, collider);
+        destroy_record(b, index, true);
+        return create_record(b, e, parent, local, rigid, collider);
     }
     if (rigid != NULL && !rigid_equal(rigid, &r->rigid)) {
         update_rigid(b, r, rigid);
     }
-    const EntityPose p = entity_pose(b, e, local);
+    const EntityPose p = entity_pose_under(b, parent, local);
     const bool rescaled = !vec3_bits_equal(p.scale, r->scale);
     r->scale = p.scale;
     if (collider != NULL && (rescaled || !collider_equal(collider, &r->collider))) {
@@ -639,6 +1015,9 @@ static NphResult visit(PhysicsBridge *b, NphEntity e, const NphLocalTransform *l
                 apply_mass(b, r, rigid->mass); // over the new shape's
             }
         }
+    }
+    if (rescaled) {
+        replace_parts(b, r); // placed under the body's new scale
     }
     // A dynamic body moves when the game moves its entity (a teleport), not
     // when its parent moves; a static or kinematic one goes wherever its
@@ -682,6 +1061,12 @@ static void read_events(PhysicsBridge *b)
         if (ev->type == NPH_WORLD_EVENT_ADDED || ev->type == NPH_WORLD_EVENT_REMOVED) {
             drop = ev->component == ids->rigid_body || ev->component == ids->collider ||
                    ev->component == NPH_COMPONENT_ID_LOCAL_TRANSFORM;
+            if (ev->component == ids->rigid_body ||
+                ev->component == NPH_COMPONENT_ID_LOCAL_TRANSFORM) {
+                // Colliders below it may have become parts of its body, or
+                // stopped being: every one is looked at again.
+                b->full_pass = 1;
+            }
         }
         if (ev->type == NPH_WORLD_EVENT_PARENT_CHANGED) {
             // Its pose in the world may have jumped, and whether it follows
@@ -693,7 +1078,7 @@ static void read_events(PhysicsBridge *b)
         }
         const u32 index = record_index(b, ev->entity);
         if (index != NO_RECORD) {
-            destroy_record(b, index);
+            destroy_record(b, index, false);
         }
         if (ev->type == NPH_WORLD_EVENT_PARENT_CHANGED) {
             b->full_pass = 1; // its chunk may not have changed
@@ -705,9 +1090,9 @@ static void read_events(PhysicsBridge *b)
     }
     b->events_dropped = dropped;
     for (u32 i = b->count; i-- > 0U;) {
-        if (!nph_world_is_alive(b->world, b->records[i].entity) ||
-            !qualifies(b, b->records[i].entity)) {
-            destroy_record(b, i);
+        if (i < b->count && (!nph_world_is_alive(b->world, b->records[i].entity) ||
+                             !qualifies(b, b->records[i].entity))) {
+            destroy_record(b, i, false);
         }
     }
     b->full_pass = 1;
@@ -891,6 +1276,7 @@ static void physics_system(NphSystemContext *ctx)
     NPH_ARRAY_CLEAR(&b->targeted);
     read_events(b);
     NphResult r = change_pass(b, ctx->last_tick, ctx->tick, dt);
+    place_deep_parts(b);
     follow_parents(b, dt);
     stop_targets(b);
     NPH_PROFILE_END();
@@ -967,6 +1353,7 @@ NphResult physics_bridge_create(NphEngine *e, PhysicsBridge **out)
     b->engine = e;
     b->alloc = alloc;
     NPH_ARRAY_INIT(&b->follows, alloc);
+    NPH_ARRAY_INIT(&b->deep_parts, alloc);
     NPH_ARRAY_INIT(&b->targeted, alloc);
     NPH_ARRAY_INIT(&b->last_targeted, alloc);
     *out = b;
@@ -985,8 +1372,10 @@ void physics_bridge_destroy(PhysicsBridge *b)
     }
     if (b->slot_record != NULL) {
         NPH_FREE_ARRAY(b->alloc, u32, b->slot_record, b->slot_cap);
+        NPH_FREE_ARRAY(b->alloc, u32, b->slot_parts, b->slot_cap);
     }
     NPH_ARRAY_FREE(&b->follows);
+    NPH_ARRAY_FREE(&b->deep_parts);
     NPH_ARRAY_FREE(&b->targeted);
     NPH_ARRAY_FREE(&b->last_targeted);
     NPH_FREE_TYPE(b->alloc, PhysicsBridge, b);
@@ -1011,9 +1400,9 @@ NphResult physics_bridge_set_world(PhysicsBridge *b, NphWorld *world)
         (void)nph_world_events(world, &b->event_cursor, &b->events_dropped);
         r = size_slots(b);
         for (u32 i = b->count; r == NPH_RESULT_OK && i-- > 0U;) {
-            if (!nph_world_is_alive(world, b->records[i].entity) ||
-                !qualifies(b, b->records[i].entity)) {
-                destroy_record(b, i);
+            if (i < b->count && (!nph_world_is_alive(world, b->records[i].entity) ||
+                                 !qualifies(b, b->records[i].entity))) {
+                destroy_record(b, i, false);
             }
         }
         b->full_pass = 1;
