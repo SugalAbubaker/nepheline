@@ -53,7 +53,7 @@ Checks: >
   -misc-confusable-identifiers
 
 WarningsAsErrors: '*'
-HeaderFilterRegex: '(engine|tools|editor|samples|tests|benchmarks)/.*\.h$'
+HeaderFilterRegex: '(engine|tools|editor|samples|tests|benchmarks)[\/].*\.h$'
 FormatStyle: file
 
 CheckOptions:
