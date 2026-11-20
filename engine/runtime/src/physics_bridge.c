@@ -35,6 +35,11 @@
 // the same block made the same way and freed with the last. Assets load
 // before the first step at play begin, and in the background during play,
 // a body waiting for its shapes.
+//
+// Triggers (ADR-0108): a trigger Collider's shapes are sensors. After each
+// step the sensors' events become Collider-level ones: per pair of trigger
+// and visitor entities the overlapping shapes are counted, and a pair enters
+// when its count leaves zero over the step and leaves when it returns.
 #include <nepheline/asset/collision.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hash.h>
@@ -136,6 +141,23 @@ typedef struct CopyKey {
     u32 bits[7];
 } CopyKey;
 
+typedef struct TriggerKey {
+    u32 trigger; // entity values
+    u32 visitor;
+} TriggerKey;
+
+// A trigger and a Collider in it: their overlapping shapes, the visitor's
+// body's entity, and, while a step's events touch it, its count before them.
+typedef struct TriggerPair {
+    u32 count;
+    u32 body;
+    u32 before;
+    u32 touched;
+} TriggerPair;
+
+typedef NPH_ARRAY(TriggerKey) TriggerKeyArray;
+typedef NPH_ARRAY(NphTriggerEvent) TriggerEventArray;
+
 typedef struct ScaledCopy {
     CopyKey key;
     u32 kind; // NphCollisionShapeKind; 0: a free slot
@@ -178,6 +200,11 @@ struct PhysicsBridge {
     NphArrayU32 copy_free; // free slots
     NphArrayU32 awaiting;  // slots of the records waiting for an asset (BODY_AWAITING)
     b32 load_sync;         // play begin: assets load before the first step
+    // Triggers (ADR-0108).
+    NphHashMap trigger_pairs;     // TriggerKey -> TriggerPair
+    TriggerKeyArray trigger_step; // the pairs this step's events touched, in order
+    TriggerEventArray entered;    // the last step's
+    TriggerEventArray left;
 };
 
 // ---------------------------------------------------------------------------
@@ -414,7 +441,7 @@ static bool collider_equal(const NphCollider *a, const NphCollider *b)
            f32_bits_equal(a->density, b->density) && f32_bits_equal(a->friction, b->friction) &&
            f32_bits_equal(a->restitution, b->restitution) && a->category == b->category &&
            a->mask == b->mask && a->group == b->group && a->hit_events == b->hit_events &&
-           nph_guid_equals(a->collision, b->collision);
+           nph_guid_equals(a->collision, b->collision) && a->trigger == b->trigger;
 }
 
 // A rotation a body takes (unit within the physics module's 1e-3): a
@@ -596,6 +623,7 @@ static void apply_shape_desc(const BodyRecord *r, const NphCollider *c, NphPhysi
     sd->restitution = nph_f32_clamp(finite_or(c->restitution, 0.0F), 0.0F, 1.0F);
     sd->filter = collider_filter(c);
     sd->hit_events = c->hit_events != 0 ? 1 : 0;
+    sd->sensor = c->trigger != 0 ? 1 : 0;
     sd->user_data = r->entity.value;
 }
 
@@ -1254,13 +1282,14 @@ static void make_asset_shapes(PhysicsBridge *b, BodyRecord *r)
                           nph_f32_to_bits(scale.y) == nph_f32_to_bits(1.0F) &&
                           nph_f32_to_bits(scale.z) == nph_f32_to_bits(1.0F);
     const bool dynamic = nph_physics_body_type(b->physics, r->body) == NPH_PHYSICS_BODY_DYNAMIC;
+    const bool trigger = c->trigger != 0;
     bool refused = false;
     for (u32 i = 0U; i < n; ++i) {
         r->asset_shapes[i] = NPH_PHYSICS_SHAPE_NULL;
         r->asset_copies[i] = NO_COPY;
         const u32 kind = entry->kinds[i];
-        if (kind == (u32)NPH_COLLISION_SHAPE_MESH && dynamic) {
-            refused = true; // a mesh bounds no volume to move a body with
+        if (kind == (u32)NPH_COLLISION_SHAPE_MESH && (dynamic || trigger)) {
+            refused = true; // a mesh bounds no volume to move a body with, or to be inside of
             continue;
         }
         NphPhysicsPose pose = place;
@@ -1298,9 +1327,8 @@ static void make_asset_shapes(PhysicsBridge *b, BodyRecord *r)
     }
     if (refused) {
         NPH_LOG_WARN(&NPH_LOG_RUNTIME,
-                     "entity 0x%08x: its collision's meshes are left out of a dynamic body "
-                     "(meshes collide with what moves: use hulls)",
-                     r->entity.value);
+                     "entity 0x%08x: its collision's meshes are left out of %s (use hulls)",
+                     r->entity.value, trigger ? "a trigger" : "a dynamic body");
     }
 }
 
@@ -1618,6 +1646,99 @@ static NphResult visit(PhysicsBridge *b, NphEntity e, const NphLocalTransform *l
 }
 
 // ---------------------------------------------------------------------------
+// Triggers (ADR-0108)
+// ---------------------------------------------------------------------------
+
+// The record of `entity` when `shape` is one of its shapes.
+static const BodyRecord *shape_record(const PhysicsBridge *b, u32 entity, NphPhysicsShape shape)
+{
+    const NphEntity e = {entity};
+    const BodyRecord *r = record_of(b, e);
+    if (r == NULL) {
+        return NULL;
+    }
+    if (r->shape.value == shape.value) {
+        return r;
+    }
+    for (u32 i = 0U; i < r->asset_count; ++i) {
+        if (r->asset_shapes[i].value == shape.value) {
+            return r;
+        }
+    }
+    return NULL;
+}
+
+// One sensor event into its pair's count: `+1` begun, `-1` ended. A begin
+// counts only between shapes the bridge made (the game's own sensors and
+// bodies report through the physics world); an end counts where a begin did.
+static void count_trigger(PhysicsBridge *b, const NphPhysicsSensorEvent *ev, bool begun)
+{
+    TriggerKey key;
+    key.trigger = (u32)ev->sensor_user_data;
+    key.visitor = (u32)ev->visitor_user_data;
+    TriggerPair *pair = NPH_HASHMAP_FIND(&b->trigger_pairs, TriggerPair, &key);
+    if (begun && pair == NULL) {
+        const BodyRecord *t = shape_record(b, key.trigger, ev->sensor);
+        const BodyRecord *v = shape_record(b, key.visitor, ev->visitor);
+        if (t == NULL || v == NULL) {
+            return;
+        }
+        TriggerPair fresh;
+        memset(&fresh, 0, sizeof fresh);
+        fresh.body = (v->flags & BODY_PART) != 0U ? v->owner.value : v->entity.value;
+        if (nph_hashmap_insert(&b->trigger_pairs, &key, &fresh) != NPH_RESULT_OK) {
+            return; // out of memory: this overlap is not reported
+        }
+        pair = NPH_HASHMAP_FIND(&b->trigger_pairs, TriggerPair, &key);
+    }
+    if (pair == NULL || (!begun && pair->count == 0U)) {
+        return;
+    }
+    if (pair->touched == 0U) {
+        if (NPH_ARRAY_PUSH(&b->trigger_step, key) != NPH_RESULT_OK) {
+            return;
+        }
+        pair->touched = 1U;
+        pair->before = pair->count;
+    }
+    pair->count = begun ? pair->count + 1U : pair->count - 1U;
+}
+
+// The step's sensor events as Collider-level trigger events: the pairs whose
+// count left zero entered, those that came back to it left.
+static void collect_triggers(PhysicsBridge *b)
+{
+    NPH_ARRAY_CLEAR(&b->entered);
+    NPH_ARRAY_CLEAR(&b->left);
+    NPH_ARRAY_CLEAR(&b->trigger_step);
+    const NphPhysicsEvents e = nph_physics_world_events(b->physics);
+    for (u32 i = 0U; i < e.sensor_end_count; ++i) {
+        count_trigger(b, &e.sensor_end[i], false);
+    }
+    for (u32 i = 0U; i < e.sensor_begin_count; ++i) {
+        count_trigger(b, &e.sensor_begin[i], true);
+    }
+    for (u32 i = 0U; i < b->trigger_step.len; ++i) {
+        const TriggerKey key = b->trigger_step.data[i];
+        TriggerPair *pair = NPH_HASHMAP_FIND(&b->trigger_pairs, TriggerPair, &key);
+        NPH_ASSERT(pair != NULL);
+        pair->touched = 0U;
+        NphTriggerEvent ev;
+        ev.trigger.value = key.trigger;
+        ev.visitor.value = key.visitor;
+        ev.body.value = pair->body;
+        if (pair->before == 0U && pair->count > 0U) {
+            NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&b->entered, ev));
+        } else if (pair->before > 0U && pair->count == 0U) {
+            NPH_IGNORE_RESULT(NPH_ARRAY_PUSH(&b->left, ev));
+        }
+        if (pair->count == 0U) {
+            NPH_IGNORE_RESULT(nph_hashmap_remove(&b->trigger_pairs, &key));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The step
 // ---------------------------------------------------------------------------
 
@@ -1852,6 +1973,9 @@ static void physics_system(NphSystemContext *ctx)
     NPH_PROFILE_BEGIN("runtime.physics_changes");
     const f32 dt = (f32)ctx->dt;
     b->step += 1U;
+    // A step that fails reports no trigger events, as the physics world none of its own.
+    NPH_ARRAY_CLEAR(&b->entered);
+    NPH_ARRAY_CLEAR(&b->left);
     // The last step's targets, then this step's.
     const NphArrayU32 last = b->last_targeted;
     b->last_targeted = b->targeted;
@@ -1872,6 +1996,7 @@ static void physics_system(NphSystemContext *ctx)
     if (r == NPH_RESULT_OK) {
         NPH_PROFILE_BEGIN("runtime.physics_write_back");
         write_back(b, ctx->tick);
+        collect_triggers(b);
         b->stats = nph_physics_world_stats(b->physics);
         NPH_PROFILE_END();
     }
@@ -1940,6 +2065,9 @@ NphResult physics_bridge_create(NphEngine *e, PhysicsBridge **out)
     NPH_ARRAY_INIT(&b->deep_parts, alloc);
     NPH_ARRAY_INIT(&b->awaiting, alloc);
     NPH_ARRAY_INIT(&b->copy_free, alloc);
+    NPH_ARRAY_INIT(&b->trigger_step, alloc);
+    NPH_ARRAY_INIT(&b->entered, alloc);
+    NPH_ARRAY_INIT(&b->left, alloc);
     NPH_ARRAY_INIT(&b->targeted, alloc);
     NPH_ARRAY_INIT(&b->last_targeted, alloc);
     NphHashMapDesc cd;
@@ -1948,11 +2076,21 @@ NphResult physics_bridge_create(NphEngine *e, PhysicsBridge **out)
     cd.val_size = (u32)sizeof(u32);
     NphHashMapDesc kd = cd;
     kd.key_size = (u32)sizeof(CopyKey);
+    NphHashMapDesc td = cd;
+    td.key_size = (u32)sizeof(TriggerKey);
+    td.val_size = (u32)sizeof(TriggerPair);
     NphResult r = nph_hashmap_init(&b->collision_index, alloc, &cd);
     if (r == NPH_RESULT_OK) {
         r = nph_hashmap_init(&b->copy_index, alloc, &kd);
         if (r != NPH_RESULT_OK) {
             nph_hashmap_free(&b->collision_index);
+        }
+    }
+    if (r == NPH_RESULT_OK) {
+        r = nph_hashmap_init(&b->trigger_pairs, alloc, &td);
+        if (r != NPH_RESULT_OK) {
+            nph_hashmap_free(&b->collision_index);
+            nph_hashmap_free(&b->copy_index);
         }
     }
     if (r != NPH_RESULT_OK) {
@@ -1989,6 +2127,10 @@ void physics_bridge_destroy(PhysicsBridge *b)
     }
     nph_hashmap_free(&b->collision_index);
     nph_hashmap_free(&b->copy_index);
+    nph_hashmap_free(&b->trigger_pairs);
+    NPH_ARRAY_FREE(&b->trigger_step);
+    NPH_ARRAY_FREE(&b->entered);
+    NPH_ARRAY_FREE(&b->left);
     NPH_ARRAY_FREE(&b->targeted);
     NPH_ARRAY_FREE(&b->last_targeted);
     NPH_FREE_TYPE(b->alloc, PhysicsBridge, b);
@@ -2084,6 +2226,10 @@ void physics_bridge_end(PhysicsBridge *b)
     destroy_all(b);
     free_copies(b);
     release_collisions(b);
+    nph_hashmap_clear(&b->trigger_pairs);
+    NPH_ARRAY_CLEAR(&b->trigger_step);
+    NPH_ARRAY_CLEAR(&b->entered);
+    NPH_ARRAY_CLEAR(&b->left);
     nph_physics_world_destroy(b->physics);
     b->physics = NULL;
     memset(&b->stats, 0, sizeof b->stats);
@@ -2172,6 +2318,17 @@ NphEntity physics_bridge_entity(const PhysicsBridge *b, NphPhysicsBody body)
     const NphEntity e = {(u32)nph_physics_body_user_data(b->physics, body)};
     const BodyRecord *r = record_of(b, e);
     return r != NULL && r->body.value == body.value ? e : NPH_ENTITY_NULL;
+}
+
+NphTriggerEvents physics_bridge_triggers(const PhysicsBridge *b)
+{
+    NPH_ASSERT(b != NULL);
+    NphTriggerEvents t;
+    t.entered = b->entered.data;
+    t.entered_count = b->entered.len;
+    t.left = b->left.data;
+    t.left_count = b->left.len;
+    return t;
 }
 
 const NphPhysicsStats *physics_bridge_stats(const PhysicsBridge *b)

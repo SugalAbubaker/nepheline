@@ -2138,6 +2138,17 @@ NphEntity nph_engine_physics_entity(const NphEngine *e, NphPhysicsBody body)
     return e->physics != NULL ? physics_bridge_entity(e->physics, body) : NPH_ENTITY_NULL;
 }
 
+NphTriggerEvents nph_engine_physics_triggers(const NphEngine *e)
+{
+    NPH_ASSERT(e != NULL);
+    if (e->physics == NULL) {
+        NphTriggerEvents none;
+        memset(&none, 0, sizeof none);
+        return none;
+    }
+    return physics_bridge_triggers(e->physics);
+}
+
 const NphPhysicsStats *nph_engine_physics_stats(const NphEngine *e)
 {
     NPH_ASSERT(e != NULL && e->physics != NULL);

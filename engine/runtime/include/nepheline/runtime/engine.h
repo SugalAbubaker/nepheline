@@ -364,6 +364,10 @@ NphEntity nph_engine_physics_entity(const NphEngine *engine, NphPhysicsBody body
 // playing).
 const NphPhysicsStats *nph_engine_physics_stats(const NphEngine *engine);
 
+// The trigger events of the last physics step (game.h
+// nph_game_physics_triggers), or none when not playing.
+NphTriggerEvents nph_engine_physics_triggers(const NphEngine *engine);
+
 // Draws `entity` and its descendants where they are from the next frame on,
 // rather than between where they were and where they are (sim.interpolate):
 // for a move that is no motion, a teleport or a respawn; the view is a

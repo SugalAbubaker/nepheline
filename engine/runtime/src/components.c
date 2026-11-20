@@ -62,7 +62,8 @@ static const NphCollider g_collider_defaults = {(u32)NPH_COLLIDER_BOX,
                                                 NPH_U64_MAX,
                                                 0,
                                                 0,
-                                                {0U, 0U}}; // no collision asset
+                                                {0U, 0U}, // no collision asset
+                                                0};       // solid, not a trigger
 NPH_COMPONENT_DEFINE(NphCollider, NPH_COLLIDER_FIELDS, "Collider", 0U, &g_collider_defaults)
 
 // An effect at full volume and as recorded, not playing until the game
