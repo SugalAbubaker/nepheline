@@ -2,6 +2,7 @@
 #include <nepheline/platform/fiber.h>
 #include <nepheline/platform/time.h>
 
+#include "crash_internal.h"
 #include "test_platform_support.h"
 
 #include <math.h>
@@ -105,6 +106,47 @@ NTEST(fiber, create_switch_resume_destroy)
     nph_fiber_release_thread(&s.main);
     NTEST_ASSERT_NULL(nph_fiber_current());
 }
+
+#if NPH_PLATFORM_WINDOWS
+// A fiber's stack keeps room to report its overflow from: the guarantee the thread's (or, for
+// Win32 fibers, the fiber's own) holds covers the processor's exception frame and the handler's
+// (crash_internal.h), and the stack it leaves above that is the fiber's own size.
+typedef struct GuaranteeProbe {
+    NphFiber main;
+    NphFiber fiber;
+    ULONG bytes;
+} GuaranteeProbe;
+
+static void probe_guarantee(void *user)
+{
+    GuaranteeProbe *g = (GuaranteeProbe *)user;
+    ULONG bytes = 0U;
+    (void)SetThreadStackGuarantee(&bytes); // 0 asks: `bytes` is the stack's guarantee
+    g->bytes = bytes;
+    nph_fiber_switch(&g->fiber, &g->main);
+}
+
+NTEST(fiber, a_fiber_keeps_room_to_report_its_overflow)
+{
+    static GuaranteeProbe g;
+    memset(&g, 0, sizeof g);
+    nph_fiber_init_thread(&g.main);
+    NphFiberDesc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.fn = probe_guarantee;
+    desc.user = &g;
+    desc.name = "guarantee";
+    NTEST_ASSERT_EQ_INT(nph_fiber_create(&g.fiber, &desc), NPH_RESULT_OK);
+    nph_fiber_switch(&g.main, &g.fiber);
+    const u32 want = crash_win32_stack_guarantee();
+    NTEST_LOG("the fiber's stack guarantee: %lu bytes (wanted %u)", (unsigned long)g.bytes, want);
+    NTEST_EXPECT_GE_UINT((u32)g.bytes, want);
+    // The reservation holds the stack, the guard, and the guarantee besides.
+    NTEST_EXPECT_GE_UINT(g.fiber.reserved_size, g.fiber.stack_size + (u64)want);
+    nph_fiber_destroy(&g.fiber);
+    nph_fiber_release_thread(&g.main);
+}
+#endif
 
 NTEST(fiber, null_fn_is_rejected)
 {

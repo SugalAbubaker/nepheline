@@ -107,3 +107,47 @@ The user decided on 2026-11-18 to write the dumps from a separate process.
   - the in-process tests cover the dumper beside the executable, its end at uninstall and with its process, and
     the failing process writing the dump without it and after it ended;
   - the retries go through the dumper, as the tests make them fail.
+
+## Amendment (2026-11-19): processors with large extended state
+
+Hosted Windows runners with Intel Xeon Platinum 8573C processors (Emerald Rapids, which has AMX) failed the crash
+tests in two ways, and no other machine did:
+
+- **The dumps of failures that are no exception were not written** (`ERROR_PARTIAL_COPY` from the dumper): `abort`,
+  a failed assertion, a pure call, an invalid parameter, and the in-process test's report. Their context is one the
+  handler captures itself (`RtlCaptureContext`), a bare `CONTEXT` on the failing thread's stack. Real faults dumped
+  fine: the kernel's exception frame holds their context with its extended state laid out after it.
+- **A fiber's stack overflow was not reported at all**: the process ended with an access violation, where a
+  thread's overflow was reported.
+
+What sets those machines apart is the size of the extended state: about 11 KiB with AMX (its tiles take 8 KiB),
+against 1 to 3 KiB elsewhere. The likeliest reading, which the runners do not let us test (they cannot be chosen),
+is that dbghelp reads a context's extended state after it, which runs off the end of a bare `CONTEXT` near the top
+of a shallow stack, and that the kernel's frame for an overflow, about 12 KiB with AMX's state, does not fit in
+the room a fiber's guard page leaves.
+
+**Decision.**
+
+1. The handler copies the exception into the block it shares with the dumper for each attempt: the record, its
+   chain cut, and the context into a `CONTEXT` that `InitializeContext` lays out for the processor (`CONTEXT_ALL`,
+   and `CONTEXT_XSTATE` where the system enables extended state), with the parts the context holds (`CopyContext`,
+   its extended state too where it has some). The dumper hands dbghelp that copy in its own memory
+   (`ClientPointers` FALSE); the block's version is 2. The failing process's own attempts copy it the same way.
+2. Every thread that runs fibers raises its stack guarantee (`SetThreadStackGuarantee`) to the bytes such a context
+   takes and 16 KiB for the dispatch and the handler, in whole pages; a Win32 fiber raises its own; install raises
+   its thread's. The fibers' reservations grow by the guarantee, so their stacks are the same on every processor.
+3. The report's `system:` line gives the bytes an exception's context takes, so CI's logs say which runners have
+   the large state.
+
+**Alternatives.** Raising a real exception for the failures that are no exception: `RaiseException` dispatches in
+user mode with a context of its own capture, which is the same bare `CONTEXT`. A deliberate fault would give the
+kernel's frame, at the cost of reports that name a fault the failure was not, rewritten after the fact.
+
+**Consequences.**
+
+- Nothing else changes on processors whose extended state is small. A thread that runs fibers, and the installing
+  thread, keep more of their stacks for an overflow: 20 KiB on the development machine, where an exception's context
+  takes 1,663 bytes (32 KiB, estimated, with AMX). The fibers' reservations grow by the same, in address space alone.
+- The development machine has no AMX, so the fix is proven here only for its part on such a machine's paths: the
+  copies, the layouts and the guarantees are tested, and the crash tests pass. That it fixes the 8573C runners is
+  shown when CI lands on one: their reports' `system:` lines give an extended context of about 12 KiB.

@@ -111,6 +111,16 @@ foreach(report IN LISTS reports)
                 message(FATAL_ERROR "${MODE}: the minidump says\n${dump_out}\nwithout '${needle}'")
             endif()
         endforeach()
+        # The dump's exception context is the one the report names: the handler copies it for
+        # dbghelp (ADR-0106's amendment), and its instruction is the report's "at:".
+        string(REGEX MATCH "at:        0x([0-9A-F]+)" at_match "${text}")
+        set(report_pc "${CMAKE_MATCH_1}")
+        string(REGEX MATCH "context rip 0x([0-9A-F]+)" rip_match "${dump_out}")
+        set(dump_pc "${CMAKE_MATCH_1}")
+        if(report_pc STREQUAL "" OR NOT report_pc STREQUAL dump_pc)
+            message(FATAL_ERROR "${MODE}: the minidump's exception context is at 0x${dump_pc}, the "
+                                "report's at 0x${report_pc}\n${dump_out}--- ${report} ---\n${text}")
+        endif()
     endif()
 endforeach()
 

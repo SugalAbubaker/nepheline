@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Reads a minidump the crash handler wrote, with dbghelp, and prints what
-// run_crash.cmake checks: the exception's code and thread, that the thread
+// run_crash.cmake checks: the exception's code, thread, and the instruction
+// its context holds, that the thread
 // is among the dump's threads, how many threads and modules it holds, and
 // its comment, which says what wrote it (the dumper or the failing process,
 // docs/adr/0106-crash-dumps-from-a-separate-process.md).
@@ -49,6 +50,14 @@ int main(int argc, char **argv)
             const MINIDUMP_EXCEPTION_STREAM *ex = (const MINIDUMP_EXCEPTION_STREAM *)stream;
             printf("exception 0x%08lX thread %lu\n",
                    (unsigned long)ex->ExceptionRecord.ExceptionCode, (unsigned long)ex->ThreadId);
+#if defined(_M_X64)
+            // The context the dump holds for it: the copy the handler made (ADR-0106's
+            // amendment), whose instruction must be the report's.
+            if (ex->ThreadContext.DataSize >= sizeof(CONTEXT)) {
+                const CONTEXT *ctx = (const CONTEXT *)((const char *)base + ex->ThreadContext.Rva);
+                printf("context rip 0x%016llX\n", (unsigned long long)ctx->Rip);
+            }
+#endif
             rc = 0;
             void *comment = NULL;
             ULONG comment_size = 0U;

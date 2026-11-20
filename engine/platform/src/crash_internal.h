@@ -156,6 +156,32 @@ void crash_win32_set_dumper(const wchar_t *name);
 // Tests: the dumper's process id while dumps are asked of it, else 0.
 u32 crash_win32_dumper_pid(void);
 
+// The exception's context on this processor and room to report an overflow (ADR-0106's
+// amendment). A failure that captures its own context (RtlCaptureContext) has no extended state
+// after it, and dbghelp failed to dump such contexts on processors whose state is large (AMX's
+// tiles); the kernel's exception frame holds that state, and a stack overflow is dispatched in
+// the room its stack's guarantee keeps (SetThreadStackGuarantee).
+//
+// The stack an overflow's report needs: the bytes an exception context with the processor's
+// extended state takes (InitializeContext), and CRASH_OVERFLOW_HANDLER_BYTES for the dispatch
+// and the handler's frames, in whole pages. NPH_THREADSAFE.
+#define CRASH_OVERFLOW_HANDLER_BYTES (16U * 1024U)
+u32 crash_win32_stack_guarantee(void);
+// The bytes InitializeContext lays an exception's context out in here (CONTEXT_ALL, and
+// CONTEXT_XSTATE where the system enables extended state); 0 when it cannot. NPH_THREADSAFE.
+u32 crash_win32_context_bytes(void);
+// Raises the calling thread's or Win32 fiber's stack guarantee to crash_win32_stack_guarantee()
+// (fiber.c and fiber_win32.c call it for each thread that runs fibers and each fiber; install,
+// for its thread). It only grows, and a stack that reserves less keeps its own.
+void crash_win32_guarantee_stack(void);
+// Copies the exception `source` into `area` (`cap` bytes): its record to `*record`, the chain
+// cut, and its context into a CONTEXT that InitializeContext lays out there for the processor,
+// with the parts the source holds (its extended state too, where it has some). `*out` points at
+// the two. False, `*out` untouched, while the layout is unknown (before install) or does not
+// fit. The handler's thread calls it, one exception at a time; tests call it.
+bool crash_win32_exception_copy(void *area, u32 cap, const EXCEPTION_POINTERS *source,
+                                EXCEPTION_RECORD *record, EXCEPTION_POINTERS *out);
+
 // The filter of the frame at the base of every fiber's stack (fiber.c,
 // fiber_win32.c): what reaches it no handler took, so it is reported and the
 // process ended, as the unhandled-exception filter does for a thread. Hands
