@@ -790,6 +790,15 @@ static DWORD g_trap_flags;
 static u64 g_trap_rip;
 static bool g_trap_copied;
 
+// The breakpoint, raised in a call: clang-cl's __try covers the calls in it, not an instruction
+// that traps inline (it has no asynchronous exceptions without -fasync-exceptions), and a call
+// through a pointer the optimizer cannot see through keeps it and its cover at any optimization.
+static NPH_NO_INLINE void trap_breakpoint(void)
+{
+    __debugbreak();
+}
+static void (*const volatile g_trap_breakpoint)(void) = trap_breakpoint;
+
 static LONG trap_filter(EXCEPTION_POINTERS *pointers)
 {
     g_trap_flags = pointers->ContextRecord->ContextFlags;
@@ -808,7 +817,7 @@ NTEST(crash_win32, a_trapped_exceptions_extended_state_is_copied_with_it)
 #pragma clang diagnostic ignored "-Wlanguage-extension-token"
 #endif
     __try {
-        __debugbreak();
+        g_trap_breakpoint();
     } __except (trap_filter(GetExceptionInformation())) {
     }
 #if NPH_COMPILER_CLANG
@@ -829,6 +838,27 @@ NTEST(crash_win32, a_trapped_exceptions_extended_state_is_copied_with_it)
         NTEST_EXPECT_TRUE(GetXStateFeaturesMask(g_trap_copy.ContextRecord, &got));
         NTEST_LOG("the copy's extended state features 0x%llx", (unsigned long long)got);
     }
+}
+
+// A walk that meets a frame it cannot read ends there, for a failing thread's stack may be what
+// failed: a pc in no module is walked as a leaf, its return address read where the stack points,
+// and the first 64 KB are never mapped. Under clang-cl the read faulted past the walk's __try
+// while it was inline (crash_win32.c read_stack_word).
+NTEST(crash_win32, a_stack_walk_ends_at_a_frame_it_cannot_read)
+{
+    CONTEXT ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.Rip = 0x1000U;
+    ctx.Rsp = 0x10U;
+    u64 frames[4] = {0U, 0U, 0U, 0U};
+    NTEST_EXPECT_EQ_UINT(crash_win32_walk_stack(&ctx, frames, 4U), 1U);
+    NTEST_EXPECT_EQ_UINT(frames[0], 0x1000U);
+    // A walk of this thread's own stack reads its frames to the thread's start.
+    RtlCaptureContext(&ctx);
+    u64 own[64];
+    const u32 count = crash_win32_walk_stack(&ctx, own, 64U);
+    NTEST_LOG("this thread's walk: %u frames", count);
+    NTEST_EXPECT_GE_UINT(count, 3U);
 }
 
 // The stack an overflow's report needs: the processor's exception frame and the handler's

@@ -334,7 +334,12 @@ given:
     the scene, and the game module there; the editor adds its project
     (runtime.md "Crashes");
   - the stack. On Windows it is the return addresses as module + offset,
-    unwound with the modules' own unwind data (`RtlVirtualUnwind`). On
+    unwound with the modules' own unwind data (`RtlVirtualUnwind`); a frame
+    it cannot read ends the walk, for the stack may be what failed. clang-cl's
+    `__try` catches a fault only in a call it covers, not in a load or a trap
+    inline (it has no asynchronous exceptions without `-fasync-exceptions`),
+    so the walk reads a leaf's return address in a call, through a pointer
+    the optimizer cannot see through; SEH code here does the same. On
     Linux it is a `backtrace()`, followed by the process's memory map for
     `addr2line`;
   - the log's last 64 records, kept by `nph_crash_log_sink` where a host
