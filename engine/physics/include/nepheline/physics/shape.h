@@ -47,7 +47,7 @@ typedef enum NphPhysicsCombine {
     NPH_PHYSICS_COMBINE_MIN = 2,      // the smaller
     NPH_PHYSICS_COMBINE_MULTIPLY = 3, // the product
     NPH_PHYSICS_COMBINE_MAX = 4,      // the larger
-    NPH_PHYSICS_COMBINE_COUNT
+    NPH_PHYSICS_COMBINE_COUNT = 5,
 } NphPhysicsCombine;
 
 // The friction, and the restitution, of two shapes with these values and modes (valid values and
