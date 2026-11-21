@@ -2150,6 +2150,14 @@ bool nph_engine_physics_reload(NphEngine *e, NphGuid guid)
     return e->physics != NULL && physics_bridge_reload(e->physics, guid);
 }
 
+NphResult nph_engine_physics_material_set(NphEngine *e, NphGuid guid,
+                                          const NphPhysicsMaterialHeader *values)
+{
+    NPH_ASSERT(e != NULL && values != NULL);
+    return e->physics != NULL ? physics_bridge_material_set(e->physics, guid, values)
+                              : NPH_RESULT_NOT_FOUND;
+}
+
 NphTriggerEvents nph_engine_physics_triggers(const NphEngine *e)
 {
     NPH_ASSERT(e != NULL);

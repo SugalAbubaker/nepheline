@@ -49,6 +49,7 @@
 // system when there is a window.
 
 #include <nepheline/asset/loader.h>
+#include <nepheline/asset/physics_material.h>
 #include <nepheline/asset/vfs.h>
 #include <nepheline/gpu/render_graph.h>
 #include <nepheline/gpu/swapchain.h>
@@ -375,8 +376,19 @@ NphTriggerEvents nph_engine_physics_triggers(const NphEngine *engine);
 // load that fails keeps the values it had (logged). True when the playing
 // world's Colliders name it; false otherwise, when nothing is to be done (the
 // next play reads the file as it is). At the sync point (the host's `sync`
-// hook) or between frames: how the editor's cooks reach play.
+// hook) or between frames: for a host that cooks while the world plays.
 bool nph_engine_physics_reload(NphEngine *engine, NphGuid guid);
+
+// Sets the values of the physics material `guid` while the world plays, with
+// nothing read from storage: every shape whose Collider names it takes them in
+// place from the next step, as nph_engine_physics_reload's would, and a load
+// of it in flight is dropped (what is set is newer). How the editor's physics
+// material panel shows a change in play as it is made. NPH_RESULT_NOT_FOUND
+// when not playing or when no Collider of the world names it;
+// NPH_RESULT_INVALID_ARGUMENT for values nph_physics_material_header_valid
+// refuses. At the sync point or between frames.
+NPH_MUST_USE NphResult nph_engine_physics_material_set(NphEngine *engine, NphGuid guid,
+                                                       const NphPhysicsMaterialHeader *values);
 
 // The joint of an entity's Joint (components.h) while it is made: a null
 // handle before both its bodies exist, once broken, or when not playing. Its

@@ -899,3 +899,54 @@ NTEST(PhysicsMaterials, a_material_cooked_again_changes_its_shapes_in_place)
     NTEST_EXPECT_FALSE(nph_engine_physics_reload(fx.engine, rubber)); // not playing
     finish(&fx);
 }
+
+// A physics material's values set in play (the editor's panel): its shapes take them in place at
+// once, their bodies weighed again; values out of range and materials no Collider names are
+// refused; nothing to do when not playing.
+NTEST(PhysicsMaterials, a_material_set_in_play_changes_its_shapes_in_place)
+{
+    static AssetFixture fx;
+    start(&fx);
+    const NphPhysicsMaterialHeader wood_values =
+        surface(0.5F, 0.25F, 600.0F, NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT,
+                NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
+    const NphGuid wood = write_physics_material(&fx, "wood.pmat", &wood_values);
+    create(&fx);
+    const NphEntity plank = spawn_box(&fx, nph_dvec3(0.0, 2.0, 0.0), nph_quat_identity(),
+                                      nph_vec3_splat(0.5F), NPH_RIGID_BODY_DYNAMIC, wood);
+    NTEST_EXPECT_EQ_INT(nph_engine_physics_material_set(fx.engine, wood, &wood_values),
+                        NPH_RESULT_NOT_FOUND); // not playing
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(fx.engine, false), NPH_RESULT_OK);
+    NphPhysicsWorld *pw = nph_engine_physics(fx.engine);
+    const NphPhysicsShape shape = only_shape(&fx, plank);
+    NTEST_EXPECT_NEAR_F32(body_mass(&fx, plank), 600.0F, 0.1F);
+    const NphPhysicsMaterialHeader oak = surface(
+        0.7F, 0.1F, 750.0F, NPH_PHYSICS_MATERIAL_COMBINE_MAX, NPH_PHYSICS_MATERIAL_COMBINE_MIN);
+    NTEST_ASSERT_EQ_INT(nph_engine_physics_material_set(fx.engine, wood, &oak), NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_UINT(only_shape(&fx, plank).value, shape.value); // in place
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, shape), 0.7F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_restitution(pw, shape), 0.1F, 0.0F);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_friction_combine(pw, shape), NPH_PHYSICS_COMBINE_MAX);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_restitution_combine(pw, shape), NPH_PHYSICS_COMBINE_MIN);
+    NTEST_EXPECT_NEAR_F32(body_mass(&fx, plank), 750.0F, 0.1F);
+    // Refused: values out of range (nothing changes), and a material no Collider names.
+    NphPhysicsMaterialHeader bad = oak;
+    bad.restitution = 1.5F;
+    NTEST_EXPECT_EQ_INT(nph_engine_physics_material_set(fx.engine, wood, &bad),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    bad = oak;
+    bad.reserved[0] = 1U;
+    NTEST_EXPECT_EQ_INT(nph_engine_physics_material_set(fx.engine, wood, &bad),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_restitution(pw, shape), 0.1F, 0.0F);
+    NTEST_EXPECT_EQ_INT(
+        nph_engine_physics_material_set(fx.engine, nph_guid_from_cstr("pine.pmat"), &oak),
+        NPH_RESULT_NOT_FOUND);
+    // A reload in flight is overtaken by what is set after it.
+    NTEST_EXPECT_TRUE(nph_engine_physics_reload(fx.engine, wood)); // reads 0.5 back
+    NTEST_ASSERT_EQ_INT(nph_engine_physics_material_set(fx.engine, wood, &oak), NPH_RESULT_OK);
+    frames(&fx, 30U);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, shape), 0.7F, 0.0F);
+    nph_engine_play_end(fx.engine);
+    finish(&fx);
+}

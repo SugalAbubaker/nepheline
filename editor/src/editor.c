@@ -241,6 +241,18 @@ static void shortcuts(Editor *ed)
             return;
         }
     }
+    if (editor_physics_material_focused(ed) && io->KeyCtrl) {
+        // The physics material panel's own history while it has the focus (ADR-0108).
+        if (igIsKeyPressed_Bool(ImGuiKey_Z, true)) {
+            (void)(io->KeyShift ? editor_physics_material_redo(ed)
+                                : editor_physics_material_undo(ed));
+            return;
+        }
+        if (igIsKeyPressed_Bool(ImGuiKey_Y, true)) {
+            (void)editor_physics_material_redo(ed);
+            return;
+        }
+    }
     if (editor_mesh_editing(ed)) {
         // The mesh's own keys, its own history.
         if (io->KeyCtrl) {
@@ -357,6 +369,7 @@ static void dockspace(Editor *ed)
         igDockBuilderDockWindow(EDITOR_WINDOW_OUTLINER, left);
         igDockBuilderDockWindow(EDITOR_WINDOW_INSPECTOR, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_MATERIAL, right);
+        igDockBuilderDockWindow(EDITOR_WINDOW_PHYSICS_MATERIAL, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_IMPORT, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_STATS, right);
         igDockBuilderDockWindow(EDITOR_WINDOW_CONSOLE, bottom);
@@ -455,6 +468,8 @@ static void main_menu(Editor *ed)
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_CONSOLE, NULL, &ed->show.console, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_ASSETS, NULL, &ed->show.assets, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_MATERIAL, NULL, &ed->show.material, true);
+        (void)igMenuItem_BoolPtr(EDITOR_WINDOW_PHYSICS_MATERIAL, NULL, &ed->show.physics_material,
+                                 true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_IMPORT, NULL, &ed->show.import_settings, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_PROFILER, NULL, &ed->show.profiler, true);
         (void)igMenuItem_BoolPtr(EDITOR_WINDOW_STATS, NULL, &ed->show.stats, true);
@@ -666,6 +681,7 @@ static void hook_sync(NphEngine *e, void *user)
     editor_assets_update(ed);
     editor_mesh_edit_update(ed);
     editor_material_update(ed);
+    editor_physics_material_update(ed);
     editor_material_previews_update(ed);
     const u64 now = nph_time_now_ns();
     editor_autosave_update(ed, now);
@@ -703,6 +719,11 @@ static void hook_sync(NphEngine *e, void *user)
         editor_panel_material(ed);
     } else {
         ed->material.focused = false;
+    }
+    if (ed->show.physics_material) {
+        editor_panel_physics_material(ed);
+    } else {
+        ed->physics_material.focused = false;
     }
     if (ed->show.import_settings) {
         editor_panel_import_settings(ed);
@@ -832,6 +853,7 @@ NphResult editor_create(const EditorDesc *desc, Editor **out)
     nph_mutex_init(&ed->resolve_lock);
     editor_mesh_edit_init(ed);
     editor_material_init(ed);
+    editor_physics_material_init(ed);
     editor_material_previews_init(ed);
     (void)snprintf(ed->shader_dir, sizeof ed->shader_dir, "%s",
                    desc->shader_dir != NULL ? desc->shader_dir : NPH_SHADER_DIR);
@@ -1058,8 +1080,10 @@ void editor_detach(Editor *ed)
     editor_mesh_edit_free(ed); // unsaved changes are dropped
     editor_mesh_edit_init(ed);
     editor_material_free(ed); // a change being made is written: the project is still there
+    editor_physics_material_free(ed);
     editor_import_settings_close(ed);
     editor_material_init(ed);
+    editor_physics_material_init(ed);
     editor_material_previews_free(ed); // the pictures being made first: they read the project
     editor_material_previews_init(ed);
     editor_assets_close(ed); // after the import in progress, if any

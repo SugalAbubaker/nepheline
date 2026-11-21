@@ -22,6 +22,7 @@
 #include "view.h"
 
 #include <cook/material.h>
+#include <cook/physics_material.h>
 #include <cook/preview.h>
 
 #define EDITOR_PATH_MAX            512U
@@ -35,21 +36,24 @@
 #define EDITOR_PROFILER_MEMORY     32U
 
 // ImGui knows windows by their names (docking, the layout file).
-#define EDITOR_WINDOW_VIEWPORT  "Viewport"
-#define EDITOR_WINDOW_CONSOLE   "Console"
-#define EDITOR_WINDOW_PROFILER  "Profiler"
-#define EDITOR_WINDOW_STATS     "Stats"
-#define EDITOR_WINDOW_OUTLINER  "Outliner"
-#define EDITOR_WINDOW_INSPECTOR "Inspector"
-#define EDITOR_WINDOW_ASSETS    "Assets"
-#define EDITOR_WINDOW_MATERIAL  "Material"
-#define EDITOR_WINDOW_IMPORT    "Import Settings"
+#define EDITOR_WINDOW_VIEWPORT         "Viewport"
+#define EDITOR_WINDOW_CONSOLE          "Console"
+#define EDITOR_WINDOW_PROFILER         "Profiler"
+#define EDITOR_WINDOW_STATS            "Stats"
+#define EDITOR_WINDOW_OUTLINER         "Outliner"
+#define EDITOR_WINDOW_INSPECTOR        "Inspector"
+#define EDITOR_WINDOW_ASSETS           "Assets"
+#define EDITOR_WINDOW_MATERIAL         "Material"
+#define EDITOR_WINDOW_IMPORT           "Import Settings"
+#define EDITOR_WINDOW_PHYSICS_MATERIAL "Physics Material"
 
 // Dear ImGui drag-and-drop payload types.
 #define EDITOR_DRAG_ENTITY   "nph.entity"   // an NphEntity
 #define EDITOR_DRAG_ASSET    "nph.asset"    // a scene's or a mesh's source key, NUL-terminated
 #define EDITOR_DRAG_MATERIAL "nph.material" // a material's source key, NUL-terminated
 #define EDITOR_DRAG_IMAGE    "nph.image"    // an image's source key, NUL-terminated
+// A physics material's source key, NUL-terminated.
+#define EDITOR_DRAG_PHYSICS_MATERIAL "nph.physics_material"
 
 // The smallest viewport image, in pixels a side.
 #define EDITOR_VIEWPORT_MIN 16U
@@ -245,6 +249,31 @@ typedef struct EditorMaterialEdit {
     EditorImageKeys images;
 } EditorMaterialEdit;
 
+typedef NPH_ARRAY(CookPhysicsMaterialSource) EditorPhysicsMaterialSnapshots;
+
+// The physics material panel (physics_material_edit.c, panel_physics_material.c;
+// ADR-0108 decision 7): one physics material's source, written and cooked as
+// each change settles, with a history of its own while it is open.
+typedef struct EditorPhysicsMaterialEdit {
+    bool open;
+    char key[EDITOR_PROJECT_PATH_MAX];   // its source
+    NphGuid guid;                        // the cooked material (cooker_asset_guid)
+    CookPhysicsMaterialSource source;    // as shown
+    CookPhysicsMaterialSource before;    // the source before the change being made
+    bool changing;                       // a change not settled yet: not written
+    bool panel_changing;                 // and the panel's widgets made it: they settle it
+    bool live_dirty;                     // the source changed: set into play at the sync point
+    bool live_set;                       // the source is set into the play running now
+    EditorPhysicsMaterialSnapshots undo; // the source before each settled change
+    EditorPhysicsMaterialSnapshots redo;
+    u32 cook;         // the last cook asked for (0: none)
+    bool cook_wanted; // a cook the project had no room for: asked again next frame
+    char error[192];  // why the last write or cook failed; "" when none did
+    bool focused;     // the panel's window had the keyboard focus last frame
+    bool reveal;      // bring the panel's window forward
+    u64 revision;     // counts the settled changes
+} EditorPhysicsMaterialEdit;
+
 // Material previews (material_preview.c; ADR-0105 decision 7): a lit sphere of each material the
 // asset browser or the material panel shows, made on jobs, cached under the cooked directory.
 #define EDITOR_PREVIEWS_MAX       256U // pictures kept (64 KB of GPU memory each)
@@ -281,6 +310,7 @@ typedef struct EditorPanels {
     bool inspector;
     bool assets;
     bool material;
+    bool physics_material;
     bool import_settings;
     bool demo;    // Dear ImGui's demo window (development builds)
     bool metrics; // Dear ImGui's metrics window
@@ -368,6 +398,7 @@ struct Editor {
     EditorAssets assets;
     EditorMeshEdit mesh_edit;
     EditorMaterialEdit material;
+    EditorPhysicsMaterialEdit physics_material;
     EditorImportSettings import_settings;
     EditorPreviews previews;
     EditorAutosave autosave;
@@ -521,6 +552,23 @@ void editor_material_list_images(Editor *ed);
 
 // panel_material.c
 void editor_panel_material(Editor *ed);
+
+// physics_material_edit.c (docs/editor.md "Physics material")
+void editor_physics_material_init(Editor *ed);
+// Closes the physics material (a change being made settles) and frees the
+// panel's history.
+void editor_physics_material_free(Editor *ed);
+// At the sync point: the source set into play when it changed or play began
+// (nph_engine_physics_material_set), and a cook the project had no room for
+// asked again.
+void editor_physics_material_update(Editor *ed);
+// An import finished: the panel's own cook, its error or none.
+void editor_physics_material_finished(Editor *ed, const EditorImportResult *res);
+// The panel is open on a physics material and had the keyboard focus last frame.
+bool editor_physics_material_focused(const Editor *ed);
+
+// panel_physics_material.c
+void editor_panel_physics_material(Editor *ed);
 // The Import Settings window (panel_import.c).
 void editor_panel_import_settings(Editor *ed);
 

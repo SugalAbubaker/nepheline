@@ -64,9 +64,12 @@ typedef struct NphPhysicsMaterialView {
     const NphPhysicsMaterialHeader *header;
 } NphPhysicsMaterialView;
 
-// Resolves and validates a READY physics material asset (above): its header,
-// one of its size, whose values are in their ranges (finite), whose modes
+// True for a header whose values are in their ranges (finite), whose modes
 // are known, and whose flags and reserved words are zero.
+bool nph_physics_material_header_valid(const NphPhysicsMaterialHeader *h);
+
+// Resolves and validates a READY physics material asset (above): its header,
+// one of its size, that nph_physics_material_header_valid takes.
 // NPH_RESULT_TYPE_MISMATCH and NPH_RESULT_VERSION_MISMATCH for another type
 // or schema; NPH_RESULT_CORRUPT for anything out of range.
 NPH_MUST_USE NphResult nph_physics_material_view(const NphAsset *asset,

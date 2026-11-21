@@ -11,7 +11,9 @@
 //   - entity references take an entity dropped from the outliner;
 //   - a material slot (MeshRenderer's, MeshMaterials') names its material's
 //     source, takes a material dropped from the asset browser, and opens a
-//     `.nmat` in the material panel (ADR-0105).
+//     `.nmat` in the material panel (ADR-0105);
+//   - a Collider's physics material, the same with a `.npmat` and the
+//     physics material panel (ADR-0108).
 // READONLY fields are shown greyed and HIDDEN ones not at all.
 //
 // While editing, a change goes through the history: a drag, or typing into
@@ -299,6 +301,75 @@ static void material_field(Editor *ed, u8 *value, const NphFieldDesc *f, FieldEd
     }
 }
 
+// True for a Collider's physics material (runtime/components.h).
+static bool is_physics_material(const NphFieldDesc *f)
+{
+    return (NphFieldKind)f->kind == NPH_FIELD_GUID && strcmp(f->name, "physics_material") == 0;
+}
+
+// A Collider's physics material: its source, or the Collider's own values; a
+// physics material dropped from the asset browser takes it, right-click gives
+// the Collider its own values back, and Edit opens it in the physics material
+// panel (ADR-0108).
+static void physics_material_field(Editor *ed, u8 *value, const NphFieldDesc *f, FieldEdit *edit)
+{
+    NphGuid g;
+    memcpy(&g, value + f->offset, sizeof g);
+    char key[EDITOR_PROJECT_PATH_MAX];
+    char sub[32];
+    const bool known = !nph_guid_is_null(g) && ed->project != NULL &&
+                       editor_project_source_of(ed->project, g, key, sizeof key, sub, sizeof sub);
+    char label[EDITOR_PROJECT_PATH_MAX + 40U];
+    if (nph_guid_is_null(g)) {
+        (void)snprintf(label, sizeof label, "(its own values)");
+    } else if (known) {
+        (void)snprintf(label, sizeof label, "%s", key);
+    } else {
+        char hex[NPH_GUID_STRING_LEN + 1U];
+        nph_guid_to_string(g, hex);
+        (void)snprintf(label, sizeof label, "%s", hex);
+    }
+    const bool editable = known && cooker_source_kind(key) == COOKER_SOURCE_PHYSICS_MATERIAL;
+    (void)igButton(label, ui_vec2(editable ? -48.0F : -FLT_MIN, 0.0F));
+    const u64 widget = (u64)igGetItemID();
+    if (igIsItemHovered(ImGuiHoveredFlags_None)) {
+        igSetTooltip("drop a physics material from the Assets panel here; right-click for the "
+                     "Collider's own values");
+    }
+    bool changed = false;
+    if (igBeginDragDropTarget()) {
+        const ImGuiPayload *p =
+            igAcceptDragDropPayload(EDITOR_DRAG_PHYSICS_MATERIAL, ImGuiDragDropFlags_None);
+        if (p != NULL && p->DataSize > 0 && ((const char *)p->Data)[p->DataSize - 1] == '\0') {
+            const char *dropped = (const char *)p->Data;
+            const NphGuid material = cooker_asset_guid(dropped, "physics_material");
+            memcpy(value + f->offset, &material, sizeof material);
+            changed = true;
+            if (ed->project != NULL && !editor_project_is_cooked(ed->project, dropped)) {
+                u32 id = 0U;
+                NPH_IGNORE_RESULT(editor_project_cook(ed->project, dropped, false, 0U, &id));
+            }
+        }
+        igEndDragDropTarget();
+    }
+    if (igIsItemClicked(ImGuiMouseButton_Right) && !nph_guid_is_null(g)) {
+        const NphGuid none = NPH_GUID_NULL;
+        memcpy(value + f->offset, &none, sizeof none);
+        changed = true;
+    }
+    if (editable) {
+        igSameLine(0.0F, -1.0F);
+        if (igSmallButton("Edit")) {
+            NPH_IGNORE_RESULT(editor_physics_material_open(ed, key)); // logged
+        }
+    }
+    if (changed) {
+        edit->changed = true;
+        edit->key = widget;
+        edit->finished = true;
+    }
+}
+
 // One field of `value` (a copy of the component); widgets under the field's id.
 static void field(Editor *ed, NphWorld *w, const NphFieldDesc *f, u8 *value, FieldEdit *edit)
 {
@@ -413,6 +484,8 @@ static void field(Editor *ed, NphWorld *w, const NphFieldDesc *f, u8 *value, Fie
     case NPH_FIELD_GUID:
         if (is_material_slot(f)) {
             material_field(ed, value, f, edit);
+        } else if (is_physics_material(f)) {
+            physics_material_field(ed, value, f, edit);
         } else {
             guid_field(value, f, edit);
         }

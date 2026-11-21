@@ -363,16 +363,14 @@ static void finished(Editor *ed, const EditorImportResult *res)
                      res->skipped);
     }
     // What the cook replaced is read again wherever it is drawn, before
-    // anything new takes it, and a physics material wherever it plays.
+    // anything new takes it.
     NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
-    for (u32 i = 0; i < res->written_count; ++i) {
-        if (sr != NULL) {
-            (void)nph_scene_renderer_reload(sr, res->written[i]);
-        }
-        (void)nph_engine_physics_reload(ed->engine, res->written[i]);
+    for (u32 i = 0; sr != NULL && i < res->written_count; ++i) {
+        (void)nph_scene_renderer_reload(sr, res->written[i]);
     }
     editor_mesh_edit_finished(ed, res);
     editor_material_finished(ed, res);
+    editor_physics_material_finished(ed, res);
     EditorPlacement *slot = placement_of(ed, res->id);
     if (slot == NULL) {
         return;
@@ -685,7 +683,7 @@ typedef enum BrowserAction {
     ACTION_PLACE,      // a scene: into the edited world, in front of the camera
     ACTION_COOK,       // cook it (a folder: its scenes)
     ACTION_COOK_AGAIN, // cook it even when current
-    ACTION_EDIT,       // a material: open it in the material panel
+    ACTION_EDIT,       // a material or a physics material: open it in its panel
     ACTION_SETTINGS,   // a scene, an image, or a sound: its import settings (ADR-0107)
 } BrowserAction;
 
@@ -698,7 +696,8 @@ static BrowserAction context_menu(const EditorAssetEntry *e, bool playing)
     if (e->is_directory && igMenuItem_Bool("Open", NULL, false, true)) {
         action = ACTION_OPEN;
     }
-    if (e->kind == (u32)COOKER_SOURCE_MATERIAL &&
+    if ((e->kind == (u32)COOKER_SOURCE_MATERIAL ||
+         e->kind == (u32)COOKER_SOURCE_PHYSICS_MATERIAL) &&
         igMenuItem_Bool("Edit", "double-click", false, true)) {
         action = ACTION_EDIT;
     }
@@ -736,10 +735,10 @@ static BrowserAction double_click_action(const EditorAssetEntry *e, bool playing
     case COOKER_SOURCE_MESH:
         return playing ? ACTION_NONE : ACTION_PLACE;
     case COOKER_SOURCE_MATERIAL:
+    case COOKER_SOURCE_PHYSICS_MATERIAL:
         return ACTION_EDIT;
     case COOKER_SOURCE_IMAGE:
     case COOKER_SOURCE_SOUND:
-    case COOKER_SOURCE_PHYSICS_MATERIAL:
         return ACTION_COOK;
     case COOKER_SOURCE_NONE:
         break;
@@ -766,7 +765,11 @@ static void act(Editor *ed, const EditorAssetEntry *e, BrowserAction action)
         (void)cook(ed, key, action == ACTION_COOK_AGAIN, false, nph_dvec3_zero());
         break;
     case ACTION_EDIT:
-        NPH_IGNORE_RESULT(editor_material_open(ed, key)); // logged
+        if (e->kind == (u32)COOKER_SOURCE_PHYSICS_MATERIAL) {
+            NPH_IGNORE_RESULT(editor_physics_material_open(ed, key)); // logged
+        } else {
+            NPH_IGNORE_RESULT(editor_material_open(ed, key)); // logged
+        }
         break;
     case ACTION_SETTINGS: {
         const NphResult r = editor_import_settings_open(ed, key);
@@ -801,8 +804,11 @@ static void drag_source(const EditorAssets *a, const EditorAssetEntry *e)
         type = EDITOR_DRAG_IMAGE;
         verb = "Image";
         break;
-    case COOKER_SOURCE_SOUND:
     case COOKER_SOURCE_PHYSICS_MATERIAL:
+        type = EDITOR_DRAG_PHYSICS_MATERIAL;
+        verb = "Physics material";
+        break;
+    case COOKER_SOURCE_SOUND:
     case COOKER_SOURCE_NONE:
         break;
     }
@@ -847,6 +853,10 @@ void editor_panel_assets(Editor *ed)
     igSameLine(0.0F, -1.0F);
     if (igSmallButton("New Material")) {
         NPH_IGNORE_RESULT(editor_material_new(ed, a->folder, NULL, 0U)); // logged
+    }
+    igSameLine(0.0F, -1.0F);
+    if (igSmallButton("New Physics Material")) {
+        NPH_IGNORE_RESULT(editor_physics_material_new(ed, a->folder, NULL, 0U)); // logged
     }
     char status[256];
     editor_project_status(p, status, sizeof status);
