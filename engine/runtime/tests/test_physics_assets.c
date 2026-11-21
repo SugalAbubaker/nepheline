@@ -109,6 +109,20 @@ static void frames(AssetFixture *f, u32 n)
     NTEST_ASSERT_EQ_INT(nph_engine_wait(f->engine), NPH_RESULT_OK);
 }
 
+// Waits for the load of `guid` in flight (the bridge's, in the background), as a load of it
+// does, and lets go of the reference that took: the bridge sees it finished at its next step.
+// How long a load takes is the machine's, so no count of frames would do (a hosted runner's took
+// more than 600 lockstep frames, 5 ms of them).
+static void await_load(AssetFixture *f, NphGuid guid)
+{
+    NphAssetLoader *loader = nph_engine_loader(f->engine);
+    NphAssetHandle h = NPH_ASSET_HANDLE_NULL;
+    NPH_IGNORE_RESULT(nph_asset_load_guid(loader, guid, &h)); // a damaged one fails: still done
+    if (!nph_asset_handle_is_null(h)) {
+        nph_asset_release(loader, h);
+    }
+}
+
 typedef struct TestBlock {
     u32 kind; // NphCollisionShapeKind
     const void *data;
@@ -488,19 +502,16 @@ NTEST(PhysicsAssets, assets_loading_in_play_are_waited_for)
     NTEST_ASSERT_EQ_INT(nph_engine_play_begin(fx.engine, false), NPH_RESULT_OK);
     const NphEntity crate = spawn_asset(&fx, nph_dvec3(0.0, 3.0, 0.0), nph_vec3_one(),
                                         NPH_RIGID_BODY_DYNAMIC, crate_coll);
+    // The step that makes its body starts the load; until a step sees it done the crate waits
+    // asleep where it is (no shapes and no fall), however long the load takes.
     NphPhysicsShape s[2];
-    u32 waited = 0U;
-    bool still = true;
-    for (; waited < 600U && shapes_of(&fx, crate, s, 2U) == 0U; ++waited) {
-        frames(&fx, 1U);
-        const NphLocalTransform *lt =
-            NPH_WORLD_GET(nph_engine_world(fx.engine), crate, NPH_COMPONENT_ID_LOCAL_TRANSFORM,
-                          NphLocalTransform);
-        still = still && (shapes_of(&fx, crate, s, 2U) != 0U || lt->translation.y == 3.0);
-    }
+    frames(&fx, 5U);
+    const NphLocalTransform *waiting = NPH_WORLD_GET(
+        nph_engine_world(fx.engine), crate, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    NTEST_EXPECT_TRUE(shapes_of(&fx, crate, s, 2U) != 0U || waiting->translation.y == 3.0);
+    await_load(&fx, crate_coll);
+    frames(&fx, 1U);
     NTEST_ASSERT_EQ_UINT(shapes_of(&fx, crate, s, 2U), 1U);
-    NTEST_EXPECT_TRUE(still); // asleep while it waited
-    NTEST_LOG("the crate waited %u frames for its asset", waited);
     frames(&fx, 120U); // half a second: 1.2 m of fall
     const NphLocalTransform *lt = NPH_WORLD_GET(
         nph_engine_world(fx.engine), crate, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
@@ -761,17 +772,13 @@ NTEST(PhysicsMaterials, physics_materials_loading_in_play_are_waited_for)
     NTEST_ASSERT_EQ_INT(nph_engine_play_begin(fx.engine, false), NPH_RESULT_OK);
     const NphEntity bouncer = spawn_box(&fx, nph_dvec3(0.0, 3.0, 0.0), nph_quat_identity(),
                                         nph_vec3_splat(0.25F), NPH_RIGID_BODY_DYNAMIC, rubber);
+    // As a collision asset's: asleep where it is, without its shape, until its material is in.
     NphPhysicsShape s[2];
-    u32 waited = 0U;
-    bool still = true;
-    for (; waited < 600U && shapes_of(&fx, bouncer, s, 2U) == 0U; ++waited) {
-        frames(&fx, 1U);
-        still =
-            still && (shapes_of(&fx, bouncer, s, 2U) != 0U || position_of(&fx, bouncer).y == 3.0);
-    }
+    frames(&fx, 5U);
+    NTEST_EXPECT_TRUE(shapes_of(&fx, bouncer, s, 2U) != 0U || position_of(&fx, bouncer).y == 3.0);
+    await_load(&fx, rubber);
+    frames(&fx, 1U);
     NTEST_ASSERT_EQ_UINT(shapes_of(&fx, bouncer, s, 2U), 1U);
-    NTEST_EXPECT_TRUE(still); // asleep while it waited
-    NTEST_LOG("the box waited %u frames for its physics material", waited);
     NphPhysicsWorld *pw = nph_engine_physics(fx.engine);
     NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, s[0]), 0.9F, 0.0F);
     NTEST_EXPECT_EQ_INT(nph_physics_shape_restitution_combine(pw, s[0]), NPH_PHYSICS_COMBINE_MAX);
@@ -813,25 +820,6 @@ NTEST(PhysicsMaterials, a_material_that_cannot_be_read_leaves_the_colliders_own)
     finish(&fx);
 }
 
-// Whether the entity's body has one shape, of friction `want`.
-static bool has_friction(AssetFixture *f, NphEntity e, f32 want)
-{
-    NphPhysicsShape s[2];
-    return shapes_of(f, e, s, 2U) == 1U &&
-           nph_physics_shape_friction(nph_engine_physics(f->engine), s[0]) == want;
-}
-
-// Waits up to a second of frames for the entity's one shape to have friction `want` (none while
-// what it is made of loads); the frames waited.
-static u32 wait_friction(AssetFixture *f, NphEntity e, f32 want)
-{
-    u32 n = 0U;
-    for (; n < 240U && !has_friction(f, e, want); ++n) {
-        frames(f, 1U);
-    }
-    return n;
-}
-
 // A physics material cooked again during play: the shapes naming it take its new values in place
 // (the same shapes), their bodies weighed again, a part's owner too; a load that fails keeps the
 // values; a Collider naming another material is made again of it; nothing to do once play ends.
@@ -867,8 +855,9 @@ NTEST(PhysicsMaterials, a_material_cooked_again_changes_its_shapes_in_place)
         0.1F, 0.0F, 500.0F, NPH_PHYSICS_MATERIAL_COMBINE_MIN, NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
     NTEST_ASSERT_TRUE(nph_guid_equals(write_physics_material(&fx, "rubber.pmat", &again), rubber));
     NTEST_EXPECT_TRUE(nph_engine_physics_reload(fx.engine, rubber));
-    const u32 waited = wait_friction(&fx, floor, 0.1F);
-    NTEST_LOG("the reload reached the shapes in %u frames", waited);
+    await_load(&fx, rubber);
+    frames(&fx, 1U);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, floor_shape), 0.1F, 0.0F);
     NTEST_EXPECT_EQ_UINT(only_shape(&fx, floor).value, floor_shape.value); // in place
     NTEST_EXPECT_NEAR_F32(nph_physics_shape_restitution(pw, floor_shape), 0.0F, 0.0F);
     NTEST_EXPECT_EQ_INT(nph_physics_shape_friction_combine(pw, floor_shape),
@@ -882,18 +871,25 @@ NTEST(PhysicsMaterials, a_material_cooked_again_changes_its_shapes_in_place)
                 NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
     (void)write_physics_material(&fx, "rubber.pmat", &damaged);
     NTEST_EXPECT_TRUE(nph_engine_physics_reload(fx.engine, rubber));
-    frames(&fx, 30U);
+    await_load(&fx, rubber);
+    frames(&fx, 1U);
     NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, floor_shape), 0.1F, 0.0F);
     const NphPhysicsMaterialHeader good =
         surface(0.25F, 0.0F, 500.0F, NPH_PHYSICS_MATERIAL_COMBINE_MIN,
                 NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
     (void)write_physics_material(&fx, "rubber.pmat", &good);
     NTEST_EXPECT_TRUE(nph_engine_physics_reload(fx.engine, rubber));
-    NTEST_EXPECT_LT_UINT(wait_friction(&fx, floor, 0.25F), 240U);
+    await_load(&fx, rubber);
+    frames(&fx, 1U);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, floor_shape), 0.25F, 0.0F);
     // Another material named: the shape made again of it, loaded in the background.
     NPH_WORLD_GET_MUT(w, floor, fx.ids.collider, NphCollider)->physics_material = steel;
-    NTEST_EXPECT_LT_UINT(wait_friction(&fx, floor, 0.4F), 240U);
-    NTEST_EXPECT_EQ_INT(nph_physics_shape_friction_combine(pw, only_shape(&fx, floor)),
+    frames(&fx, 1U);
+    await_load(&fx, steel);
+    frames(&fx, 1U);
+    const NphPhysicsShape steel_shape = only_shape(&fx, floor);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, steel_shape), 0.4F, 0.0F);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_friction_combine(pw, steel_shape),
                         NPH_PHYSICS_COMBINE_AVERAGE);
     nph_engine_play_end(fx.engine);
     NTEST_EXPECT_FALSE(nph_engine_physics_reload(fx.engine, rubber)); // not playing
