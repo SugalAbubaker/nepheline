@@ -39,7 +39,9 @@ typedef enum NphAssetType {
     NPH_ASSET_TYPE_SCENE = NPH_FOURCC('S', 'C', 'E', 'N'),
     NPH_ASSET_TYPE_SOUND = NPH_FOURCC('S', 'N', 'D', ' '),
     NPH_ASSET_TYPE_COLLISION = NPH_FOURCC('C', 'O', 'L', 'L'), // shapes (asset/collision.h)
-    NPH_ASSET_TYPE_BLOB = NPH_FOURCC('B', 'L', 'O', 'B'),      // untyped bytes (tests, tools)
+    // A surface (asset/physics_material.h)
+    NPH_ASSET_TYPE_PHYSICS_MATERIAL = NPH_FOURCC('P', 'M', 'A', 'T'),
+    NPH_ASSET_TYPE_BLOB = NPH_FOURCC('B', 'L', 'O', 'B'), // untyped bytes (tests, tools)
 } NphAssetType;
 
 // A static name for an asset type ("mesh", "texture", ...; "unknown" for

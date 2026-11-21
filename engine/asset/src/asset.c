@@ -18,6 +18,8 @@ const char *nph_asset_type_name(u32 type)
         return "sound";
     case NPH_ASSET_TYPE_COLLISION:
         return "collision";
+    case NPH_ASSET_TYPE_PHYSICS_MATERIAL:
+        return "physics material";
     case NPH_ASSET_TYPE_BLOB:
         return "blob";
     default:

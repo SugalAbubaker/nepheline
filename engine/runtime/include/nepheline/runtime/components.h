@@ -272,8 +272,14 @@ typedef enum NphColliderShape {
 // and triangle meshes, in the frame of what collides), turned by `rotation`,
 // then scaled by the entity's world scale along each of its axes and
 // mirrored where it mirrors, at `center`; a mesh only on a static or
-// kinematic body. Its material: `density` in kg/m^3, `friction`,
-// and `restitution`. Its filter (physics/shape.h NphPhysicsFilter): two
+// kinematic body. Its surface: `density` in kg/m^3, `friction`, and
+// `restitution`, each combined with a touching shape's by default
+// (physics/shape.h NphPhysicsCombine); or (ADR-0108) those of the physics
+// material `physics_material` (asset/physics_material.h, a `.npmat` source),
+// with its combine modes: a surface made once and changed once for every
+// Collider naming it. Its shapes wait for it while it loads, as an ASSET
+// Collider's for its asset; one that cannot be read leaves the Collider its
+// own values (logged). Its filter (physics/shape.h NphPhysicsFilter): two
 // shapes touch when each one's category bits meet the other's mask, unless
 // they share a group (negative: never; positive: always). `hit_events`:
 // report hits above the world's threshold (physics/world.h). `trigger`
@@ -291,6 +297,7 @@ typedef enum NphColliderShape {
     F(F32, density, NPH_FIELD_RANGE(0.0F, 20000.0F))                                               \
     F(F32, friction, NPH_FIELD_RANGE(0.0F, 2.0F))                                                  \
     F(F32, restitution, NPH_FIELD_RANGE(0.0F, 1.0F))                                               \
+    F(GUID, physics_material, NPH_FIELD_NO_HINTS)                                                  \
     F(U64, category, NPH_FIELD_NO_HINTS)                                                           \
     F(U64, mask, NPH_FIELD_NO_HINTS)                                                               \
     F(I32, group, NPH_FIELD_NO_HINTS)                                                              \
@@ -301,7 +308,7 @@ NPH_COMPONENT_STRUCT(NphCollider, NPH_COLLIDER_FIELDS);
 NPH_COMPONENT_DECLARE(NphCollider);
 
 NPH_STATIC_ASSERT(sizeof(NphRigidBody) == 56U, "RigidBody is 56 bytes");
-NPH_STATIC_ASSERT(sizeof(NphCollider) == 112U, "Collider is 112 bytes");
+NPH_STATIC_ASSERT(sizeof(NphCollider) == 128U, "Collider is 128 bytes");
 
 // A joint (ADR-0108; physics/joint.h) between the body of the entity (its
 // RigidBody's or Collider's, or the nearest body above it) and the body of

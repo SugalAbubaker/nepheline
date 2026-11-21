@@ -485,6 +485,14 @@ def collision_blobs():
     ]
 
 
+def physics_material_blobs():
+    """A physics material asset (asset/physics_material.h; ADR-0108): ice, its friction by the
+    smaller of two (mode 2), its restitution averaged (mode 1)."""
+    header = struct.pack("<3f3I10I", 0.02, 0.125, 917.0, 2, 1, 0, *([0] * 10))
+    assert len(header) == 64
+    return [("HEAD", 0, 0, 16, header, header)]
+
+
 def pack_file(entries, entry_align=16):
     """A .npk image. `entries` is a list of (path, guid_bytes, type, data)."""
     header_size = 64
@@ -612,6 +620,8 @@ def main():
     write(os.path.join(CORPUS, "nph", "scene_collision"),
           nph_file(fourcc("SCEN"), 3, scene_collision_blobs()))
     write(os.path.join(CORPUS, "nph", "collision"), nph_file(fourcc("COLL"), 1, collision_blobs()))
+    write(os.path.join(CORPUS, "nph", "physics_material"),
+          nph_file(fourcc("PMAT"), 1, physics_material_blobs()))
     write(os.path.join(CORPUS, "nph", "sound"), nph_file(fourcc("SND "), 1, sound_blobs(False)))
     write(os.path.join(CORPUS, "nph", "sound_streamed"),
           nph_file(fourcc("SND "), 1, sound_blobs(True)))

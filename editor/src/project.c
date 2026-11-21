@@ -656,9 +656,9 @@ static void note(Cooker *c, const char *source, const char *sub, NphGuid *guids,
     ++*count;
 }
 
-// Cooks a source of the project: a directory's scenes, editable meshes, and
-// sounds, a scene, an editable mesh, a sound, or an image (unless images
-// are only along for a scene). Anything else was only copied.
+// Cooks a source of the project: a directory's scenes, editable meshes,
+// sounds, materials, and physics materials, one of those, or an image
+// (unless images are only along for a scene). Anything else was only copied.
 static NphResult cook_source(EditorProject *p, Cooker *c, const char *source, bool is_directory,
                              bool images_alone, EditorImportResult *res)
 {
@@ -691,6 +691,9 @@ static NphResult cook_source(EditorProject *p, Cooker *c, const char *source, bo
         // A material cooks whenever it comes in or changes, with its images;
         // what it wrote is reloaded with the rest (`note_written`).
         return cooker_cook_material(c, source);
+    case COOKER_SOURCE_PHYSICS_MATERIAL:
+        // As a material, and reloaded in play (ADR-0108).
+        return cooker_cook_physics_material(c, source);
     case COOKER_SOURCE_NONE:
         break;
     }

@@ -722,6 +722,28 @@ def nmat_seeds():
     }
 
 
+def npmat_seeds():
+    """Physics material sources (tools/cook/physics_material.h; ADR-0108): the version alone,
+    every key at its default, ice, and every combine mode."""
+    import json
+
+    def doc(d, pretty=False):
+        if pretty:
+            return (json.dumps(d, indent=2) + "\n").encode("utf-8")
+        return json.dumps(d, separators=(",", ":")).encode("utf-8")
+
+    default = {"npmat": 1, "friction": 0.6, "restitution": 0, "density": 1000,
+               "friction_combine": "default", "restitution_combine": "default"}
+    return {
+        "version_only": doc({"npmat": 1}),
+        "default": doc(default, pretty=True),
+        "ice": doc({"npmat": 1, "friction": 0.02, "restitution": 0.125, "density": 917,
+                    "friction_combine": "minimum", "restitution_combine": "average"}),
+        "every_mode": doc({"npmat": 1, "friction": 100, "restitution": 1, "density": 1e6,
+                           "friction_combine": "multiply", "restitution_combine": "maximum"}),
+    }
+
+
 def texture_import_seeds():
     """Images' import settings (tools/cook/texture_import.h; ADR-0105)."""
     import json
@@ -763,6 +785,8 @@ def write_cook_seeds(write, corpus):
         write(os.path.join(corpus, "nmesh", name), data)
     for name, data in nmat_seeds().items():
         write(os.path.join(corpus, "nmat", name), data)
+    for name, data in npmat_seeds().items():
+        write(os.path.join(corpus, "npmat", name), data)
     for name, data in texture_import_seeds().items():
         write(os.path.join(corpus, "texture_import", name), data)
     for name, data in scene_import_seeds().items():

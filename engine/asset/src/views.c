@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Typed views over loaded assets (mesh.h, texture.h, material.h, scene.h,
-// sound.h, collision.h): each resolves the blobs an asset type defines and checks every
-// count and range, so the renderer, the scene code, and the audio runtime
-// can use the pointers without further validation.
+// sound.h, collision.h, physics_material.h): each resolves the blobs an asset
+// type defines and checks every count and range, so the renderer, the scene
+// code, the audio runtime, and the physics bridge can use the pointers without
+// further validation.
 #include <nepheline/asset/collision.h>
 #include <nepheline/asset/material.h>
 #include <nepheline/asset/mesh.h>
+#include <nepheline/asset/physics_material.h>
 #include <nepheline/asset/scene.h>
 #include <nepheline/asset/sound.h>
 #include <nepheline/asset/texture.h>
@@ -1076,4 +1078,38 @@ NphCollisionBlock nph_collision_shape_block(const NphAsset *asset, const NphColl
     out.data = b->data;
     out.size = (u32)b->size;
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Physics material
+// ---------------------------------------------------------------------------
+
+// `x` in [lo, hi]: false for NaN.
+static bool within(f32 x, f32 lo, f32 hi)
+{
+    return x >= lo && x <= hi;
+}
+
+NphResult nph_physics_material_view(const NphAsset *asset, NphPhysicsMaterialView *out)
+{
+    NPH_ASSERT(out != NULL);
+    memset(out, 0, sizeof *out);
+    NPH_TRY(check_type(asset, NPH_ASSET_TYPE_PHYSICS_MATERIAL, NPH_PHYSICS_MATERIAL_TYPE_VERSION));
+    const void *p = NULL;
+    NPH_TRY(typed_blob(asset, NPH_PHYSICS_MATERIAL_TAG_HEADER, 0U, sizeof(NphPhysicsMaterialHeader),
+                       1U, &p));
+    const NphPhysicsMaterialHeader *h = (const NphPhysicsMaterialHeader *)p;
+    bool ok = within(h->friction, 0.0F, NPH_PHYSICS_MATERIAL_MAX_FRICTION) &&
+              within(h->restitution, 0.0F, 1.0F) &&
+              within(h->density, 0.0F, NPH_PHYSICS_MATERIAL_MAX_DENSITY) &&
+              h->friction_combine < (u32)NPH_PHYSICS_MATERIAL_COMBINE_COUNT &&
+              h->restitution_combine < (u32)NPH_PHYSICS_MATERIAL_COMBINE_COUNT && h->flags == 0U;
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(h->reserved); ++i) {
+        ok = ok && h->reserved[i] == 0U;
+    }
+    if (!ok) {
+        return NPH_RESULT_CORRUPT;
+    }
+    out->header = h;
+    return NPH_RESULT_OK;
 }

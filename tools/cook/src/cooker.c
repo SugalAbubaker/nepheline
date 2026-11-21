@@ -2,6 +2,7 @@
 // The cooker (cooker.h): source keys, output paths, the incremental
 // decisions, the glTF and image drivers, and packing.
 #include <nepheline/asset/collision.h>
+#include <nepheline/asset/physics_material.h>
 #include <nepheline/asset/scene.h>
 #include <nepheline/asset/sound.h>
 #include <nepheline/core/assert.h>
@@ -18,6 +19,7 @@
 #include <cook/gltf.h>
 #include <cook/image.h>
 #include <cook/material.h>
+#include <cook/physics_material.h>
 #include <cook/polymesh.h>
 #include <cook/ray_trim.h>
 #include <cook/scene_import.h>
@@ -1428,6 +1430,66 @@ NphResult cooker_cook_material(Cooker *c, const char *source_path)
                           nph_material_uv_is_identity(&uv) ? NULL : &uv, NULL, content_hash,
                           asset_guid(key, "material"));
     }
+    if (r != NPH_RESULT_OK) {
+        c->stats.failed += 1U;
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Physics material sources (ADR-0108)
+// ---------------------------------------------------------------------------
+
+NphResult cooker_cook_physics_material(Cooker *c, const char *source_path)
+{
+    NPH_ASSERT(c != NULL && source_path != NULL);
+    char key[COOKER_PATH_MAX];
+    NphResult r = cooker_source_key(c, source_path, key, sizeof key);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: not under the source root %s", source_path, c->root);
+        c->stats.failed += 1U;
+        return r;
+    }
+    void *bytes = NULL;
+    u64 size = 0U;
+    r = nph_file_read_all(source_path, c->alloc, &bytes, &size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK, "%s: %s", source_path, nph_result_string(r));
+        c->stats.failed += 1U;
+        return r;
+    }
+    const u64 content_hash = nph_hash_combine(nph_hash64(bytes, size, NPH_HASH_DEFAULT_SEED), size);
+    CookPhysicsMaterialSource m;
+    r = cook_physics_material_source_read(c->alloc, nph_str((const char *)bytes, size), &m);
+    nph_file_free_all(c->alloc, bytes, size);
+    if (r != NPH_RESULT_OK) {
+        NPH_LOG_ERROR(&NPH_LOG_COOK,
+                      "%s: not a physics material source (docs/cook.md \"Physics materials\"): %s",
+                      key, nph_result_string(r));
+        c->stats.failed += 1U;
+        return r;
+    }
+    static const char sub[] = "physics_material";
+    const u64 shash = settings_hash(c, NPH_ASSET_TYPE_PHYSICS_MATERIAL);
+    if (is_current(c, key, sub, content_hash, shash)) {
+        c->stats.skipped += 1U;
+        return NPH_RESULT_OK;
+    }
+    const NphGuid guid = asset_guid(key, sub);
+    NphPhysicsMaterialHeader h;
+    cook_physics_material_source_header(&m, &h);
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, c->alloc, NPH_ASSET_TYPE_PHYSICS_MATERIAL,
+                          NPH_PHYSICS_MATERIAL_TYPE_VERSION, guid, content_hash);
+    r = nph_asset_writer_add_blob(&w, NPH_PHYSICS_MATERIAL_TAG_HEADER, 0U, &h, sizeof h,
+                                  NPH_ASSET_CODEC_NONE, 0U);
+    if (r == NPH_RESULT_OK) {
+        char relative[COOKER_PATH_MAX];
+        output_path(c, key, sub, sub, guid, relative, sizeof relative);
+        r = emit(c, &w, key, sub, relative, NPH_ASSET_TYPE_PHYSICS_MATERIAL, content_hash, shash,
+                 NULL, 0U);
+    }
+    nph_asset_writer_free(&w);
     if (r != NPH_RESULT_OK) {
         c->stats.failed += 1U;
     }
@@ -2997,6 +3059,9 @@ CookerSourceKind cooker_source_kind(const char *path)
     if (nph_str_equals_ignore_case(ext, NPH_STR(".nmat"))) {
         return COOKER_SOURCE_MATERIAL;
     }
+    if (nph_str_equals_ignore_case(ext, NPH_STR(".npmat"))) {
+        return COOKER_SOURCE_PHYSICS_MATERIAL;
+    }
     for (u32 i = 0; i < NPH_ARRAY_COUNT(images); ++i) {
         if (nph_str_equals_ignore_case(ext, nph_str_from_cstr(images[i]))) {
             return COOKER_SOURCE_IMAGE;
@@ -3021,6 +3086,8 @@ NphResult cooker_cook_file(Cooker *c, const char *source_path)
         return cooker_cook_sound(c, source_path);
     case COOKER_SOURCE_MATERIAL:
         return cooker_cook_material(c, source_path);
+    case COOKER_SOURCE_PHYSICS_MATERIAL:
+        return cooker_cook_physics_material(c, source_path);
     case COOKER_SOURCE_IMAGE: {
         const NphStr ext = nph_path_extension(nph_str_from_cstr(source_path));
         return cooker_cook_image(
@@ -3101,6 +3168,9 @@ static NphResult cook_tree(Cooker *c, const char *dir, u32 depth, NphResult *fir
             break;
         case COOKER_SOURCE_MATERIAL:
             fr = cooker_cook_material(c, path);
+            break;
+        case COOKER_SOURCE_PHYSICS_MATERIAL:
+            fr = cooker_cook_physics_material(c, path);
             break;
         case COOKER_SOURCE_IMAGE: // cooked through what uses them, or one by one
         case COOKER_SOURCE_NONE:

@@ -122,6 +122,13 @@ void nph_physics_shape_set_friction_combine(NphPhysicsWorld *world, NphPhysicsSh
 void nph_physics_shape_set_restitution_combine(NphPhysicsWorld *world, NphPhysicsShape shape,
                                                NphPhysicsCombine mode);
 
+f32 nph_physics_shape_density(const NphPhysicsWorld *world, NphPhysicsShape shape);
+// A new density (kg/m^3, finite and >= 0; asserted, and ignored in shipping
+// builds) weighs the shape's body again at once, as though the shape had been
+// made with it, unless the body's mass properties are set explicitly
+// (body.h). It wakes nothing: what rests stays at rest. Not during a step.
+void nph_physics_shape_set_density(NphPhysicsWorld *world, NphPhysicsShape shape, f32 density);
+
 NphPhysicsFilter nph_physics_shape_filter(const NphPhysicsWorld *world, NphPhysicsShape shape);
 // A new filter drops contacts it no longer allows and lets new pairs form at
 // the next step.

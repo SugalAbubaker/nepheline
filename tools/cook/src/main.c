@@ -12,8 +12,8 @@
 //              [--threads N] [--quiet] [--verbose]
 //     nph_cook --pack-only -o <out_dir> --pack <file.npk>
 //
-// A source may be a directory: every .gltf, .glb, .nmesh, and .wav under it
-// is cooked.
+// A source may be a directory: every .gltf, .glb, .nmesh, .wav, .nmat, and
+// .npmat under it is cooked.
 //
 // Exit status: 0 when every source cooked (or was current), 1 when any
 // failed, 2 for a usage error.
@@ -32,9 +32,10 @@ static void usage(FILE *out)
           "       nph_cook --pack-only -o <out_dir> --pack <file.npk>\n"
           "\n"
           "Cooks glTF scenes (.gltf, .glb), images (.png, .jpg, .tga, .bmp, .hdr, .dds),\n"
-          "editable meshes (.nmesh), and sounds (.wav) into <out_dir>, keeping\n"
-          "cook.db.json there for incremental runs. A directory source cooks every\n"
-          ".gltf, .glb, .nmesh, and .wav under it. A sound's <name>.wav.import.json,\n"
+          "editable meshes (.nmesh), sounds (.wav), materials (.nmat), and physics\n"
+          "materials (.npmat) into <out_dir>, keeping cook.db.json there for\n"
+          "incremental runs. A directory source cooks every .gltf, .glb, .nmesh,\n"
+          ".wav, .nmat, and .npmat under it. A sound's <name>.wav.import.json,\n"
           "beside it, overrides the sound options for it (docs/cook.md).\n"
           "\n"
           "options:\n"

@@ -380,6 +380,15 @@ can be handed to the renderer without further checks:
   runtime makes shapes of them (the physics bridge's ASSET Colliders,
   docs/runtime.md "Physics"), since the asset module does not depend on
   physics.
+- **Physics material** (`physics_material.h`, `PMAT`, type version 1;
+  ADR-0108): `HEAD` alone, 64 bytes: a surface's friction (0 to 100),
+  restitution (0 to 1), density (0 to 10^6 kg/m^3), and the combine mode of
+  each (default, average, minimum, multiply, maximum: the physics module's
+  `NphPhysicsCombine` values, numbered here because the asset module does not
+  depend on physics). The view checks each value finite and in range, each
+  mode known, and the flags and reserved words zero. The cooker makes one of
+  each `.npmat` source (docs/cook.md "Physics materials"); Colliders name it
+  (docs/runtime.md "Physics").
 - **Sound** (`sound.h`): `HEAD` (codec, PCM format, channels, rate,
   frames, the loop, depth, the lossless block size and count, flags:
   `NPH_SOUND_FLAG_STREAM` for one played from storage), `DATA` (the

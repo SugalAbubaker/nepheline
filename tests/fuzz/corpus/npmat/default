@@ -1,0 +1,8 @@
+{
+  "npmat": 1,
+  "friction": 0.6,
+  "restitution": 0,
+  "density": 1000,
+  "friction_combine": "default",
+  "restitution_combine": "default"
+}
