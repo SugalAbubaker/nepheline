@@ -31,6 +31,9 @@ typedef struct EditorPick {
 
 // The radius of the sphere a light or a camera is picked by, in metres.
 #define EDITOR_PICK_MARKER_RADIUS 0.25F
+// A PlayerStart's figure (1.8 m tall) is picked by two balls of this radius,
+// one over the other from its feet.
+#define EDITOR_PICK_FIGURE_BALL 0.45F
 
 // The nearest entity of `w` the ray from `eye` along the unit `dir` hits.
 // False when it hits none.

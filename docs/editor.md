@@ -47,12 +47,19 @@ Editor v1 has:
 nph_editor editor.assets=my_game/assets editor.cooked=my_game/cooked
 nph_editor --pack=build/win-msvc/samples/asset_viewer/Debug/showcase.npk
 nph_editor --game=build/win-msvc/bin/Debug/game_sandbox.dll --scene=level.nscene
+nph_editor --game=      # Play with no game at all
 ```
 
 The engine's options and cvars apply (`--help`, and `cvars` in the
 console). The edited world never simulates. **Play** (F5) plays a copy of
 it, keeping every entity's handle. **Stop** (F5 again) discards the copy
 and shows the edited world again. **Pause** is F6 and **Step** is F7.
+
+Play plays the game `--game` names; when none is named, the starter game
+built beside the editor (`game_starter`, runtime.md "The starter game";
+ADR-0108): a first-person player stands at the level's first PlayerStart,
+or with its eyes where the editor's camera was, and walks it (W A S D,
+Shift, Space, the mouse, E to push). `--game=` plays no game.
 
 The editor adds five cvars:
 
@@ -135,7 +142,12 @@ slot of the triangle's submesh).
 cell, under the pivot), a sphere and an arrow for each light and camera,
 the bounds of the selected meshes, and the outlines of the physics
 components (the selection's over the scene, every one's in it with View >
-Colliders; see "Physics"). They are drawn relative to the frame's debug origin, which
+Colliders; see "Physics"). A PlayerStart is a figure, the size of a
+CharacterController's defaults standing on its origin, with an arrow at its
+eyes where it faces; a click on the figure selects it. While playing, the
+entity the view is seen from (the first active Camera's, and those above
+it: the starter's player) has no marker and no outline, which would be
+drawn around the eye. They are drawn relative to the frame's debug origin, which
 belongs to whoever owns the frame (the renderer takes one origin per
 frame).
 
@@ -852,7 +864,7 @@ step runs on the job system. It reads nothing the simulation writes.
 
 ## Testing
 
-`editor_tests` (96 tests):
+`editor_tests` (99 tests):
 - The camera's invariants, including a 64-bit pivot 10,000 km from the
   origin.
 - The view and the gizmo's math (projection and rays, axis and plane
@@ -879,6 +891,10 @@ step runs on the job system. It reads nothing the simulation writes.
     (checked by reading pixels back).
   - Drags and keys move the camera, and the engine renders from it.
   - Play hands the input to the game and Escape takes it back.
+  - The starter game is found beside the editor; Play with it stands its
+    player with its eyes where the editor's camera was, facing where it
+    looked, asks for the mouse, and leaves the edited scene without a
+    player; a PlayerStart is drawn as a figure and picked by it.
   - The console panel receives the log.
   - Scenes are saved and opened (a bad file leaves the scene alone), with
     the dirty state tracked; the shortcuts duplicate, delete, undo, and

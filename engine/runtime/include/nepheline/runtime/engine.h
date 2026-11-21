@@ -298,6 +298,33 @@ void nph_engine_set_view(NphEngine *engine, const NphRenderView *view);
 // The view the last frame rendered.
 const NphRenderView *nph_engine_view(const NphEngine *engine);
 
+// The view the host set (nph_engine_set_view: the editor's camera), or NULL
+// while frames render the world's own camera. A game's play_begin finds the
+// editor's camera here: it is still the view when play begins (the starter
+// game stands its player under it; ADR-0108).
+const NphRenderView *nph_engine_host_view(const NphEngine *engine);
+
+// ---------------------------------------------------------------------------
+// Input from the host
+// ---------------------------------------------------------------------------
+
+// The events a frame's input takes from nph_engine_feed_event.
+#define NPH_ENGINE_FED_EVENTS 256U
+
+// A window event for the next frame's input, after its window's own, as if
+// the window had sent it (the host's event hook does not see it): input for
+// an engine without a window (OFFSCREEN, HEADLESS), from tests, a remote
+// viewer, or a replay. NPH_RESULT_FULL past NPH_ENGINE_FED_EVENTS before the
+// frame takes them. NPH_MAIN_THREAD_ONLY.
+NPH_MUST_USE NphResult nph_engine_feed_event(NphEngine *engine, const NphWindowEvent *event);
+
+// Whether the game asks for the mouse captured while it has the input (game.h
+// nph_game_capture_mouse; ADR-0108), while playing. A host that routes the
+// window's input itself (an event hook: the editor) captures the cursor while
+// it gives the game the input and the game asks; for a host without one (the
+// player), the engine does, while the window has the focus.
+bool nph_engine_mouse_capture_wanted(const NphEngine *engine);
+
 // Sets the cvars a quality tier decides (nph_render_view_quality; ADR-0079): r.reflections,
 // r.virtual_shadows and r.gi_rays, which the next frame's view takes, and which a
 // saved configuration keeps as they are; any of them may be changed after. The console's

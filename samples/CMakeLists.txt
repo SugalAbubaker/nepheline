@@ -271,3 +271,36 @@ if(TARGET game_physics_content AND TARGET sample_sounds)
                              FAIL_REGULAR_EXPRESSION "check failed|ERROR|Assertion failed")
     endif()
 endif()
+
+# The first-person starter game (ADR-0108 decision 9): the editor plays it when
+# the project names no game (it is built with the editor, beside it), and
+# nph_player runs it. Its tests drive it on a headless engine with fed input;
+# its smoke runs play 240 frames in a window (77 without one or without a
+# device) and headless.
+if(NPH_BUILD_SAMPLES)
+    nph_add_game_module(game_starter SOURCES game_starter/game.c)
+    set_target_properties(game_starter PROPERTIES FOLDER "samples")
+    add_dependencies(game_starter nph_player)
+    if(TARGET nph_editor)
+        add_dependencies(nph_editor game_starter)
+    endif()
+    nph_add_test(game_starter SOURCES game_starter/tests/test_game_starter.c DEPS nph::shared)
+    if(NPH_BUILD_TESTS)
+        add_dependencies(game_starter_tests game_starter)
+        target_compile_definitions(game_starter_tests PRIVATE
+            "NPH_STARTER_GAME=\"$<TARGET_FILE:game_starter>\"")
+        if(TARGET editor_tests)
+            add_dependencies(editor_tests game_starter)
+            target_compile_definitions(editor_tests PRIVATE
+                "NPH_STARTER_GAME=\"$<TARGET_FILE:game_starter>\"")
+        endif()
+        add_test(NAME sample.game_starter
+                 COMMAND nph_player "--game=$<TARGET_FILE:game_starter>" --frames=240)
+        add_test(NAME sample.game_starter_headless
+                 COMMAND nph_player "--game=$<TARGET_FILE:game_starter>" --frames=240 --headless
+                         rt.lockstep=true)
+        set_tests_properties(sample.game_starter sample.game_starter_headless PROPERTIES
+                             TIMEOUT 120 LABELS "sample" SKIP_RETURN_CODE 77)
+        set_tests_properties(sample.game_starter PROPERTIES TIMEOUT 300) # as game_sandbox's
+    endif()
+endif()

@@ -1,7 +1,7 @@
 # 0108. Physics in levels: collision assets, compounds, triggers, joints, physics materials, a character, a first-person game
 
 - **Date:** 2026-11-20
-- **Status:** Proposed (Phase 15's fourth step, ADR-0102 §1.4)
+- **Status:** Accepted 2026-11-21 (Phase 15's fourth step, ADR-0102 §1.4)
 
 ## Context
 
@@ -223,6 +223,27 @@ What there is today:
      - **Props** are pushed by walking into them.
    - **Playing a level:** the editor plays the project's game, or this one where the project names none. The player
      starts at a `PlayerStart` entity, or where the editor's camera stands.
+   - **Built:**
+     - `PlayerStart` is the runtime's tag, so the editor marks it (a figure the size of a character, an arrow
+       where it faces) and picks it, whatever game is loaded. Play stands the player at the first, else under the
+       view the host set (`nph_engine_host_view`: the editor's camera, still the view when play begins), else at
+       the origin; a level's own `starter.Player` is driven instead, given a controller and an eye.
+     - The eye is a child at 0.94 of the controller's height, holding the Camera and the AudioListener; the level's
+       first active Camera lends it its exposure, and the level's cameras and listeners are put out in the play
+       copy. While playing, the editor draws no marker or outline for the entity the view is seen from.
+     - **The mouse:** a game asks for it captured (`nph_game_capture_mouse`). The editor captures it while the game
+       has the input, the player while its window has the focus, so the mouse turns the view without bound.
+     - **E's push** is an impulse of 40 N s along the ray, but no more than gives the body 2.5 m/s, so a light thing
+       is not thrown. What E would push is outlined at its body, not marked by a crosshair: the view the renderer
+       draws is interpolated between steps, which a game's sync point does not know, so a crosshair the game drew
+       would trail it by up to a step.
+     - **Tests** feed input to a headless engine (`nph_engine_feed_event`, for hosts without a window), one step a
+       frame: walking, running, looking, jumping, pushing, a door swung, a crate shoved, a fall, and where the
+       player stands.
+     - The editor plays the starter, built beside it, when `--game` names none; `--game=` plays no game.
+     - **Measured** (Profile): the starter's system costs about 1 µs a step (the best of six alternating runs: a frame
+       of 12.87 µs against 11.84 for the same character walked by its component with an eye turned every frame,
+       which itself costs 0.4 to 0.9 µs); the eye's ray for the outline, 0.12 µs a frame.
 10. **The editor.**
     - **Fields:**
       - enumerations show their names in a list (a field hint, `NPH_FIELD_ENUM`), and bit masks show as boxes

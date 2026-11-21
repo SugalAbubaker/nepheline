@@ -726,6 +726,8 @@ static NphResult sim_kick(NphEngine *e, u64 now)
 // Play
 // ---------------------------------------------------------------------------
 
+static void follow_mouse_capture(NphEngine *e);
+
 NphResult nph_engine_play_begin(NphEngine *e, bool copy)
 {
     NPH_ASSERT(e != NULL);
@@ -802,6 +804,8 @@ void nph_engine_play_end(NphEngine *e)
     physics_bridge_end(e->physics);
     e->playing = false;
     e->paused = false;
+    e->mouse_capture_wanted = false; // the game asks again in its next play
+    follow_mouse_capture(e);
     if (e->play_world != NULL) {
         NphWorld *previous = NULL;
         NPH_IGNORE_RESULT(engine_world_activate(e, NULL, false, &previous));
@@ -837,6 +841,22 @@ void nph_engine_step_once(NphEngine *e)
 // The frame
 // ---------------------------------------------------------------------------
 
+// The window's cursor captured while the game asks for it and plays, for a
+// host that routes no input itself (nph_engine_mouse_capture_wanted); given
+// back when the window loses the focus.
+static void follow_mouse_capture(NphEngine *e)
+{
+    if (e->window == NULL || e->hooks.event != NULL) {
+        return; // no cursor, or the host's to capture
+    }
+    const bool want = nph_engine_mouse_capture_wanted(e) && nph_window_is_focused(e->window);
+    if (want != e->cursor_captured) {
+        nph_window_set_cursor_mode(e->window,
+                                   want ? NPH_CURSOR_MODE_DISABLED : NPH_CURSOR_MODE_NORMAL);
+        e->cursor_captured = want;
+    }
+}
+
 static void poll_events(NphEngine *e)
 {
     nph_input_begin_frame(e->input);
@@ -854,8 +874,29 @@ static void poll_events(NphEngine *e)
             e->quit = true;
         }
     }
+    for (u32 i = 0U; i < e->fed_count; ++i) {
+        nph_input_process_event(e->input, &e->fed_events[i]);
+    }
+    e->fed_count = 0U;
     nph_input_end_frame(e->input);
     nph_sim_input_accumulate(&e->sim_acc, e->input);
+    follow_mouse_capture(e);
+}
+
+NphResult nph_engine_feed_event(NphEngine *e, const NphWindowEvent *event)
+{
+    NPH_ASSERT(e != NULL && event != NULL);
+    if (e->fed_count == NPH_ENGINE_FED_EVENTS) {
+        return NPH_RESULT_FULL;
+    }
+    e->fed_events[e->fed_count++] = *event;
+    return NPH_RESULT_OK;
+}
+
+bool nph_engine_mouse_capture_wanted(const NphEngine *e)
+{
+    NPH_ASSERT(e != NULL);
+    return e->playing && e->mouse_capture_wanted;
 }
 
 // The view to render: the override, or the world's camera. The r.*
@@ -1940,6 +1981,12 @@ const NphRenderView *nph_engine_view(const NphEngine *e)
 {
     NPH_ASSERT(e != NULL);
     return &e->view;
+}
+
+const NphRenderView *nph_engine_host_view(const NphEngine *e)
+{
+    NPH_ASSERT(e != NULL);
+    return e->has_view_override ? &e->view_override : NULL;
 }
 
 // A tier's fields of a view (nph_render_view_quality), on any camera.

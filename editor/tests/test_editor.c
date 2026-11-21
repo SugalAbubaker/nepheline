@@ -15,6 +15,7 @@
 #include <nepheline/physics/body.h>
 #include <nepheline/physics/shape.h>
 #include <nepheline/physics/world.h>
+#include <nepheline/platform/dylib.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/platform.h>
 #include <nepheline/platform/time.h>
@@ -49,9 +50,9 @@ typedef struct EditorFixture {
 } EditorFixture;
 
 // `project`: an existing project's directory (another editor's), NULL for a
-// new one.
+// new one. `game`: the game module Play plays (NULL: none).
 static NphResult start_in(EditorFixture *f, NphEngineMode mode, EditorLogSink *log,
-                          const char *project)
+                          const char *project, const char *game)
 {
     memset(f, 0, sizeof *f);
     nph_debug_allocator_init(&f->engine_memory, nph_allocator_system());
@@ -89,6 +90,7 @@ static NphResult start_in(EditorFixture *f, NphEngineMode mode, EditorLogSink *l
     f->config.packs[0] = NPH_TEST_PACK;
     f->config.pack_count = 1U;
     f->config.headless = mode == NPH_ENGINE_MODE_HEADLESS ? 1 : 0;
+    f->config.game = game;
     EditorDesc ed;
     memset(&ed, 0, sizeof ed);
     ed.alloc = nph_debug_allocator_allocator(&f->editor_memory);
@@ -109,7 +111,7 @@ static NphResult start_in(EditorFixture *f, NphEngineMode mode, EditorLogSink *l
 
 static NphResult start(EditorFixture *f, NphEngineMode mode, EditorLogSink *log)
 {
-    return start_in(f, mode, log, NULL);
+    return start_in(f, mode, log, NULL, NULL);
 }
 
 static void finish(EditorFixture *f)
@@ -1093,7 +1095,7 @@ NTEST(Editor, a_scene_is_built_saved_reloaded_and_played)
     // Reload, in another editor on the same project: the entities come
     // from the file and their meshes through the project's database.
     static EditorFixture again;
-    const NphResult started = start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project);
+    const NphResult started = start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project, NULL);
     NTEST_ASSERT_EQ_INT(started, NPH_RESULT_OK);
     one_sample_per_pixel(&again);
     ed = again.editor;
@@ -1677,7 +1679,8 @@ NTEST(Editor, a_crashed_sessions_work_is_offered_and_recovered_unsaved)
     NTEST_ASSERT_TRUE(nph_fs_exists(crashed));
 
     static EditorFixture again;
-    NTEST_ASSERT_EQ_INT(start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project, NULL),
+                        NPH_RESULT_OK);
     Editor *next = again.editor;
     const EditorRecovery *rc = &next->recovery;
     NTEST_ASSERT_TRUE(rc->offered);
@@ -1726,7 +1729,8 @@ NTEST(Editor, a_running_sessions_work_is_not_offered_and_later_and_discard_answe
     finish(&fx);
 
     static EditorFixture second;
-    NTEST_ASSERT_EQ_INT(start_in(&second, NPH_ENGINE_MODE_OFFSCREEN, NULL, project), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(start_in(&second, NPH_ENGINE_MODE_OFFSCREEN, NULL, project, NULL),
+                        NPH_RESULT_OK);
     NTEST_ASSERT_TRUE(second.editor->recovery.offered);
     NTEST_EXPECT_EQ_STR(second.editor->recovery.dir, dead); // not the running one's
     editor_recovery_later(second.editor);
@@ -1736,7 +1740,8 @@ NTEST(Editor, a_running_sessions_work_is_not_offered_and_later_and_discard_answe
     finish(&second);
 
     static EditorFixture third;
-    NTEST_ASSERT_EQ_INT(start_in(&third, NPH_ENGINE_MODE_OFFSCREEN, NULL, project), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(start_in(&third, NPH_ENGINE_MODE_OFFSCREEN, NULL, project, NULL),
+                        NPH_RESULT_OK);
     NTEST_ASSERT_TRUE(third.editor->recovery.offered); // offered again
     editor_recovery_discard(third.editor);
     NTEST_EXPECT_FALSE(nph_fs_exists(dead));
@@ -1765,7 +1770,8 @@ NTEST(Editor, an_exit_nobody_confirmed_keeps_unsaved_changes_for_the_next_start)
     NTEST_ASSERT_TRUE(nph_fs_exists(dir));
 
     static EditorFixture again;
-    NTEST_ASSERT_EQ_INT(start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project, NULL),
+                        NPH_RESULT_OK);
     // Its own directory, though it may have begun in the same second as the
     // last one, in the same process.
     NTEST_EXPECT_NE_STR(again.editor->autosave.dir, dir);
@@ -1815,7 +1821,8 @@ NTEST(Editor, a_mesh_being_edited_is_autosaved_and_recovered_into_its_source)
     NTEST_ASSERT_EQ_UINT(faces_in(source), 6U);
 
     static EditorFixture again;
-    NTEST_ASSERT_EQ_INT(start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(start_in(&again, NPH_ENGINE_MODE_OFFSCREEN, NULL, project, NULL),
+                        NPH_RESULT_OK);
     NTEST_ASSERT_TRUE(again.editor->recovery.offered);
     NTEST_EXPECT_TRUE(again.editor->recovery.has_mesh);
     NTEST_EXPECT_EQ_STR(again.editor->recovery.mesh_key, key);
@@ -2679,6 +2686,137 @@ NTEST(Editor, an_asset_colliders_hulls_and_meshes_are_outlined_once_its_asset_lo
     NTEST_EXPECT_EQ_UINT(outline(&fx, crate, 0U).lines, 0U);
     await_collision(&fx, found.hull);
     NTEST_EXPECT_EQ_UINT(outline(&fx, crate, 0U).lines, 12U);
+    finish(&fx);
+}
+
+// ---------------------------------------------------------------------------
+// The starter game (ADR-0108 decision 9)
+// ---------------------------------------------------------------------------
+
+#ifndef NPH_STARTER_GAME
+#error "NPH_STARTER_GAME names the starter game's module"
+#endif
+
+NTEST(Editor, the_starter_game_is_found_beside_the_editor)
+{
+    char path[1024];
+    NTEST_ASSERT_TRUE(editor_starter_game(path, sizeof path));
+    NTEST_EXPECT_TRUE(nph_fs_exists(path));
+    char tail[64];
+    (void)snprintf(tail, sizeof tail, "game_starter%s", nph_dylib_extension());
+    const u64 n = strlen(path);
+    const u64 m = strlen(tail);
+    NTEST_ASSERT_TRUE(n > m);
+    NTEST_EXPECT_EQ_STR(path + n - m, tail);
+    char tiny[4];
+    NTEST_EXPECT_FALSE(editor_starter_game(tiny, sizeof tiny));
+}
+
+NTEST(Editor, a_playerstart_is_marked_by_a_figure_and_picked_by_it)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    EditorCamera *cam = editor_camera(ed);
+    editor_camera_default(cam);
+    cam->pitch = 0.0F;
+    frames(&fx, 3U);
+    const u32 lines_before = nph_engine_frame_stats(fx.engine)->render.debug_lines;
+    NphEntity start = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_edit_create(ed->history, "start", NPH_ENTITY_NULL, NULL, &start),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_edit_add_component(ed->history, start,
+                                                  nph_engine_components(fx.engine)->player_start),
+                        NPH_RESULT_OK);
+    NphLocalTransform t = nph_local_transform_identity();
+    t.translation = nph_dvec3(1.0, 0.0, 0.0);
+    NTEST_ASSERT_EQ_INT(editor_history_begin(ed->history, "place"), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(
+        editor_history_set(ed->history, start, NPH_COMPONENT_ID_LOCAL_TRANSFORM, &t),
+        NPH_RESULT_OK);
+    editor_history_end(ed->history);
+    editor_selection_clear(&ed->selection);
+    frames(&fx, 3U);
+    // Its figure (a capsule's outline: four circles and four sides) and the
+    // arrow where it faces, over the scene.
+    NTEST_EXPECT_TRUE(nph_engine_frame_stats(fx.engine)->render.debug_lines > lines_before + 68U);
+    // A click on its chest selects it.
+    const EditorView v = editor_view(&fx);
+    f32 x = 0.0F;
+    f32 y = 0.0F;
+    screen_of(&v, nph_dvec3(1.0, 1.2, 0.0), &x, &y);
+    (void)feed(&fx, move_to(x, y));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_PRESS));
+    frames(&fx, 2U);
+    (void)feed(&fx, button(NPH_MOUSE_BUTTON_LEFT, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 2U);
+    NTEST_EXPECT_TRUE(nph_entity_equals(ed->selection.primary, start));
+    finish(&fx);
+}
+
+// The play copy's entity with a CharacterController, or the null entity.
+static NphEntity character_in(NphWorld *w, NphComponentId cc)
+{
+    for (u32 i = 0; i < nph_world_entity_slot_count(w); ++i) {
+        const NphEntity e = nph_world_entity_at(w, i);
+        if (nph_world_has(w, e, cc)) {
+            return e;
+        }
+    }
+    return NPH_ENTITY_NULL;
+}
+
+NTEST(Editor, play_with_the_starter_stands_its_player_under_the_editors_camera)
+{
+    static EditorFixture fx;
+    const NphResult started =
+        start_in(&fx, NPH_ENGINE_MODE_OFFSCREEN, NULL, NULL, NPH_STARTER_GAME);
+    if (started == NPH_RESULT_UNSUPPORTED) {
+        finish(&fx);
+        NTEST_SKIP("no Vulkan device available");
+    }
+    NTEST_ASSERT_EQ_INT(started, NPH_RESULT_OK);
+    Editor *ed = fx.editor;
+    NphEngine *e = fx.engine;
+    const NphComponentId cc = nph_engine_components(e)->character_controller;
+    frames(&fx, 2U);
+    EditorCamera *cam = editor_camera(ed);
+    editor_camera_default(cam);
+    cam->pitch = 0.0F;
+    cam->yaw = 0.6F;
+    frames(&fx, 3U);
+    const EditorView v = editor_view(&fx);
+    // F5: the starter's player, its eye where the editor's camera was (its feet
+    // 0.94 of its height under it), facing where the camera looked.
+    (void)feed(&fx, key(NPH_KEY_F5, NPH_KEY_ACTION_PRESS));
+    (void)feed(&fx, key(NPH_KEY_F5, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 1U);
+    NTEST_ASSERT_TRUE(nph_engine_is_playing(e));
+    NphWorld *pw = nph_engine_world(e);
+    const NphEntity player = character_in(pw, cc);
+    NTEST_ASSERT_FALSE(nph_entity_is_null(player));
+    const NphLocalTransform *pt =
+        NPH_WORLD_GET(pw, player, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    NTEST_EXPECT_NEAR_F64(pt->translation.x, v.eye.x, 1e-3);
+    NTEST_EXPECT_NEAR_F64(pt->translation.z, v.eye.z, 1e-3);
+    NTEST_EXPECT_TRUE(pt->translation.y < v.eye.y - 0.94 * 1.8 + 1e-3); // falling, if anything
+    NphVec3 looked = nph_quat_rotate(v.orientation, nph_vec3(0.0F, 0.0F, -1.0F));
+    looked.y = 0.0F;
+    looked = nph_vec3_normalize_or(looked, nph_vec3(0.0F, 0.0F, -1.0F));
+    const NphVec3 faces = nph_quat_rotate(pt->rotation, nph_vec3(0.0F, 0.0F, -1.0F));
+    NTEST_EXPECT_NEAR_F32(nph_vec3_dot(looked, faces), 1.0F, 1e-4F);
+    // It asks for the mouse, which the editor captures while the game has the
+    // input (an offscreen editor has no cursor).
+    NTEST_EXPECT_TRUE(nph_engine_mouse_capture_wanted(e));
+    // Stop: the edited scene never had a player.
+    (void)feed(&fx, key(NPH_KEY_F5, NPH_KEY_ACTION_PRESS));
+    (void)feed(&fx, key(NPH_KEY_F5, NPH_KEY_ACTION_RELEASE));
+    frames(&fx, 2U);
+    NTEST_EXPECT_FALSE(nph_engine_is_playing(e));
+    NTEST_EXPECT_FALSE(nph_engine_mouse_capture_wanted(e));
+    NTEST_EXPECT_TRUE(nph_entity_is_null(character_in(nph_engine_edit_world(e), cc)));
     finish(&fx);
 }
 

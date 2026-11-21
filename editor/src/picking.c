@@ -6,6 +6,8 @@
 #include <nepheline/math/mat.h>
 #include <nepheline/scene/transform.h>
 
+#include <float.h>
+
 // The nearest hit of the triangles of `mesh` from index `first`, `count`
 // indices, by `local`, nearer than `*best`: true when one is, which lowers
 // `*best`.
@@ -91,6 +93,19 @@ bool editor_pick(const NphWorld *w, const NphRuntimeComponents *rc, EditorMeshLo
         } else if (nph_world_has(w, e, rc->light) || nph_world_has(w, e, rc->camera)) {
             const NphSphere marker = {nph_vec3_zero(), EDITOR_PICK_MARKER_RADIUS};
             hit = nph_ray_intersects_sphere(nph_ray(origin, dir), marker, &tt);
+        } else if (nph_world_has(w, e, rc->player_start)) {
+            // Its figure (the viewport's marker): two balls up its height.
+            tt = FLT_MAX;
+            for (u32 k = 0U; k < 2U; ++k) {
+                const NphSphere part = {
+                    nph_vec3(0.0F, EDITOR_PICK_FIGURE_BALL * (1.0F + 2.0F * (f32)k), 0.0F),
+                    EDITOR_PICK_FIGURE_BALL};
+                f32 tk = 0.0F;
+                if (nph_ray_intersects_sphere(nph_ray(origin, dir), part, &tk) && tk < tt) {
+                    tt = tk;
+                    hit = true;
+                }
+            }
         }
         if (hit && tt < best) {
             best = tt;

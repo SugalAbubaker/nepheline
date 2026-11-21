@@ -5,8 +5,10 @@
 #include <nepheline/core/profile.h>
 #include <nepheline/gpu/device.h>
 #include <nepheline/gpu/resources.h>
+#include <nepheline/platform/dylib.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/input.h>
+#include <nepheline/platform/platform.h>
 #include <nepheline/platform/time.h>
 
 #include "editor_internal.h"
@@ -789,6 +791,18 @@ static void hook_render(NphEngine *e, NphGpuRenderGraph *graph, NphGpuRgImage ba
     if (r != NPH_RESULT_OK) {
         NPH_LOG_ERROR(&LOG_EDITOR, "the UI was not drawn: %s", nph_result_string(r));
     }
+}
+
+bool editor_starter_game(char *out, u64 cap)
+{
+    NPH_ASSERT(out != NULL && cap != 0U);
+    u64 len = 0U;
+    if (nph_platform_executable_dir(out, cap, &len) != NPH_RESULT_OK || len >= cap) {
+        return false;
+    }
+    const int n =
+        snprintf(out + len, (size_t)(cap - len), "/game_starter%s", nph_dylib_extension());
+    return n >= 0 && (u64)n < cap - len && nph_fs_exists(out);
 }
 
 void editor_engine_desc(Editor *ed, NphEngineDesc *desc)

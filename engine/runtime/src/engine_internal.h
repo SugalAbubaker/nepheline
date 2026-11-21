@@ -347,6 +347,14 @@ struct NphEngine {
     NphRenderView view_override;
     bool has_view_override;
     bool view_was_override; // the last frame's view was the override (a switch is a cut)
+    // Input a host fed (nph_engine_feed_event), for the next frame's input.
+    NphWindowEvent fed_events[NPH_ENGINE_FED_EVENTS];
+    u32 fed_count;
+    // The game asks for the mouse captured (nph_game_capture_mouse), and the
+    // engine has captured the window's cursor for it (a host without an event
+    // hook).
+    bool mouse_capture_wanted;
+    bool cursor_captured;
     bool quit;
     u64 last_frame_ns;
     NphEngineFrameStats stats;

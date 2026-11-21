@@ -546,6 +546,12 @@ bool nph_collider_shape(const NphCollider *collider, NphVec3 scale,
 NPH_COMPONENT_STRUCT(NphWorldCell, NPH_WORLD_CELL_FIELDS);
 NPH_COMPONENT_DECLARE(NphWorldCell);
 
+// Where a game's player starts (ADR-0108): the entity's position, facing
+// along its -Z, as a Camera looks. The starter game (samples/game_starter)
+// stands its player at the first one; the editor marks and picks it as it
+// does a light or a camera.
+NPH_TAG_DECLARE(NphPlayerStart);
+
 typedef struct NphRuntimeComponents {
     NphComponentId mesh_renderer;
     NphComponentId light;
@@ -559,9 +565,10 @@ typedef struct NphRuntimeComponents {
     NphComponentId mesh_materials;
     NphComponentId joint;
     NphComponentId character_controller;
+    NphComponentId player_start;
 } NphRuntimeComponents;
 
-#define NPH_RUNTIME_COMPONENT_COUNT 12U
+#define NPH_RUNTIME_COMPONENT_COUNT 13U
 
 // Registers the runtime's components (idempotent: a world that has them
 // returns the same ids). Errors of nph_world_register_component.

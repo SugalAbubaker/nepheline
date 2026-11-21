@@ -219,6 +219,12 @@ NphResult editor_viewport_drop_material(Editor *ed, const char *key, f32 x, f32 
 #define COLOR_MARKER   NPH_RENDER_RGBA(230, 220, 120, 255)
 #define COLOR_GRID     NPH_RENDER_RGBA(90, 90, 96, 255)
 
+// A PlayerStart's figure: the CharacterController's default size (components.c) and the
+// starter game's eye (samples/game_starter).
+#define FIGURE_RADIUS 0.3F
+#define FIGURE_HEIGHT 1.8F
+#define FIGURE_EYE    (0.94F * FIGURE_HEIGHT)
+
 typedef struct OutlineLines {
     NphRenderer *renderer;
     u32 flags; // NphRenderDebugFlags
@@ -228,6 +234,41 @@ static bool outline_line(void *user, NphVec3 a, NphVec3 b, u32 rgba)
 {
     const OutlineLines *ol = (const OutlineLines *)user;
     return nph_render_debug_line(ol->renderer, a, b, rgba, ol->flags);
+}
+
+typedef struct MarkerLines {
+    NphRenderer *renderer;
+} MarkerLines;
+
+static void marker_line(void *user, NphVec3 a, NphVec3 b, u32 rgba)
+{
+    const MarkerLines *ml = (const MarkerLines *)user;
+    (void)nph_render_debug_line(ml->renderer, a, b, rgba, NPH_RENDER_DEBUG_OVERLAY);
+}
+
+// A PlayerStart (runtime/components.h): a figure standing on its origin, upright, and an
+// arrow at its eyes along where it faces (its -Z, level).
+static void draw_player_start(NphRenderer *r, const NphWorldTransform *t, u32 color)
+{
+    const NphPhysicsGeometry g =
+        nph_physics_geometry_capsule(0.5F * FIGURE_HEIGHT - FIGURE_RADIUS, FIGURE_RADIUS);
+    NphPhysicsPose pose;
+    pose.position = nph_vec3(0.0F, 0.5F * FIGURE_HEIGHT, 0.0F);
+    pose.rotation = nph_quat_identity();
+    MarkerLines ml = {r};
+    NphPhysicsDebugDraw d;
+    memset(&d, 0, sizeof d);
+    d.line = marker_line;
+    d.user = &ml;
+    d.origin = nph_render_debug_origin(r);
+    nph_physics_geometry_draw(&d, &g, t->translation, pose, color);
+    NphVec3 ahead = nph_vec3_neg(t->z_axis);
+    ahead.y = 0.0F;
+    ahead = nph_vec3_normalize_or(ahead, nph_vec3(0.0F, 0.0F, -1.0F));
+    const NphVec3 eye = nph_vec3_add(nph_dvec3_relative(t->translation, d.origin),
+                                     nph_vec3(0.0F, FIGURE_EYE, 0.0F));
+    nph_render_debug_arrow(r, eye, nph_vec3_mul_add(eye, ahead, 0.6F), color,
+                           NPH_RENDER_DEBUG_OVERLAY);
 }
 
 // The outlines of an entity's physics components (physics_draw.c): where
@@ -243,6 +284,45 @@ static void draw_physics(Editor *ed, NphRenderer *r, NphEntity e, bool selected)
     sink.user = &ol;
     sink.origin = nph_render_debug_origin(r);
     (void)editor_physics_outline(ed, e, &sink);
+}
+
+// The entities the play copy is seen from: the first active Camera's (the
+// world's view while playing) and those above it (the starter game's player,
+// whose eye it is). Their markers and outlines would be drawn around the
+// eye: none is. False past VIEWER_DEPTH or without a camera.
+#define VIEWER_DEPTH 8U
+
+typedef struct Viewer {
+    NphEntity chain[VIEWER_DEPTH];
+    u32 count;
+} Viewer;
+
+static Viewer viewer_of(const NphWorld *w, NphComponentId camera)
+{
+    Viewer v;
+    v.count = 0U;
+    for (u32 i = 0; i < nph_world_entity_slot_count(w); ++i) {
+        const NphEntity e = nph_world_entity_at(w, i);
+        const NphCamera *c = NPH_WORLD_GET(w, e, camera, NphCamera);
+        if (c != NULL && c->active != 0) {
+            for (NphEntity a = e; !nph_entity_is_null(a) && v.count < VIEWER_DEPTH;
+                 a = nph_world_parent(w, a)) {
+                v.chain[v.count++] = a;
+            }
+            break;
+        }
+    }
+    return v;
+}
+
+static bool is_viewer(const Viewer *v, NphEntity e)
+{
+    for (u32 i = 0U; i < v->count; ++i) {
+        if (nph_entity_equals(v->chain[i], e)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The ground grid, markers for lights and cameras (which have no mesh to
@@ -269,11 +349,16 @@ static void overlays(Editor *ed)
     }
     const NphRuntimeComponents *rc = nph_engine_components(engine);
     const NphSceneRenderer *sr = nph_engine_scene_renderer(engine);
+    Viewer viewer;
+    viewer.count = 0U;
+    if (playing) {
+        viewer = viewer_of(w, rc->camera);
+    }
     for (u32 i = 0; i < nph_world_entity_slot_count(w); ++i) {
         const NphEntity e = nph_world_entity_at(w, i);
         const NphWorldTransform *t =
             NPH_WORLD_GET(w, e, NPH_COMPONENT_ID_WORLD_TRANSFORM, NphWorldTransform);
-        if (t == NULL) {
+        if (t == NULL || is_viewer(&viewer, e)) {
             continue;
         }
         // The mesh being edited draws its own edges instead of a box.
@@ -282,6 +367,10 @@ static void overlays(Editor *ed)
             !(editor_mesh_editing(ed) && nph_entity_equals(e, ed->mesh_edit.entity));
         if (selected || ed->show_colliders) {
             draw_physics(ed, r, e, selected);
+        }
+        if (nph_world_has(w, e, rc->player_start) && !playing) {
+            draw_player_start(r, t, selected ? COLOR_SELECTED : COLOR_MARKER);
+            continue;
         }
         const bool marker = nph_world_has(w, e, rc->light) || nph_world_has(w, e, rc->camera);
         if (!selected && !marker) {
@@ -324,7 +413,9 @@ static void camera_input(Editor *ed, bool hovered)
         vp->fly = false;
         vp->orbit = false;
         vp->pan = false;
-        capture_cursor(ed, false);
+        // The game's mouse look (game.h nph_game_capture_mouse): captured while
+        // it has the input; Escape gives the input, and the cursor, back.
+        capture_cursor(ed, vp->game_input && nph_engine_mouse_capture_wanted(ed->engine));
         return;
     }
     if (hovered) {

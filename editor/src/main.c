@@ -3,6 +3,7 @@
 //
 //     nph_editor --pack=showcase.npk --scene=level.nscene
 //     nph_editor --game=game_sandbox.dll editor.layout=my_layout.ini
+//     nph_editor --game=      (Play with no game: the starter game is the default)
 //     nph_editor editor.assets=my_game/assets editor.cooked=my_game/cooked
 //
 // The engine's options and cvars apply (--help, and `cvars` in the
@@ -131,6 +132,16 @@ int main(int argc, char **argv)
         (void)snprintf(note, sizeof note, "editor, project %s%.200s", tail != cwd ? "..." : "",
                        tail);
         nph_crash_set_note(0U, note);
+    }
+    // Play plays the game --game names, else the starter game beside the
+    // editor (ADR-0108 decision 9); --game= (empty) plays none. The path
+    // lives as long as the configuration that points at it.
+    char starter[1024];
+    if (config.game == NULL && editor_starter_game(starter, sizeof starter)) {
+        config.game = starter;
+        NPH_LOG_INFO(&LOG_EDITOR, "no --game: Play plays the starter game (%s)", starter);
+    } else if (config.game != NULL && config.game[0] == '\0') {
+        config.game = NULL;
     }
     const int status = run(&config, &panel);
     nph_engine_crash_handler_uninstall();

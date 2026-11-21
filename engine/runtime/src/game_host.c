@@ -993,6 +993,12 @@ void nph_game_reset_interpolation(NphGame *game, NphEntity entity)
     engine_reset_interpolation(game->engine, entity);
 }
 
+void nph_game_capture_mouse(NphGame *game, b32 capture)
+{
+    NPH_ASSERT(game != NULL);
+    game->engine->mouse_capture_wanted = capture != 0;
+}
+
 NphResult nph_game_action(NphGame *game, const char *name, NphActionId *out)
 {
     NPH_ASSERT(game != NULL && name != NULL && out != NULL);

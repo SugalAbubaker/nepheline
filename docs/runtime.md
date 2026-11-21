@@ -274,6 +274,21 @@ Held state is the latest frame's; edges and mouse motion accumulate until
 a step consumes them. Game code reads its step's input with
 `nph_game_input` and registers actions with `nph_game_action`.
 
+A host without a window (OFFSCREEN, HEADLESS: tests, a remote viewer, a
+replay) feeds window events with `nph_engine_feed_event`: the next frame's
+input takes them after its window's own, as if the window had sent them
+(the host's event hook does not see them), up to `NPH_ENGINE_FED_EVENTS`
+(256) a frame.
+
+**Mouse capture** (ADR-0108). A game that looks with the mouse asks for it
+captured with `nph_game_capture_mouse`: the cursor hidden and its motion
+unbounded while the game has the input. `nph_engine_mouse_capture_wanted`
+says so while playing. A host that routes the window's input itself (an
+event hook: the editor) captures the cursor while it gives the game the
+input and the game asks (Escape gives both back); for one without (the
+player), the engine does, while the window has the focus. The request
+ends with play.
+
 ## From the world to the renderer
 
 The scene renderer (`scene_render.h`) makes the renderer show the world.
@@ -552,6 +567,7 @@ after the game's systems and before the transform system:
 | `Collider` | its shape: a sphere, a capsule along Y, or a box, at a centre and rotation in the entity's frame, scaled by the entity's world scale (a box per axis, a sphere by the largest, a capsule's core by Y and its radius by the larger of X and Z); or every shape of a collision asset (`ASSET`, `collision`: below); its density, friction, restitution, or those of a physics material (`physics_material`: below); its filter (category, mask, group); hit events; `trigger` (below) |
 | `Joint` | a joint from the entity's body to another's, or the world's: ball, hinge, fixed, slider, or distance, with its limits, motor, spring, and breaking force (below) |
 | `CharacterController` | a character the engine walks for the game: an upright capsule (radius, height) standing on the entity's origin, the highest step it climbs, the steepest slope it walks, how far it snaps down to the ground, the mass it pushes with, its gravity scale, its filter; the game's `move` and `jump`; its `velocity`, `grounded`, and `ground` written back (below) |
+| `PlayerStart` | a tag: where a game's player starts, at the entity's position, facing its -Z (the starter game stands its player at the first; the editor marks and picks it) |
 
 A Collider alone is a static body (the level); a RigidBody alone, a point
 of 1 kg (or of its `mass`).
@@ -880,8 +896,56 @@ through the same scenes on the benchmark's own path.
 It exits with 0, 1 on a failure (validation errors included), 2 for a bad
 command line, and 77 without a window system or a device, which CTest
 reports as a skip (`sample.game_sandbox`, `sample.game_sandbox_headless`,
-and `sample.game_physics`; `sample.game_physics_headless` runs the physics
+`sample.game_starter`, `sample.game_starter_headless`, and
+`sample.game_physics`; `sample.game_physics_headless` runs the physics
 sample's autopilot and checks its verdict in the log).
+
+## The starter game
+
+`samples/game_starter` ([ADR-0108](adr/0108-physics-in-levels.md) decision
+9) is a first-person game for walking a level: the editor plays it when no
+game is named (docs/editor.md "Running"), and a game may start from it.
+
+- **Where the player stands.** Play stands a player at the level's first
+  PlayerStart (by entity order), facing its -Z; else under the view the
+  host set (`nph_engine_host_view`: the editor's camera, the player's eye
+  where the camera was, facing where it looked); else at the origin. A
+  level may place its own instead: the first entity with a
+  `starter.Player`, which is given a CharacterController and an eye when it
+  has none.
+- **The player** is a CharacterController with an eye: a child at 0.94 of
+  its height (where a person's eyes are) holding the Camera (69 degrees up
+  the screen, a 5 cm near plane) and the AudioListener. The level's first
+  active Camera lends the eye its exposure and tonemapper, and is put out,
+  with the level's other cameras and listeners, in the play copy alone.
+- **Controls.** The mouse turns the body (its LocalTransform's rotation;
+  the controller keeps it upright) and tilts the eye, the game asking for
+  the mouse captured. W A S D walk (2.5 m/s) and Shift runs (6 m/s) along
+  the ground the body faces; Space jumps (4 m/s up, about 0.8 m), taken
+  when it stands.
+- **E pushes** what the eye's ray meets within its reach (2.5 m), from the
+  point it meets it: an impulse of `push` (40 N s), but no more than gives
+  the body `push_speed` (2.5 m/s), so a light thing is not thrown across
+  the room. A 20 kg crate slides a third of a metre on a floor; a 30 kg door
+  on a hinge swings at about 3 rad/s. The ray ignores the player's own body
+  (`nph_game_physics_body`). What E would push is outlined over the scene,
+  every frame, at its body's pose (it is drawn where it rests, so the
+  outline holds still; a crosshair drawn by the game would trail the
+  interpolated view by up to a step).
+- **Props** are pushed by walking into them (the controller's `push_mass`).
+- **A fall** of 50 m below where it started stands it there again, drawn
+  there at once (`nph_game_reset_interpolation`).
+- `starter.Player`'s fields tune it in the inspector while playing: the
+  speeds, the mouse's (`look_speed`, radians a mouse unit), the reach and
+  the push.
+
+Its system costs about 1 µs a step (Profile: a frame of 12.87 µs against
+11.84 for the same character walked by its component, with an eye turned
+every frame), and the eye's ray for the outline 0.12 µs a frame.
+
+`game_starter_tests` drive it on a headless engine with fed input, one
+step a frame (`test_game_starter.c`). The smoke runs play it for 240
+frames in a window and headless.
 
 ## Crashes
 
@@ -1091,6 +1155,20 @@ body, placed and at rest, before the first step.
   starved; despawned and
   removed sources stop, and one added back plays again; the buses'
   volumes; with audio off, nothing plays.
+
+`game_starter_tests` (against `nepheline_shared`, the starter game
+loaded, its input fed): the player stands at the level's PlayerStart, its
+eye the camera at 0.94 of its height with the level's exposure, the level's
+camera and listener put out in the play copy alone, the mouse asked for
+while it plays; W walks it 2.5 m in a second and Shift runs it 6, the mouse
+turns the body and tilts the eye, and W then walks where the body faces,
+level; Space jumps it 0.82 m and it lands; E pushes a cupboard from where
+the eye's ray meets it, and nothing when it looks at nothing; E swings a
+door on its hinge within reach and not beyond it, the door still on its
+hinge; walking shoves a crate; a fall out of the level stands it back at
+the start; without a PlayerStart (and no host's view) it stands at the
+origin; and a level's own player is driven, given what it lacks in the
+play copy alone.
 
 `samples/game_physics` (`sample.game_physics_headless`): the autopilot
 walks the player round the playground (up the stairs, off the landing, a

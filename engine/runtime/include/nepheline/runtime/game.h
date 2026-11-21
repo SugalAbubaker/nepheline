@@ -225,6 +225,14 @@ NphPhysicsJoint nph_game_physics_joint(const NphGame *game, NphEntity entity);
 // (engine.h nph_engine_reset_interpolation). NPH_THREADSAFE.
 void nph_game_reset_interpolation(NphGame *game, NphEntity entity);
 
+// Asks for the mouse captured while the game has the input (ADR-0108): the
+// cursor hidden and its motion unbounded, for mouse look. The editor captures
+// it while the game has the input (a click on its viewport; Escape gives it
+// back), the player while its window has the focus (engine.h
+// nph_engine_mouse_capture_wanted). False gives the cursor back. Kept across
+// reloads; off when play ends.
+void nph_game_capture_mouse(NphGame *game, b32 capture);
+
 // The input action named `name`, registered with the engine's input on
 // first use (unbound until bindings are added through the engine's input).
 // Actions outlive reloads. NPH_RESULT_FULL past NPH_SIM_INPUT_MAX_ACTIONS.

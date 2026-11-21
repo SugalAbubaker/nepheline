@@ -61,6 +61,11 @@ typedef struct EditorDesc {
 // NPH_RESULT_OUT_OF_MEMORY.
 NPH_MUST_USE NphResult editor_create(const EditorDesc *desc, Editor **out);
 
+// The starter game (samples/game_starter; ADR-0108 decision 9) beside the
+// editor's executable, which Play plays when no game is named (--game): its
+// path into `out` (`cap` bytes), true when the file is there.
+bool editor_starter_game(char *out, u64 cap);
+
 // What the engine is created with: the hooks (`user` the editor), and the
 // asset resolver that names the files of the project's cooked assets by
 // GUID (editor_resolve). The other fields are left as they are.

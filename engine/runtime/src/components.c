@@ -144,6 +144,8 @@ static f32 size_of(f32 v)
     return nph_f32_is_finite(v) && v > 0.0F ? v : 0.0F;
 }
 
+NPH_TAG_DEFINE(NphPlayerStart, "PlayerStart", 0U)
+
 bool nph_collider_shape(const NphCollider *c, NphVec3 scale, NphPhysicsGeometry *out_geometry,
                         NphPhysicsPose *out_pose)
 {
@@ -197,6 +199,7 @@ NphResult nph_runtime_register_components(NphWorld *world, NphRuntimeComponents 
     NPH_TRY(
         nph_world_register_component(world, NphMeshMaterials_component(), &out->mesh_materials));
     NPH_TRY(nph_world_register_component(world, NphJoint_component(), &out->joint));
-    return nph_world_register_component(world, NphCharacterController_component(),
-                                        &out->character_controller);
+    NPH_TRY(nph_world_register_component(world, NphCharacterController_component(),
+                                         &out->character_controller));
+    return nph_world_register_component(world, NphPlayerStart_component(), &out->player_start);
 }
