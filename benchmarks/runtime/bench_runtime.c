@@ -788,6 +788,79 @@ NBENCH(engine_frame_physics_1k_hinged)
     nph_engine_destroy(e);
 }
 
+// CHARACTERS CharacterControllers (ADR-0108) walking at 1.5 m/s on a floor, each in a lane of
+// its own 2 m from the next, and turning back every two seconds: the frame with their moves
+// (as the physics module's character_walk_flat moves 64 characters), their bodies put where
+// they went, and what they did written back.
+#define CHARACTERS 64U
+
+static void walk_all(NphWorld *w, const NphRuntimeComponents *ids, const NphEntity *walkers,
+                     f32 speed)
+{
+    for (u32 i = 0; i < CHARACTERS; ++i) {
+        NPH_WORLD_GET_MUT(w, walkers[i], ids->character_controller, NphCharacterController)->move =
+            nph_vec3(speed, 0.0F, 0.0F);
+    }
+}
+
+NBENCH(engine_frame_physics_64_characters)
+{
+    NphEngine *e = headless_engine();
+    nph_engine_play_end(e);
+    NphWorld *w = nph_engine_edit_world(e);
+    const NphRuntimeComponents *ids = nph_engine_components(e);
+    const NphComponentId floor_comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                           NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->collider};
+    NphEntity floor;
+    if (nph_world_spawn(w, floor_comps, 3U, &floor) != NPH_RESULT_OK) {
+        abort();
+    }
+    NPH_WORLD_GET_MUT(w, floor, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)->translation =
+        nph_dvec3(0.0, -0.5, 0.0);
+    NPH_WORLD_GET_MUT(w, floor, ids->collider, NphCollider)->half_extents =
+        nph_vec3(100.0F, 0.5F, 100.0F);
+    const NphComponentId comps[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                     NPH_COMPONENT_ID_WORLD_TRANSFORM, ids->character_controller};
+    NphEntity walkers[CHARACTERS];
+    for (u32 i = 0; i < CHARACTERS; ++i) {
+        if (nph_world_spawn(w, comps, 3U, &walkers[i]) != NPH_RESULT_OK) {
+            abort();
+        }
+        NPH_WORLD_GET_MUT(w, walkers[i], NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform)
+            ->translation = nph_dvec3(0.0, 0.0, 2.0 * (f64)i - 64.0);
+    }
+    if (nph_engine_play_begin(e, false) != NPH_RESULT_OK) {
+        abort();
+    }
+    NphWorld *played = nph_engine_world(e); // the edited world itself: its handles hold
+    f32 speed = 1.5F;
+    walk_all(played, ids, walkers, speed);
+    for (u32 i = 0; i < 8U; ++i) {
+        frame(e);
+    }
+    if (nph_engine_wait(e) != NPH_RESULT_OK ||
+        nph_engine_physics_stats(e)->bodies != CHARACTERS + 1U ||
+        NPH_WORLD_GET(played, walkers[0], ids->character_controller, NphCharacterController)
+                ->grounded == 0) {
+        fail("the characters are not walking on the floor");
+    }
+    u32 n = 0U;
+    while (nbench_keep_running(state)) {
+        if (++n % 480U == 0U) {
+            // Turning back is not timed.
+            if (nph_engine_wait(e) != NPH_RESULT_OK) {
+                abort();
+            }
+            nbench_pause_timing(state);
+            speed = -speed;
+            walk_all(played, ids, walkers, speed);
+            nbench_resume_timing(state);
+        }
+        frame(e);
+    }
+    nph_engine_destroy(e);
+}
+
 NBENCH(physics_step_1k_spinning)
 {
     NphJobSystemDesc jd;

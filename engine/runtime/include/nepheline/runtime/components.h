@@ -226,7 +226,9 @@ NPH_COMPONENT_DECLARE(NphEnvironment);
 //     part's new LocalTransform places it again in its body.
 // Bodies move in the world: a dynamic body's parent moving does not carry
 // it (its LocalTransform is written relative to wherever the parent is), a
-// static or kinematic one follows its parent.
+// static or kinematic one follows its parent. An entity with a
+// CharacterController is a character instead (below), whose RigidBody and
+// Collider make no body.
 
 typedef enum NphRigidBodyType {
     NPH_RIGID_BODY_STATIC = 0,    // stays where the game puts it: the level
@@ -372,6 +374,53 @@ NPH_COMPONENT_DECLARE(NphJoint);
 
 NPH_STATIC_ASSERT(sizeof(NphJoint) == 96U, "Joint is 96 bytes");
 
+// A character controller (ADR-0108; physics/character.h): a capsule `height`
+// tall and `radius` round (a ball when the height is under twice the radius),
+// upright, standing on the entity's origin, which the engine moves every step
+// before the physics step as a person walks: along what it meets, up steps
+// as high as `step_height`, never up slopes steeper than `max_slope`
+// (radians), and kept to the ground over drops as small as `snap_distance`.
+//   - The game drives it by `move`, a velocity along the ground in world axes
+//     (its part along +Y is ignored), and `jump`, an upward speed taken when
+//     it stands and cleared at every step, taken or not.
+//   - Off the ground the world's gravity times `gravity_scale` pulls it, and
+//     it keeps the velocity it left the ground with (a platform's too); on
+//     the ground, what it stands on carries it.
+//   - What it walks into is pushed as by a body of `push_mass` kg (0: nothing
+//     is pushed).
+//   - After each step the engine writes the entity's LocalTransform's
+//     translation (its rotation stays the game's: the capsule never turns,
+//     and the entity's scale does not size it), and, for the game to read,
+//     `velocity` (m/s, what it moved over the step), `grounded` (on ground no
+//     steeper than `max_slope`), and `ground` (the entity of what it stands
+//     on, or the null entity). A game that writes the translation puts it
+//     there, at rest: a respawn (game.h nph_game_reset_interpolation draws
+//     it there at once).
+// Its body is kinematic, its capsule a ghost (physics/shape.h): it touches
+// nothing, so bodies do not collide with it (the next move pushes it out of
+// what moved into it), but rays and triggers see it, by its filter
+// (`category`, `mask`), which is also what its moves meet. The entity's
+// RigidBody and Collider, if it has them, make no body.
+#define NPH_CHARACTER_CONTROLLER_FIELDS(F)                                                         \
+    F(F32, radius, NPH_FIELD_RANGE(0.01F, 10.0F))                                                  \
+    F(F32, height, NPH_FIELD_RANGE(0.02F, 20.0F))                                                  \
+    F(F32, step_height, NPH_FIELD_RANGE(0.0F, 2.0F))                                               \
+    F(F32, max_slope, NPH_FIELD_HINTS(NPH_FIELD_FLAG_RANGE | NPH_FIELD_FLAG_ANGLE, 0.0F, 1.5533F)) \
+    F(F32, snap_distance, NPH_FIELD_RANGE(0.0F, 2.0F))                                             \
+    F(F32, push_mass, NPH_FIELD_RANGE(0.0F, 10000.0F))                                             \
+    F(F32, gravity_scale, NPH_FIELD_RANGE(-10.0F, 10.0F))                                          \
+    F(VEC3, move, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_TRANSIENT))                                       \
+    F(F32, jump, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_TRANSIENT))                                        \
+    F(VEC3, velocity, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_READONLY | NPH_FIELD_FLAG_TRANSIENT))         \
+    F(BOOL, grounded, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_READONLY | NPH_FIELD_FLAG_TRANSIENT))         \
+    F(ENTITY, ground, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_READONLY | NPH_FIELD_FLAG_TRANSIENT))         \
+    F(U64, category, NPH_FIELD_NO_HINTS)                                                           \
+    F(U64, mask, NPH_FIELD_NO_HINTS)
+NPH_COMPONENT_STRUCT(NphCharacterController, NPH_CHARACTER_CONTROLLER_FIELDS);
+NPH_COMPONENT_DECLARE(NphCharacterController);
+
+NPH_STATIC_ASSERT(sizeof(NphCharacterController) == 80U, "CharacterController is 80 bytes");
+
 // ---------------------------------------------------------------------------
 // Audio (docs/runtime.md "Audio"; docs/adr/0058-audio-in-the-engine.md)
 // ---------------------------------------------------------------------------
@@ -484,9 +533,10 @@ typedef struct NphRuntimeComponents {
     NphComponentId world_cell;
     NphComponentId mesh_materials;
     NphComponentId joint;
+    NphComponentId character_controller;
 } NphRuntimeComponents;
 
-#define NPH_RUNTIME_COMPONENT_COUNT 11U
+#define NPH_RUNTIME_COMPONENT_COUNT 12U
 
 // Registers the runtime's components (idempotent: a world that has them
 // returns the same ids). Errors of nph_world_register_component.

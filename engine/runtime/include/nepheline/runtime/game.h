@@ -179,18 +179,19 @@ u64 nph_game_step(const NphGame *game);
 // run at once; systems that only query declare a read.
 NphPhysicsWorld *nph_game_physics(const NphGame *game);
 
-// The body of an entity's RigidBody or Collider while playing, or a null
-// handle.
+// The body of an entity's RigidBody, Collider, or CharacterController while
+// playing, or a null handle (engine.h nph_engine_physics_body).
 NphPhysicsBody nph_game_physics_body(const NphGame *game, NphEntity entity);
 
 // The entity a body belongs to, or the null entity (engine.h
 // nph_engine_physics_entity): what a hit or a contact names.
 NphEntity nph_game_physics_entity(const NphGame *game, NphPhysicsBody body);
 
-// A Collider that began or stopped overlapping a trigger (components.h
-// Collider `trigger`; ADR-0108): the trigger's entity, the visitor's (its
-// Collider's), and the entity whose body the visitor's shapes are on (the
-// visitor's own, or the compound's above it).
+// A Collider or a character that began or stopped overlapping a trigger
+// (components.h Collider `trigger`; ADR-0108): the trigger's entity, the
+// visitor's (its Collider's, or its CharacterController's), and the entity
+// whose body the visitor's shapes are on (the visitor's own, or the
+// compound's above it).
 typedef struct NphTriggerEvent {
     NphEntity trigger;
     NphEntity visitor;

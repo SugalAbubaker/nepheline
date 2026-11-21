@@ -54,6 +54,15 @@
 // is joined again after breaking; a change of its settings (limits, motor,
 // spring), or a body made again for the same entity, makes it again from the
 // frames it had, so its angle and length keep their zero.
+//
+// Characters (ADR-0108): a CharacterController's character is the physics
+// module's (physics/character.h), moved by the bridge every step before the
+// physics step; its kinematic body's ghost capsule goes where it went over
+// the step, so that triggers and rays see it there. On the ground, what it
+// stands on carries it by where its point of contact went over the last step
+// (that body's motion, turns included); off the ground it keeps the velocity
+// it left with, and gravity pulls it. Characters are met every step by a
+// query of their own; one not met is gone.
 #include <nepheline/asset/collision.h>
 #include <nepheline/asset/physics_material.h>
 #include <nepheline/core/assert.h>
@@ -62,6 +71,7 @@
 #include <nepheline/core/profile.h>
 #include <nepheline/math/mat.h>
 #include <nepheline/physics/body.h>
+#include <nepheline/physics/character.h>
 #include <nepheline/physics/hull.h>
 #include <nepheline/physics/joint.h>
 #include <nepheline/physics/mesh.h>
@@ -235,6 +245,32 @@ typedef struct JointRecord {
     u32 generation; // the bridge's body_generation when last settled
 } JointRecord;
 
+enum {
+    // Its component is no capsule (logged): no body, and it does not move until it changes.
+    CHARACTER_INVALID = 1U << 0U,
+};
+
+// A CharacterController's character: its kinematic body and ghost capsule, the physics
+// module's description and state, and what the bridge keeps between steps: the velocity it
+// keeps off the ground, the translation it last wrote or read (another is the game's: a
+// teleport), and what it stood on at its last move with that body's pose then (what carries
+// it).
+typedef struct CharacterRecord {
+    NphEntity entity;
+    u32 flags; // CHARACTER_*
+    u32 mark;  // the character pass that last met it
+    NphPhysicsBody body;
+    NphPhysicsShape shape;
+    NphCharacterController settings; // as made: its capsule's and moves' settings compared
+    NphPhysicsCharacterDesc desc;
+    NphPhysicsCharacter state;
+    NphVec3 fall; // m/s off the ground: its ground's and a jump's when it left, and gravity's
+    NphDVec3 written;
+    NphPhysicsBody carrier;
+    NphDVec3 carrier_position;
+    NphQuat carrier_rotation;
+} CharacterRecord;
+
 typedef struct ScaledCopy {
     CopyKey key;
     u32 kind; // NphCollisionShapeKind; 0: a free slot
@@ -298,6 +334,13 @@ struct PhysicsBridge {
     TriggerKeyArray trigger_step; // the pairs this step's events touched, in order
     TriggerEventArray entered;    // the last step's
     TriggerEventArray left;
+    // Characters (ADR-0108).
+    NphQuery *character_query; // CharacterController, LocalTransform: both written
+    CharacterRecord *characters;
+    u32 character_count;
+    u32 character_cap;
+    NphHashMap character_index; // entity value -> u32
+    u32 character_mark;         // character passes so far
 };
 
 // ---------------------------------------------------------------------------
@@ -2015,6 +2058,26 @@ static const BodyRecord *shape_record(const PhysicsBridge *b, u32 entity, NphPhy
     return NULL;
 }
 
+static const CharacterRecord *character_of(const PhysicsBridge *b, NphEntity e);
+
+// The entity whose body a visitor's shape is on, when the bridge made the
+// shape: a Collider's (its compound's for a part), or a character's ghost.
+static bool visitor_body(const PhysicsBridge *b, u32 entity, NphPhysicsShape shape, u32 *out)
+{
+    const BodyRecord *v = shape_record(b, entity, shape);
+    if (v != NULL) {
+        *out = (v->flags & BODY_PART) != 0U ? v->owner.value : v->entity.value;
+        return true;
+    }
+    const NphEntity e = {entity};
+    const CharacterRecord *c = character_of(b, e);
+    if (c != NULL && !nph_physics_body_is_null(c->body) && c->shape.value == shape.value) {
+        *out = entity;
+        return true;
+    }
+    return false;
+}
+
 // One sensor event into its pair's count: `+1` begun, `-1` ended. A begin
 // counts only between shapes the bridge made (the game's own sensors and
 // bodies report through the physics world); an end counts where a begin did.
@@ -2026,13 +2089,13 @@ static void count_trigger(PhysicsBridge *b, const NphPhysicsSensorEvent *ev, boo
     TriggerPair *pair = NPH_HASHMAP_FIND(&b->trigger_pairs, TriggerPair, &key);
     if (begun && pair == NULL) {
         const BodyRecord *t = shape_record(b, key.trigger, ev->sensor);
-        const BodyRecord *v = shape_record(b, key.visitor, ev->visitor);
-        if (t == NULL || v == NULL) {
+        u32 body = 0U;
+        if (t == NULL || !visitor_body(b, key.visitor, ev->visitor, &body)) {
             return;
         }
         TriggerPair fresh;
         memset(&fresh, 0, sizeof fresh);
-        fresh.body = (v->flags & BODY_PART) != 0U ? v->owner.value : v->entity.value;
+        fresh.body = body;
         if (nph_hashmap_insert(&b->trigger_pairs, &key, &fresh) != NPH_RESULT_OK) {
             return; // out of memory: this overlap is not reported
         }
@@ -2461,6 +2524,367 @@ static void break_joints(PhysicsBridge *b)
 }
 
 // ---------------------------------------------------------------------------
+// Characters (ADR-0108)
+// ---------------------------------------------------------------------------
+
+// The surfaces a move reports, for its pushes and the velocity it keeps (a move slides at most
+// its four iterations, each meeting a surface or two).
+#define CHARACTER_HITS 8U
+
+// The settings a character is made from: its capsule, what its moves climb and meet. Its push,
+// its gravity, and the game's commands are read at every move.
+static bool character_settings_equal(const NphCharacterController *a,
+                                     const NphCharacterController *b)
+{
+    return f32_bits_equal(a->radius, b->radius) && f32_bits_equal(a->height, b->height) &&
+           f32_bits_equal(a->step_height, b->step_height) &&
+           f32_bits_equal(a->max_slope, b->max_slope) &&
+           f32_bits_equal(a->snap_distance, b->snap_distance) && a->category == b->category &&
+           a->mask == b->mask;
+}
+
+// The physics module's description of a CharacterController's character: its capsule upright
+// (a ball under twice its radius in height), the physics module's skin and slides, its limits,
+// and its filter. False when that is no character (a radius that is not positive and finite).
+static bool character_desc(const NphCharacterController *c, NphPhysicsCharacterDesc *d)
+{
+    if (!(nph_f32_is_finite(c->radius) && c->radius > 0.0F)) {
+        return false;
+    }
+    const f32 half = nph_f32_max(0.5F * nonneg(c->height) - c->radius, 0.0F);
+    *d = nph_physics_character_desc_default(nph_physics_geometry_capsule(half, c->radius));
+    d->max_slope = nph_f32_clamp(finite_or(c->max_slope, d->max_slope), 0.0F, 1.5533F);
+    d->step_height = nonneg(c->step_height);
+    d->snap_distance = nonneg(c->snap_distance);
+    d->filter.category = c->category;
+    d->filter.mask = c->mask;
+    return nph_physics_character_desc_validate(d) == NPH_RESULT_OK;
+}
+
+// How far a character's capsule's centre is above its feet, the entity's origin: a skin under
+// its bottom, so a character placed on a floor stands on it.
+static f32 character_rise(const CharacterRecord *r)
+{
+    return r->desc.skin + r->desc.shape.capsule.half_height + r->desc.shape.capsule.radius;
+}
+
+static NphDVec3 character_feet(const CharacterRecord *r)
+{
+    return nph_dvec3_add_vec3(r->state.position, nph_vec3(0.0F, -character_rise(r), 0.0F));
+}
+
+// Where the entity is in the world: its feet.
+static NphDVec3 entity_feet(const PhysicsBridge *b, NphEntity e, const NphLocalTransform *lt)
+{
+    return entity_pose(b, e, lt).position;
+}
+
+// What the character stands on, and that body's pose: what carries it at its next move (none
+// off the ground).
+static void note_carrier(PhysicsBridge *b, CharacterRecord *r)
+{
+    r->carrier = NPH_PHYSICS_BODY_NULL;
+    const NphPhysicsBody g = r->state.ground_body;
+    if (r->state.ground != NPH_PHYSICS_CHARACTER_WALKABLE || nph_physics_body_is_null(g)) {
+        return;
+    }
+    r->carrier = g;
+    r->carrier_position = nph_physics_body_position(b->physics, g);
+    r->carrier_rotation = nph_physics_body_rotation(b->physics, g);
+}
+
+// Where the point the character stood on went since its last move, with the body it stood on:
+// what that body's motion carries it by. Nothing when the body went or did not move (exactly:
+// its pose's bits). A rise under a micrometre is a level motion's rounding, and none: any rise
+// keeps the physics module's move from walking (character.h), which climbs steps and keeps to
+// the ground.
+static NphVec3 carried(const PhysicsBridge *b, const CharacterRecord *r)
+{
+    const NphPhysicsBody g = r->carrier;
+    if (nph_physics_body_is_null(g) || !nph_physics_body_is_valid(b->physics, g)) {
+        return nph_vec3_zero();
+    }
+    const NphDVec3 position = nph_physics_body_position(b->physics, g);
+    const NphQuat rotation = nph_physics_body_rotation(b->physics, g);
+    if (dvec3_bits_equal(position, r->carrier_position) &&
+        quat_bits_equal(rotation, r->carrier_rotation)) {
+        return nph_vec3_zero();
+    }
+    const NphVec3 arm = nph_quat_rotate_inverse(
+        r->carrier_rotation, nph_dvec3_relative(r->state.ground_point, r->carrier_position));
+    const NphDVec3 now = nph_dvec3_add_vec3(position, nph_quat_rotate(rotation, arm));
+    NphVec3 d = finite_vec3(nph_dvec3_relative(now, r->state.ground_point));
+    if (nph_f32_abs(d.y) < 1e-6F) {
+        d.y = 0.0F;
+    }
+    return d;
+}
+
+// The character where `feet` are, its ground found there, at rest; its body put there.
+static void place_character(PhysicsBridge *b, CharacterRecord *r, NphDVec3 feet)
+{
+    const NphDVec3 center = nph_dvec3_add_vec3(feet, nph_vec3(0.0F, character_rise(r), 0.0F));
+    NPH_IGNORE_RESULT(
+        nph_physics_character_init(b->physics, &r->desc, center, nph_quat_identity(), &r->state));
+    r->fall = nph_vec3_zero();
+    note_carrier(b, r);
+    if (!nph_physics_body_is_null(r->body)) {
+        nph_physics_body_set_transform(b->physics, r->body, center, nph_quat_identity());
+        nph_physics_body_set_linear_velocity(b->physics, r->body, nph_vec3_zero());
+    }
+}
+
+static void unmake_character(PhysicsBridge *b, CharacterRecord *r)
+{
+    if (b->physics != NULL && !nph_physics_body_is_null(r->body)) {
+        nph_physics_body_destroy(b->physics, r->body);
+    }
+    r->body = NPH_PHYSICS_BODY_NULL;
+    r->shape = NPH_PHYSICS_SHAPE_NULL;
+}
+
+// The character's body (kinematic, its capsule a ghost that rays and triggers see by its
+// filter) and state where `feet` are, from its component; none, logged once until it changes,
+// when the component is no character. A body that cannot be made is logged: the character
+// moves without one, unseen.
+static void make_character(PhysicsBridge *b, CharacterRecord *r, const NphCharacterController *c,
+                           NphDVec3 feet)
+{
+    unmake_character(b, r);
+    r->settings = *c;
+    if (!character_desc(c, &r->desc)) {
+        if ((r->flags & CHARACTER_INVALID) == 0U) {
+            NPH_LOG_WARN(&NPH_LOG_RUNTIME,
+                         "entity 0x%08x: its CharacterController is no capsule; it does not move "
+                         "until it changes",
+                         r->entity.value);
+        }
+        r->flags |= CHARACTER_INVALID;
+        return;
+    }
+    r->flags &= ~(u32)CHARACTER_INVALID;
+    NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+    bd.type = NPH_PHYSICS_BODY_KINEMATIC;
+    bd.position = nph_dvec3_add_vec3(feet, nph_vec3(0.0F, character_rise(r), 0.0F));
+    bd.user_data = r->entity.value;
+    NphResult res = nph_physics_body_create(b->physics, &bd, &r->body);
+    if (res == NPH_RESULT_OK) {
+        NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(r->desc.shape);
+        sd.ghost = 1;
+        sd.contact_events = 0;
+        sd.filter.category = c->category;
+        sd.filter.mask = c->mask;
+        sd.filter.group = 0;
+        sd.user_data = r->entity.value;
+        res = nph_physics_shape_create(b->physics, r->body, &sd, &r->shape);
+        if (res != NPH_RESULT_OK) {
+            unmake_character(b, r);
+        }
+    } else {
+        r->body = NPH_PHYSICS_BODY_NULL;
+    }
+    if (res != NPH_RESULT_OK) {
+        NPH_LOG_WARN(&NPH_LOG_RUNTIME, "entity 0x%08x: no body for its character (%s): unseen",
+                     r->entity.value, nph_result_string(res));
+    }
+    // Its own moves pass through its own body.
+    r->desc.filter.ignore = r->body;
+    place_character(b, r, feet);
+}
+
+// The translation of `e`'s LocalTransform that puts it at `position` in the world: against its
+// parent's world transform (its scale and shear divided out, as local_from_pose does), or the
+// position itself for a root; `keep` for a degenerate parent.
+static NphDVec3 local_translation(const PhysicsBridge *b, NphEntity e, NphDVec3 position,
+                                  NphDVec3 keep)
+{
+    const NphWorldTransform *pw = parent_transform(b, e);
+    if (pw == NULL) {
+        return position;
+    }
+    NphMat3 inv;
+    if (!nph_mat3_inverse(nph_world_transform_linear(pw), &inv)) {
+        return keep;
+    }
+    const NphVec3 d = nph_dvec3_to_vec3(nph_dvec3_sub(position, pw->translation));
+    return nph_dvec3_from_vec3(nph_mat3_mul_vec3(inv, d));
+}
+
+// A character's step: where it goes for the game's commands, its ground's motion and gravity,
+// what it pushes on the way, the velocity it keeps, its body put where it went, and all of it
+// written back.
+static void move_character(PhysicsBridge *b, CharacterRecord *r, NphCharacterController *c,
+                           NphLocalTransform *lt, f32 dt)
+{
+    NphPhysicsWorld *w = b->physics;
+    const NphVec3 up = nph_vec3_unit_y();
+    const NphDVec3 from = r->state.position;
+    const NphVec3 move = finite_vec3(c->move);
+    const NphVec3 walk = nph_vec3_mul_add(move, up, -nph_vec3_dot(move, up)); // along the ground
+    NphVec3 displacement;
+    if (r->state.ground == NPH_PHYSICS_CHARACTER_WALKABLE) {
+        // On its feet: it walks, what it stands on carries it, and it may jump. Should this
+        // move leave the ground, it keeps its ground's velocity and the jump's.
+        const f32 jump = nph_f32_is_finite(c->jump) && c->jump > 0.0F ? c->jump : 0.0F;
+        displacement = nph_vec3_add(nph_vec3_scale(walk, dt), carried(b, r));
+        displacement = nph_vec3_mul_add(displacement, up, jump * dt);
+        r->fall = nph_vec3_mul_add(r->state.ground_velocity, up, jump);
+    } else {
+        // Off its feet (in the air, or on a slope too steep to stand on): gravity pulls it, and
+        // it keeps what it has.
+        const NphVec3 g = nph_physics_world_gravity(w);
+        r->fall = nph_vec3_mul_add(r->fall, g, finite_or(c->gravity_scale, 1.0F) * dt);
+        displacement = nph_vec3_scale(nph_vec3_add(walk, r->fall), dt);
+    }
+    displacement = finite_vec3(displacement);
+    NphPhysicsCharacterHit hits[CHARACTER_HITS];
+    u32 hit_count = 0U;
+    if (nph_physics_character_move(w, &r->desc, &r->state, displacement, hits, CHARACTER_HITS,
+                                   &hit_count) != NPH_RESULT_OK) {
+        hit_count = 0U; // not for a valid description and a finite displacement
+    }
+    const f32 inv_dt = 1.0F / dt;
+    const f32 push = nonneg(c->push_mass);
+    if (push > 0.0F && hit_count > 0U) {
+        nph_physics_character_push(w, hits, hit_count, push, nph_vec3_scale(displacement, inv_dt));
+    }
+    // What it ran into takes its part of the velocity it keeps: a ceiling stops a jump, a wall
+    // the way into it, a steep slope all but the way along it.
+    for (u32 i = 0U; i < hit_count; ++i) {
+        const f32 into = nph_vec3_dot(r->fall, hits[i].normal);
+        if (into < 0.0F) {
+            r->fall = nph_vec3_mul_add(r->fall, hits[i].normal, -into);
+        }
+    }
+    note_carrier(b, r);
+    const NphDVec3 to = r->state.position;
+    if (!nph_physics_body_is_null(r->body)) {
+        // Its body goes there over the step, as a kinematic platform does, its proxy kept by the
+        // step's refit: a teleport moves a proxy in the tree and looks for its pairs again at
+        // every step (0.8 us a character). Triggers and rays after the step see it where the
+        // character went; the other characters' moves see it where it was.
+        const NphVec3 to_go = nph_dvec3_relative(to, nph_physics_body_position(w, r->body));
+        nph_physics_body_set_linear_velocity(w, r->body,
+                                             finite_vec3(nph_vec3_scale(to_go, inv_dt)));
+    }
+    lt->translation = local_translation(b, r->entity, character_feet(r), lt->translation);
+    r->written = lt->translation;
+    const bool standing = r->state.ground == NPH_PHYSICS_CHARACTER_WALKABLE;
+    c->velocity = nph_vec3_scale(nph_dvec3_relative(to, from), inv_dt);
+    c->grounded = standing ? 1 : 0;
+    c->ground = standing ? physics_bridge_entity(b, r->state.ground_body) : NPH_ENTITY_NULL;
+    c->jump = 0.0F;
+}
+
+static NphResult grow_characters(PhysicsBridge *b)
+{
+    if (b->character_count < b->character_cap) {
+        return NPH_RESULT_OK;
+    }
+    const u32 cap = nph_max_u32(8U, 2U * b->character_cap);
+    CharacterRecord *grown = NPH_ALLOC_ARRAY(b->alloc, CharacterRecord, cap);
+    if (grown == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    if (b->characters != NULL) {
+        memcpy(grown, b->characters, (u64)b->character_count * sizeof *grown);
+        NPH_FREE_ARRAY(b->alloc, CharacterRecord, b->characters, b->character_cap);
+    }
+    b->characters = grown;
+    b->character_cap = cap;
+    return NPH_RESULT_OK;
+}
+
+static void drop_character(PhysicsBridge *b, u32 index)
+{
+    CharacterRecord *r = &b->characters[index];
+    unmake_character(b, r);
+    NPH_IGNORE_RESULT(nph_hashmap_remove(&b->character_index, &r->entity.value));
+    const u32 last = b->character_count - 1U;
+    if (index != last) {
+        b->characters[index] = b->characters[last];
+        NPH_IGNORE_RESULT(
+            nph_hashmap_set(&b->character_index, &b->characters[index].entity.value, &index));
+    }
+    b->character_count = last;
+}
+
+static const CharacterRecord *character_of(const PhysicsBridge *b, NphEntity e)
+{
+    const u32 *index = NPH_HASHMAP_FIND(&b->character_index, u32, &e.value);
+    return index != NULL && b->characters[*index].entity.value == e.value ? &b->characters[*index]
+                                                                          : NULL;
+}
+
+// A character the pass met: made where its entity is when new, made again where it stands when
+// its settings changed, put where the game wrote its translation; with `move`, moved.
+static NphResult visit_character(PhysicsBridge *b, NphEntity e, NphCharacterController *c,
+                                 NphLocalTransform *lt, bool move, f32 dt)
+{
+    const u32 *known = NPH_HASHMAP_FIND(&b->character_index, u32, &e.value);
+    CharacterRecord *r = NULL;
+    if (known == NULL) {
+        NPH_TRY(grow_characters(b));
+        const u32 index = b->character_count;
+        NPH_TRY(nph_hashmap_insert(&b->character_index, &e.value, &index));
+        b->character_count += 1U;
+        r = &b->characters[index];
+        memset(r, 0, sizeof *r);
+        r->entity = e;
+        r->written = lt->translation;
+        make_character(b, r, c, entity_feet(b, e, lt));
+    } else {
+        r = &b->characters[*known];
+        const bool placed = !dvec3_bits_equal(lt->translation, r->written);
+        r->written = lt->translation;
+        if (!character_settings_equal(c, &r->settings)) {
+            const bool was_valid = (r->flags & CHARACTER_INVALID) == 0U;
+            make_character(b, r, c,
+                           was_valid && !placed ? character_feet(r) : entity_feet(b, e, lt));
+        } else if (placed && (r->flags & CHARACTER_INVALID) == 0U) {
+            place_character(b, r, entity_feet(b, e, lt)); // the game's teleport
+        }
+    }
+    r->mark = b->character_mark;
+    if (move && (r->flags & CHARACTER_INVALID) == 0U) {
+        move_character(b, r, c, lt, dt);
+    }
+    return NPH_RESULT_OK;
+}
+
+// Every character: made, brought up to date and, with `move`, moved for this step (each seeing
+// the others' bodies where they were when the step began, whatever their order); those the
+// pass did not meet (despawned, their component or LocalTransform gone) dropped with their
+// bodies.
+static NphResult character_pass(PhysicsBridge *b, bool move, u32 tick, f32 dt)
+{
+    if (b->character_count == 0U && nph_query_archetype_count(b->character_query) == 0U) {
+        return NPH_RESULT_OK; // a world that never had a character pays nothing for them
+    }
+    b->character_mark += 1U;
+    NphQueryIter it;
+    NphChunkView v;
+    nph_query_iter_since(b->character_query, 0U, tick, &it);
+    NphResult r = NPH_RESULT_OK;
+    while (r == NPH_RESULT_OK && nph_query_next(&it, &v)) {
+        NphCharacterController *c = NPH_CHUNK_COLUMN(&v, 0, NphCharacterController);
+        NphLocalTransform *lt = NPH_CHUNK_COLUMN(&v, 1, NphLocalTransform);
+        for (u32 i = 0; r == NPH_RESULT_OK && i < v.count; ++i) {
+            r = visit_character(b, v.entities[i], &c[i], &lt[i], move, dt);
+        }
+    }
+    if (r != NPH_RESULT_OK) {
+        return r; // the records not met yet are kept: the next pass meets them
+    }
+    for (u32 i = b->character_count; i-- > 0U;) {
+        if (b->characters[i].mark != b->character_mark) {
+            drop_character(b, i);
+        }
+    }
+    return NPH_RESULT_OK;
+}
+
+// ---------------------------------------------------------------------------
 // The step
 // ---------------------------------------------------------------------------
 
@@ -2489,10 +2913,14 @@ static void read_events(PhysicsBridge *b)
         }
         bool drop = ev->type == NPH_WORLD_EVENT_DESPAWNED;
         if (ev->type == NPH_WORLD_EVENT_ADDED || ev->type == NPH_WORLD_EVENT_REMOVED) {
+            // A CharacterController coming takes the place of the entity's
+            // body, and one going gives it back (its character goes by the
+            // character pass, which no longer meets it).
+            const bool character = ev->component == ids->character_controller;
             drop = ev->component == ids->rigid_body || ev->component == ids->collider ||
-                   ev->component == NPH_COMPONENT_ID_LOCAL_TRANSFORM;
+                   ev->component == NPH_COMPONENT_ID_LOCAL_TRANSFORM || character;
             if (ev->component == ids->rigid_body ||
-                ev->component == NPH_COMPONENT_ID_LOCAL_TRANSFORM) {
+                ev->component == NPH_COMPONENT_ID_LOCAL_TRANSFORM || character) {
                 // Colliders below it may have become parts of its body, or
                 // stopped being: every one is looked at again.
                 b->full_pass = 1;
@@ -2724,6 +3152,13 @@ static void physics_system(NphSystemContext *ctx)
     follow_parents(b, dt);
     stop_targets(b);
     NPH_PROFILE_END();
+    if (r == NPH_RESULT_OK &&
+        (b->character_count > 0U || nph_query_archetype_count(b->character_query) > 0U)) {
+        // With every body where the game put it: the characters' moves, before the step.
+        NPH_PROFILE_BEGIN("runtime.physics_characters");
+        r = character_pass(b, true, ctx->tick, dt);
+        NPH_PROFILE_END();
+    }
     if (r == NPH_RESULT_OK) {
         NPH_PROFILE_BEGIN("runtime.physics_step");
         r = nph_physics_world_step(b->physics, dt, b->engine->jobs);
@@ -2753,31 +3188,38 @@ static void destroy_queries(PhysicsBridge *b)
     nph_query_destroy(b->static_query);
     nph_query_destroy(b->write_query);
     nph_query_destroy(b->joint_query);
+    nph_query_destroy(b->character_query);
     b->rigid_query = NULL;
     b->static_query = NULL;
     b->write_query = NULL;
     b->joint_query = NULL;
+    b->character_query = NULL;
 }
 
 static NphResult make_queries(PhysicsBridge *b)
 {
     const NphRuntimeComponents *ids = &b->engine->ids;
-    const NphQueryTerm rigid_terms[3] = {
+    // An entity with a CharacterController is its character, whatever else it has.
+    const NphQueryTerm rigid_terms[4] = {
         nph_term_changed(nph_term_read(ids->rigid_body)),
         nph_term_changed(nph_term_read(NPH_COMPONENT_ID_LOCAL_TRANSFORM)),
-        nph_term_changed(nph_term_optional(ids->collider, NPH_ACCESS_READ))};
-    const NphQueryTerm static_terms[3] = {
+        nph_term_changed(nph_term_optional(ids->collider, NPH_ACCESS_READ)),
+        nph_term_without(ids->character_controller)};
+    const NphQueryTerm static_terms[4] = {
         nph_term_changed(nph_term_read(ids->collider)),
         nph_term_changed(nph_term_read(NPH_COMPONENT_ID_LOCAL_TRANSFORM)),
-        nph_term_without(ids->rigid_body)};
+        nph_term_without(ids->rigid_body), nph_term_without(ids->character_controller)};
     const NphQueryTerm write_terms[2] = {nph_term_write(ids->rigid_body),
                                          nph_term_write(NPH_COMPONENT_ID_LOCAL_TRANSFORM)};
     const NphQueryTerm joint_terms[2] = {nph_term_changed(nph_term_read(ids->joint)),
                                          nph_term_read(NPH_COMPONENT_ID_LOCAL_TRANSFORM)};
-    const NphQueryDesc rq = {rigid_terms, 3U};
-    const NphQueryDesc sq = {static_terms, 3U};
+    const NphQueryTerm character_terms[2] = {nph_term_write(ids->character_controller),
+                                             nph_term_write(NPH_COMPONENT_ID_LOCAL_TRANSFORM)};
+    const NphQueryDesc rq = {rigid_terms, 4U};
+    const NphQueryDesc sq = {static_terms, 4U};
     const NphQueryDesc wq = {write_terms, 2U};
     const NphQueryDesc jq = {joint_terms, 2U};
+    const NphQueryDesc cq = {character_terms, 2U};
     NphResult r = nph_query_create(b->world, &rq, &b->rigid_query);
     if (r == NPH_RESULT_OK) {
         r = nph_query_create(b->world, &sq, &b->static_query);
@@ -2787,6 +3229,9 @@ static NphResult make_queries(PhysicsBridge *b)
     }
     if (r == NPH_RESULT_OK) {
         r = nph_query_create(b->world, &jq, &b->joint_query);
+    }
+    if (r == NPH_RESULT_OK) {
+        r = nph_query_create(b->world, &cq, &b->character_query);
     }
     if (r != NPH_RESULT_OK) {
         destroy_queries(b);
@@ -2857,6 +3302,16 @@ NphResult physics_bridge_create(NphEngine *e, PhysicsBridge **out)
             nph_hashmap_free(&b->joint_index);
         }
     }
+    if (r == NPH_RESULT_OK) {
+        r = nph_hashmap_init(&b->character_index, alloc, &jd);
+        if (r != NPH_RESULT_OK) {
+            nph_hashmap_free(&b->collision_index);
+            nph_hashmap_free(&b->copy_index);
+            nph_hashmap_free(&b->trigger_pairs);
+            nph_hashmap_free(&b->joint_index);
+            nph_hashmap_free(&b->material_index);
+        }
+    }
     if (r != NPH_RESULT_OK) {
         NPH_FREE_TYPE(alloc, PhysicsBridge, b);
         return r;
@@ -2900,6 +3355,10 @@ void physics_bridge_destroy(PhysicsBridge *b)
     if (b->joints != NULL) {
         NPH_FREE_ARRAY(b->alloc, JointRecord, b->joints, b->joint_cap);
     }
+    nph_hashmap_free(&b->character_index);
+    if (b->characters != NULL) {
+        NPH_FREE_ARRAY(b->alloc, CharacterRecord, b->characters, b->character_cap);
+    }
     NPH_ARRAY_FREE(&b->trigger_step);
     NPH_ARRAY_FREE(&b->entered);
     NPH_ARRAY_FREE(&b->left);
@@ -2938,6 +3397,8 @@ NphResult physics_bridge_set_world(PhysicsBridge *b, NphWorld *world)
                 drop_joint(b, i);
             }
         }
+        // Characters keep theirs too; one the world no longer has goes at the next step's
+        // character pass, which does not meet it.
         b->full_pass = 1;
     }
     return r;
@@ -2975,7 +3436,8 @@ NphResult physics_bridge_begin(PhysicsBridge *b)
         b->load_sync = 0;
     }
     if (r == NPH_RESULT_OK) {
-        settle_joints(b); // the joints too, before play_begin
+        settle_joints(b); // the joints too, before play_begin, and the characters' bodies
+        r = character_pass(b, false, nph_world_tick(b->world), 0.0F);
     }
     if (r != NPH_RESULT_OK) {
         physics_bridge_end(b);
@@ -2992,11 +3454,12 @@ NphResult physics_bridge_refresh(PhysicsBridge *b)
     read_events(b);
     b->full_pass = 1;
     b->load_sync = 1; // what play_begin made has its shapes before the first step
-    const NphResult r = change_pass(b, 0U, nph_world_tick(b->world),
-                                    (f32)nph_fixed_clock_step_seconds(&b->engine->clock));
+    NphResult r = change_pass(b, 0U, nph_world_tick(b->world),
+                              (f32)nph_fixed_clock_step_seconds(&b->engine->clock));
     b->load_sync = 0;
     if (r == NPH_RESULT_OK) {
         settle_joints(b);
+        r = character_pass(b, false, nph_world_tick(b->world), 0.0F);
     }
     return r;
 }
@@ -3017,6 +3480,8 @@ void physics_bridge_end(PhysicsBridge *b)
     NPH_ARRAY_CLEAR(&b->left);
     b->joint_count = 0U; // their joints go with the world
     nph_hashmap_clear(&b->joint_index);
+    b->character_count = 0U; // and the characters' bodies
+    nph_hashmap_clear(&b->character_index);
     b->world_body = NPH_PHYSICS_BODY_NULL;
     nph_physics_world_destroy(b->physics);
     b->physics = NULL;
@@ -3029,9 +3494,10 @@ NphResult physics_bridge_add_system(PhysicsBridge *b, NphSchedule *schedule)
     const NphRuntimeComponents *ids = &b->engine->ids;
     const NphComponentId reads[3] = {ids->collider, NPH_COMPONENT_ID_WORLD_TRANSFORM,
                                      NPH_COMPONENT_ID_HIERARCHY};
-    // Joint's `broken` is written when one breaks.
-    const NphComponentId writes[3] = {ids->rigid_body, NPH_COMPONENT_ID_LOCAL_TRANSFORM,
-                                      ids->joint};
+    // Joint's `broken` is written when one breaks, and CharacterController's what a character
+    // did at every step.
+    const NphComponentId writes[4] = {ids->rigid_body, NPH_COMPONENT_ID_LOCAL_TRANSFORM, ids->joint,
+                                      ids->character_controller};
     // After the game's systems (registered before it), which move bodies,
     // and before the world transforms are composed from where they went.
     const char *const before[1] = {NPH_TRANSFORM_SYSTEM_NAME};
@@ -3043,7 +3509,7 @@ NphResult physics_bridge_add_system(PhysicsBridge *b, NphSchedule *schedule)
     d.reads = reads;
     d.read_count = 3U;
     d.writes = writes;
-    d.write_count = 3U;
+    d.write_count = 4U;
     d.before = before;
     d.before_count = 1U;
     // Alone in its stage: nothing runs beside the step, so game systems may
@@ -3093,7 +3559,11 @@ NphPhysicsBody physics_bridge_body(const PhysicsBridge *b, NphEntity e)
 {
     NPH_ASSERT(b != NULL);
     const BodyRecord *r = record_of(b, e);
-    return r != NULL ? r->body : NPH_PHYSICS_BODY_NULL;
+    if (r != NULL) {
+        return r->body;
+    }
+    const CharacterRecord *c = b->physics != NULL ? character_of(b, e) : NULL;
+    return c != NULL ? c->body : NPH_PHYSICS_BODY_NULL;
 }
 
 NphEntity physics_bridge_entity(const PhysicsBridge *b, NphPhysicsBody body)
@@ -3107,7 +3577,11 @@ NphEntity physics_bridge_entity(const PhysicsBridge *b, NphPhysicsBody body)
     // must hold this very body.
     const NphEntity e = {(u32)nph_physics_body_user_data(b->physics, body)};
     const BodyRecord *r = record_of(b, e);
-    return r != NULL && r->body.value == body.value ? e : NPH_ENTITY_NULL;
+    if (r != NULL) {
+        return r->body.value == body.value ? e : NPH_ENTITY_NULL;
+    }
+    const CharacterRecord *c = character_of(b, e);
+    return c != NULL && c->body.value == body.value ? e : NPH_ENTITY_NULL;
 }
 
 NphPhysicsJoint physics_bridge_joint(const PhysicsBridge *b, NphEntity e)

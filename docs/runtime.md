@@ -551,6 +551,7 @@ after the game's systems and before the transform system:
 | `RigidBody` | the body: static, kinematic, or dynamic; its mass (0: the Collider's), velocities, damping, gravity scale, locks, `bullet` (swept against moving bodies too), `can_sleep` |
 | `Collider` | its shape: a sphere, a capsule along Y, or a box, at a centre and rotation in the entity's frame, scaled by the entity's world scale (a box per axis, a sphere by the largest, a capsule's core by Y and its radius by the larger of X and Z); or every shape of a collision asset (`ASSET`, `collision`: below); its density, friction, restitution, or those of a physics material (`physics_material`: below); its filter (category, mask, group); hit events; `trigger` (below) |
 | `Joint` | a joint from the entity's body to another's, or the world's: ball, hinge, fixed, slider, or distance, with its limits, motor, spring, and breaking force (below) |
+| `CharacterController` | a character the engine walks for the game: an upright capsule (radius, height) standing on the entity's origin, the highest step it climbs, the steepest slope it walks, how far it snaps down to the ground, the mass it pushes with, its gravity scale, its filter; the game's `move` and `jump`; its `velocity`, `grounded`, and `ground` written back (below) |
 
 A Collider alone is a static body (the level); a RigidBody alone, a point
 of 1 kg (or of its `mass`).
@@ -626,6 +627,40 @@ slider's position. A spring has its frequency and damping for the joint's
 own turn or slide as if the body turned about its centre: a door, turning
 about its edge, swings at about half of each.
 
+**Characters** ([ADR-0108](adr/0108-physics-in-levels.md)). A
+CharacterController is the physics module's character controller
+(physics.md "The character controller") as a component: the bridge moves
+each one every step, before the physics step, so a game only says where it
+goes. Its capsule (`radius` round, `height` tall, a ball under twice the
+radius) stands upright on the entity's origin, its feet, a skin (5 mm)
+over what it stands on. The game writes `move`, a velocity along the
+ground in world axes, and `jump`, an upward speed taken when it stands
+(cleared at every step, taken or not). On its feet it walks along the
+ground, climbs steps up to `step_height`, keeps off slopes steeper than
+`max_slope`, keeps to the ground over drops of `snap_distance`, and is
+carried by what it stands on: the point it stands on is followed as that
+body moves over each step, turning platforms and lifts too. Off them
+(jumping, walking off an edge, on a slope too steep to stand on) it keeps
+the velocity it left with, a platform's included, gravity times
+`gravity_scale` pulls it, and what it runs into takes its part of that
+velocity (a ceiling ends a jump). What it walks into is pushed as by a body
+of `push_mass` (`nph_physics_character_push`). After each move the bridge
+writes the entity's translation (its rotation stays the game's: the capsule
+never turns, and the entity's scale does not size it) and, for the game to
+read, `velocity` (what it moved over the step), `grounded`, and `ground`
+(the entity it stands on). A game that writes the translation puts the
+character there, at rest: a respawn (`nph_game_reset_interpolation` draws
+it there at once). A character under a parent moves in the world, as a
+dynamic body does. Its body is kinematic and its capsule a ghost
+(physics.md "Sensors and ghosts"): bodies do not collide with it (its next
+move pushes it out of what moved into it), but triggers report it as a
+visitor and rays meet it, by its filter (`category`, `mask`), which is
+also what its moves meet; `nph_game_physics_body` gives the body, for a
+ray from its eye to ignore. The entity's RigidBody and Collider, if it has
+them, make no body. Its body goes where the character went over the step,
+as a kinematic platform does, so each character's move sees the others
+where they were when the step began, whatever their order.
+
 **Compounds** ([ADR-0108](adr/0108-physics-in-levels.md)). A Collider
 without a RigidBody below an entity with one, no closer one between them,
 is a part of that entity's body: a shape of it, not a body of its own. A
@@ -666,8 +701,10 @@ body's entity: what a query hit or an event reports (none for a body of
 the game's own). The physics system runs alone,
 so systems in the stages before and after it may use the world: those that
 change bodies declare a write of RigidBody (so that no two run at once),
-those that only query declare a read. A character controller's moves and
-pushes run in an exclusive system (`samples/game_physics`).
+those that only query declare a read. A character of the game's own (the
+physics module's controller, kept in the game's state, as
+`samples/game_physics` keeps its player) moves and pushes in an exclusive
+system; a CharacterController needs none.
 
 **Play.** The physics world is made when play begins (with the `phys.*`
 cvars) and a body for every entity, where it is, before the game's
@@ -947,6 +984,7 @@ instance):
 | `engine_frame_physics_1k_compounds_spinning` | 248 µs | the same with two boxes a body, its children (ADR-0108): 2,000 parts; as bodies of their own following their parents (before compounds), 1.64 ms |
 | `engine_frame_physics_1k_compounds_deep_spinning` | 412 µs | each part under an entity of its own: 2,000 chains hashed every step (85 ns each; composed every step, 215 ns) |
 | `engine_frame_physics_1k_hinged` | 0.36 ms | 1,000 doors hinged to the world by Joints, swinging, every one breakable: 55 µs of it checking the breaking forces; joints whose bodies did not change since they were settled cost nothing |
+| `engine_frame_physics_64_characters` | 221 µs | 64 CharacterControllers walking a floor at 1.5 m/s (ADR-0108): 3.5 µs a character, 2.6 µs of it the physics module's move (2.1 µs in `character_walk_flat`, its own world's), 0.3 µs its body's motion over the step (a teleport's was 0.8 µs), 0.3 µs its moves' queries passing over its own body, the rest the pass and the write-back; a world without characters pays nothing for them |
 | `engine_frame_physics_10k_static_reparent` | 3.33 ms | 10,000 static Colliders in 100 groups, one given another parent every frame: a full pass, every Collider looked at again (3.14 ms before ADR-0108's compounds and collision assets, which cost it 6 %; the frames above are unchanged) |
 | `physics_step_1k_spinning` | 68.1 µs | the same bodies stepped in a physics world of their own |
 | `scene_sync_10k_moving` | 79 ns | the scene renderer bringing a moved instance up to date |
@@ -1011,6 +1049,17 @@ largest part, occlusion, is bounded by `audio.occlusion_rays`.
   unmake bodies; children follow their parents unless dynamic; a flood of
   world events is recovered; and runs repeat whatever the threads, under
   every solver (the state hashes of a pile);
+- characters (`test_physics_character.c`, ADR-0108): a CharacterController
+  stands, walks where the game says and stops; falls, jumps, and lands at
+  the heights and times gravity (and its scale) gives; climbs the steps and
+  slopes its settings allow; rides a moving platform, a lift up and down
+  (on its feet at every step), and a turning platform, and lands where it
+  jumped from on a moving one; pushes a crate as its mass, or not at all;
+  is reported by triggers whose mask meets its category, and met by rays,
+  which can ignore its body; goes where the game puts it, is made again
+  when its capsule changes, and stops when it has none; is its entity's
+  body, a RigidBody and Collider beside it making none, and goes with its
+  component; moves in the world under a parent; and repeats bit for bit;
 - interpolation: the clock's blend advances at the pace of real time; the
   scene renderer draws what the simulation moved between its states
   (instances turning without shrinking, frame-rate changes, snaps,
@@ -1073,8 +1122,13 @@ side, its one-shots played, nothing starved or dropped ([audio.md](audio.md)
   shapes while that material loads, unless another Collider named it
   already: what a game swaps in play should be named somewhere at play
   begin.
-- The character controller is not a component: a game keeps its
-  characters in its state block and moves them in its systems.
+- A character's capsule is a ghost (ADR-0108): bodies pass through it,
+  and its next move pushes it out of their way, so a thrown crate does not
+  bounce off the player. What carries it is followed a step late (2 m/s is
+  8 mm), and characters move one after another on the main thread (a
+  crowd would want them on jobs: each move already sees the others as they
+  were). A Joint cannot name a character's body. Its rotation is the game's: a
+  turning platform carries a character round, not turns it.
 - Hot reload unloads the old image only after checking the engine's own
   references; pointers a game keeps in places the engine cannot see (its
   own threads, OS callbacks) are ruled out by game.h's rules, not checked.

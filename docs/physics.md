@@ -1309,7 +1309,8 @@ bridge writes every moved body's pose and velocities into its entity from
 the step's move events. Everything else is this module's API on the
 engine's world (`nph_game_physics`): queries, joints, events, and the
 character controller, which a game keeps in its own state and moves from
-its own systems.
+its own systems, or which a `CharacterController` component has the engine
+move for it (runtime.md "Characters", ADR-0108).
 
 Frames draw the world between its last two steps (runtime.md
 "Interpolation"), so the fixed step need not match the frame rate.

@@ -193,6 +193,28 @@ What there is today:
    - **Its body:** it has a kinematic body whose capsule is a ghost (decision 1). It touches nothing, but triggers
      and rays see it by its filter. A trigger therefore knows the player came in, and an enemy's ray finds the
      player.
+   - **Built:**
+     - The capsule stands on the entity's origin, its feet, a skin (5 mm) over what it stands on, and never turns:
+       the entity's rotation stays the game's, and its scale does not size it. `jump` is cleared at every step,
+       taken or not. A game that writes the translation puts the character there at rest (a respawn).
+     - **What carries it** is followed by where the point it stood on went over the last step, that body's motion
+       turns included: a lift up or down at 2 m/s keeps it on its feet at every step, 8 mm behind the deck, and a
+       quarter turn of a platform takes it a quarter round. Off the ground it keeps the velocity it left with (a
+       platform's: a jump from one moving at 2 m/s lands where it took off on it), gravity times `gravity_scale`
+       pulls it, and what it runs into takes its part of that velocity (a ceiling ends a jump). The carry's rounding
+       is kept level: a rise of a micrometre stopped the physics module's move from walking, so the character
+       climbed no step and kept to no ground.
+     - **Its body moves over the step** with the velocity that takes it where the character went, as a kinematic
+       platform's does. A teleport moved its proxy in the tree and looked for its pairs again at every step: 0.8
+       µs a character, where the motion costs 0.3. Each move therefore sees the other characters where they were
+       when the step began, whatever their order.
+     - The entity's RigidBody and Collider make no body beside it; a CharacterController coming or going makes the
+       entity's body again as what it now is.
+     - **Measured** (Profile): 64 characters walking a floor cost a frame 221 µs, 3.5 µs a character: 2.6 µs the
+       physics module's move (2.1 µs in its own bench's world), 0.3 µs the body's motion, 0.3 µs the moves' queries
+       passing over the character's own body, the rest the pass and the write-back. The frames of resting,
+       spinning, compound and hinged bodies, and the full pass, are within the noise of #218's (x0.97 to x1.014);
+       a world without characters skips the pass.
 9. **A first-person starter game**, `samples/game_starter`.
    - **The player:** a `CharacterController` with a camera at eye height.
      - **Controls:** mouse look (yaw on the body, pitch on the camera), walk (W A S D), run (Shift), jump (Space), and

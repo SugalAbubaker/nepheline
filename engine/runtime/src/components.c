@@ -90,6 +90,17 @@ static const NphJoint g_joint_defaults = {(u32)NPH_JOINT_HINGE,
                                           0};
 NPH_COMPONENT_DEFINE(NphJoint, NPH_JOINT_FIELDS, "Joint", 0U, &g_joint_defaults)
 
+// A person 1.8 m tall and 0.6 m across, who climbs steps of 0.3 m, walks up
+// slopes of 45 degrees, keeps to the ground over drops of 0.3 m (the physics
+// module's character defaults), pushes as 80 kg, falls under full gravity,
+// and stands still until the game moves it; of the shapes' default category,
+// meeting every one.
+static const NphCharacterController g_character_controller_defaults = {
+    0.3F, 1.8F, 0.3F, 0.78539816F, 0.3F, 80.0F, 1.0F, {0.0F, 0.0F, 0.0F}, 0.0F, {0.0F, 0.0F, 0.0F},
+    0,    {0U}, 1U,   NPH_U64_MAX};
+NPH_COMPONENT_DEFINE(NphCharacterController, NPH_CHARACTER_CONTROLLER_FIELDS, "CharacterController",
+                     0U, &g_character_controller_defaults)
+
 // An effect at full volume and as recorded, not playing until the game
 // says so, in 3D with the mixer's default fall-off (inverse, physical,
 // full within 1 m, down to 50 m; the curve, if chosen, from 0 dB at 1 m to
@@ -185,5 +196,7 @@ NphResult nph_runtime_register_components(NphWorld *world, NphRuntimeComponents 
     NPH_TRY(nph_world_register_component(world, NphWorldCell_component(), &out->world_cell));
     NPH_TRY(
         nph_world_register_component(world, NphMeshMaterials_component(), &out->mesh_materials));
-    return nph_world_register_component(world, NphJoint_component(), &out->joint);
+    NPH_TRY(nph_world_register_component(world, NphJoint_component(), &out->joint));
+    return nph_world_register_component(world, NphCharacterController_component(),
+                                        &out->character_controller);
 }

@@ -344,18 +344,21 @@ const NphFixedClock *nph_engine_clock(const NphEngine *engine);
 // ---------------------------------------------------------------------------
 
 // The physics world while the world plays (NULL otherwise): a body for every
-// entity with a RigidBody or a Collider (components.h), and any the game
-// makes itself. Use it between steps: from the simulation's systems (the
-// physics system, NPH_PHYSICS_SYSTEM_NAME, runs alone), at the sync point,
-// or after nph_engine_wait. Made at play_begin with the phys.* cvars.
+// entity with a RigidBody, a Collider, or a CharacterController
+// (components.h), and any the game makes itself. Use it between steps: from
+// the simulation's systems (the physics system, NPH_PHYSICS_SYSTEM_NAME, runs
+// alone), at the sync point, or after nph_engine_wait. Made at play_begin
+// with the phys.* cvars.
 NphPhysicsWorld *nph_engine_physics(NphEngine *engine);
 
-// The body of an entity's RigidBody or Collider while playing, or a null
-// handle (none, not playing, or a body that could not be made).
+// The body of an entity's RigidBody or Collider while playing, or its
+// CharacterController's (kinematic, its capsule a ghost: a ray from a
+// character's eye names it as its filter's `ignore`); a null handle when
+// none, not playing, or a body that could not be made.
 NphPhysicsBody nph_engine_physics_body(const NphEngine *engine, NphEntity entity);
 
-// The entity whose RigidBody or Collider `body` is, while playing: what a
-// query's hit or a contact event names (a shape's body:
+// The entity whose RigidBody, Collider, or CharacterController `body` is,
+// while playing: what a query's hit or a contact event names (a shape's body:
 // nph_physics_shape_body). The null entity for a body of the game's own, a
 // stale or null handle, or when not playing. As nph_engine_physics_body,
 // from the simulation's systems or at the sync point.
