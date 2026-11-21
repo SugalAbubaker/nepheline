@@ -230,6 +230,9 @@ NphTriggerEvents physics_bridge_triggers(const PhysicsBridge *b);
 NphPhysicsJoint physics_bridge_joint(const PhysicsBridge *b, NphEntity e);
 // nph_engine_physics_reload: a physics material cooked again.
 bool physics_bridge_reload(PhysicsBridge *b, NphGuid guid);
+// nph_engine_physics_material_set: a physics material's values set in play.
+NphResult physics_bridge_material_set(PhysicsBridge *b, NphGuid guid,
+                                      const NphPhysicsMaterialHeader *values);
 
 // ---------------------------------------------------------------------------
 // The audio bridge (audio_bridge.c): the mixer, the streamer, and the device,

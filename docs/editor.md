@@ -104,10 +104,11 @@ editor starts beside it (ADR-0106).
 ## The panels
 
 The default layout puts the outliner on the left, the viewport in the
-centre, the inspector, the material panel, and the statistics on the
-right, and the console, the assets, and the profiler as tabs below. View >
-Reset Layout restores it, and the View menu shows or hides each panel. The
-material panel shows itself when a material opens.
+centre, the inspector, the material and physics material panels, and the
+statistics on the right, and the console, the assets, and the profiler as
+tabs below. View > Reset Layout restores it, and the View menu shows or
+hides each panel. Each material panel shows itself when one of its
+materials opens.
 
 ### Viewport
 
@@ -191,7 +192,11 @@ source (or "(default)"), takes a material dropped from the asset browser,
 gives the default back on a right-click, and opens a `.nmat` in the
 material panel with Edit. A change to MeshMaterials touches the
 MeshRenderer in the same step, since its slots are read when the
-MeshRenderer's are.
+MeshRenderer's are. A Collider's `physics_material` does the same with
+physics materials: it shows the `.npmat` it names (or "(its own values)"),
+takes one dropped from the asset browser (cooked then if it never was),
+gives the Collider its own values back on a right-click, and opens it in
+the physics material panel with Edit.
 READONLY fields are greyed and HIDDEN ones not shown. Add Component lists
 the registered components the entity lacks; each component's header
 removes it.
@@ -207,16 +212,17 @@ the path as buttons leading back up. Each file shows its kind (scene,
 editable mesh, image, sound, material, physics material, or neither) and
 whether the cooker has cooked it.
 - Double-clicking a folder opens it, a scene places it in front of the
-  camera (cooking it first if it has not been), a material opens it in the
-  material panel, and an image, a sound, or a physics material cooks it. A
-  physics material cooked during play reaches the shapes playing it
-  (runtime.md "Physics materials").
+  camera (cooking it first if it has not been), a material or a physics
+  material opens it in its panel, and an image or a sound cooks it.
 - A scene dragged into the viewport is placed where the mouse is. A
   material drags onto an entity (in the viewport, the outliner, or a slot
-  in the inspector), and an image onto a material's texture slot.
-- The context menu places, edits a material, cooks, or cooks again even
-  when current; Cook Folder cooks every scene under the folder shown, and
-  New Material makes one there (see "Material").
+  in the inspector), a physics material onto a Collider's
+  `physics_material` in the inspector, and an image onto a material's
+  texture slot.
+- The context menu places, edits a material or a physics material, cooks,
+  or cooks again even when current; Cook Folder cooks every scene under
+  the folder shown, and New Material and New Physics Material make one
+  there (see "Material" and "Physics material").
 - While the import thread works, the panel shows what it is doing and how
   many requests wait.
 - **A material shows as a lit sphere** (ADR-0105 decision 7): its row is a
@@ -285,6 +291,33 @@ faces draw it on this entity too. The editable mesh keeps each slot's
 material in its source (`.nmesh` version 2, docs/cook.md), and the cooked
 mesh carries them: every entity drawing it draws them where its own
 MeshRenderer names none for the slot.
+
+### Physics material
+
+One physics material's source (`.npmat`, ADR-0108 decision 7), edited in
+place: opened from the asset browser (double-click, or Edit), from a
+Collider's `physics_material` in the inspector (Edit), or made with New
+Physics Material (here, or in the browser): a `.npmat` with a Collider's own
+values (friction 0.6, restitution 0, density 1000 kg/m^3, both combined by
+default), named "New Physics Material" (then "New Physics Material 2" and
+on) in the folder the browser shows, written, cooked, and opened.
+- **Its fields:** friction and how it combines with a touching surface's,
+  restitution and how it combines, and density. A mode's tooltip says what
+  it does; of two touching surfaces' modes the later in the list decides
+  (physics.md), so ice is Minimum.
+- **Played as it changes.** While the world plays, a change reaches every
+  shape naming the material from the next step, as it is dragged, with
+  nothing written (`nph_engine_physics_material_set`): a crate starts to
+  slide as its ramp's friction goes down. The panel's source is set into
+  play again when play begins, so play has what the panel shows whatever
+  the cooks did meanwhile (the editor takes cooks' results when play ends).
+- **Written as it settles**, cooked, and read by the next play. A physics
+  material has no unsaved state.
+- **Its own history,** as the material panel's: Undo and Redo in the panel,
+  or Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y while it has the focus; not the
+  scene's, which a physics material is no part of.
+- **Errors** (a source not written, a cook that failed) show under its
+  name; the console says why.
 
 ### Console
 
@@ -780,7 +813,7 @@ step runs on the job system. It reads nothing the simulation writes.
 
 ## Testing
 
-`editor_tests` (83 tests):
+`editor_tests` (92 tests):
 - The camera's invariants, including a 64-bit pivot 10,000 km from the
   origin.
 - The view and the gizmo's math (projection and rays, axis and plane
@@ -848,6 +881,13 @@ step runs on the job system. It reads nothing the simulation writes.
     the slot that names it; the preview draws it; the edit's history undoes
     and redoes it; a full mesh and bad faces and keys are refused; ending
     saves the slots' materials, and the entity draws the cooked mesh's.
+  - A new physics material is written with a Collider's values, numbered
+    when its name is taken, cooked, and opened; nothing but a physics
+    material opens. Its changes are written as they settle, undone and redone
+    by the panel's history (which the scene's never sees), and refused when
+    they do not validate. In play its changes reach the shapes of the
+    Colliders naming it from the next step, a drag's too with nothing
+    written, an undo's as well; play begun again takes the panel's source.
   - A material's preview is drawn on the jobs when the browser asks for it,
     and cached; drawn again, green after red, when the material is cooked
     from other content; read from the cache when asked for anew. A material

@@ -1177,16 +1177,24 @@ static void log_material(NphGuid guid, const char *what, NphResult r)
     NPH_LOG_WARN(&NPH_LOG_RUNTIME, "physics material %s %s: %s", text, what, nph_result_string(r));
 }
 
+// The surface of a valid header (nph_physics_material_header_valid).
+static Surface header_surface(const NphPhysicsMaterialHeader *h)
+{
+    Surface s;
+    s.density = h->density;
+    s.friction = h->friction;
+    s.restitution = h->restitution;
+    s.friction_combine = (NphPhysicsCombine)h->friction_combine;
+    s.restitution_combine = (NphPhysicsCombine)h->restitution_combine;
+    return s;
+}
+
 // A ready asset's values, through its view.
 static NphResult read_material(const NphAsset *asset, Surface *out)
 {
     NphPhysicsMaterialView v;
     NPH_TRY(nph_physics_material_view(asset, &v));
-    out->density = v.header->density;
-    out->friction = v.header->friction;
-    out->restitution = v.header->restitution;
-    out->friction_combine = (NphPhysicsCombine)v.header->friction_combine;
-    out->restitution_combine = (NphPhysicsCombine)v.header->restitution_combine;
+    *out = header_surface(v.header);
     return NPH_RESULT_OK;
 }
 
@@ -3154,6 +3162,37 @@ bool physics_bridge_reload(PhysicsBridge *b, NphGuid guid)
         b->material_reloads += 1U;
     }
     return true;
+}
+
+NphResult physics_bridge_material_set(PhysicsBridge *b, NphGuid guid,
+                                      const NphPhysicsMaterialHeader *values)
+{
+    NPH_ASSERT(b != NULL && values != NULL);
+    if (b->physics == NULL || nph_guid_is_null(guid)) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    if (!nph_physics_material_header_valid(values)) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    const u32 *known = NPH_HASHMAP_FIND(&b->material_index, u32, &guid);
+    if (known == NULL) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    const u32 index = *known;
+    MaterialEntry *m = &b->materials[index];
+    // What is set is newer than any load in flight, the first or a reload's.
+    if (!nph_asset_handle_is_null(m->asset)) {
+        nph_asset_release(nph_engine_loader(b->engine), m->asset);
+        m->asset = NPH_ASSET_HANDLE_NULL;
+    }
+    if (m->reloading != 0) {
+        m->reloading = 0;
+        b->material_reloads -= 1U;
+    }
+    m->surface = header_surface(values);
+    m->state = (u32)MATERIAL_READY; // Colliders waiting for it make their shapes at the next step
+    resurface(b, index);
+    return NPH_RESULT_OK;
 }
 
 NphTriggerEvents physics_bridge_triggers(const PhysicsBridge *b)

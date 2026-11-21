@@ -1090,6 +1090,20 @@ static bool within(f32 x, f32 lo, f32 hi)
     return x >= lo && x <= hi;
 }
 
+bool nph_physics_material_header_valid(const NphPhysicsMaterialHeader *h)
+{
+    NPH_ASSERT(h != NULL);
+    bool ok = within(h->friction, 0.0F, NPH_PHYSICS_MATERIAL_MAX_FRICTION) &&
+              within(h->restitution, 0.0F, 1.0F) &&
+              within(h->density, 0.0F, NPH_PHYSICS_MATERIAL_MAX_DENSITY) &&
+              h->friction_combine < (u32)NPH_PHYSICS_MATERIAL_COMBINE_COUNT &&
+              h->restitution_combine < (u32)NPH_PHYSICS_MATERIAL_COMBINE_COUNT && h->flags == 0U;
+    for (u32 i = 0; i < NPH_ARRAY_COUNT(h->reserved); ++i) {
+        ok = ok && h->reserved[i] == 0U;
+    }
+    return ok;
+}
+
 NphResult nph_physics_material_view(const NphAsset *asset, NphPhysicsMaterialView *out)
 {
     NPH_ASSERT(out != NULL);
@@ -1099,15 +1113,7 @@ NphResult nph_physics_material_view(const NphAsset *asset, NphPhysicsMaterialVie
     NPH_TRY(typed_blob(asset, NPH_PHYSICS_MATERIAL_TAG_HEADER, 0U, sizeof(NphPhysicsMaterialHeader),
                        1U, &p));
     const NphPhysicsMaterialHeader *h = (const NphPhysicsMaterialHeader *)p;
-    bool ok = within(h->friction, 0.0F, NPH_PHYSICS_MATERIAL_MAX_FRICTION) &&
-              within(h->restitution, 0.0F, 1.0F) &&
-              within(h->density, 0.0F, NPH_PHYSICS_MATERIAL_MAX_DENSITY) &&
-              h->friction_combine < (u32)NPH_PHYSICS_MATERIAL_COMBINE_COUNT &&
-              h->restitution_combine < (u32)NPH_PHYSICS_MATERIAL_COMBINE_COUNT && h->flags == 0U;
-    for (u32 i = 0; i < NPH_ARRAY_COUNT(h->reserved); ++i) {
-        ok = ok && h->reserved[i] == 0U;
-    }
-    if (!ok) {
+    if (!nph_physics_material_header_valid(h)) {
         return NPH_RESULT_CORRUPT;
     }
     out->header = h;

@@ -583,12 +583,14 @@ material the world's Colliders name as it loads collision assets (before
 the first step when play begins, in the background during play, the
 Collider's shapes waiting for it, its body asleep), reads it once, and lets
 it go. One that is missing or damaged leaves the Colliders naming it their
-own fields (logged once). When the editor cooks a material again during
-play, `nph_engine_physics_reload` loads it again in the background, and
-once it is ready every shape naming it takes its new values in place, from
-the next step's contacts, its body weighed again for a new density (an
-explicit `mass` kept); a body at rest stays so until something touches it,
-and a load that fails keeps the values there were.
+own fields (logged once). A material changes in place while the world
+plays: every shape naming it takes its new values from the next step's
+contacts, its body weighed again for a new density (an explicit `mass`
+kept), and a body at rest stays so until something touches it. Either its
+values are set (`nph_engine_physics_material_set`: the editor's physics
+material panel, as it changes one), or a host that cooked it again has it
+loaded again in the background (`nph_engine_physics_reload`), a load that
+fails keeping the values there were.
 
 **Triggers** ([ADR-0108](adr/0108-physics-in-levels.md)). A Collider
 with `trigger` makes sensors (physics.md "Sensors and ghosts"): shapes

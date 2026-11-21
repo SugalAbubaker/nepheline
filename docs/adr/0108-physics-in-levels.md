@@ -158,18 +158,24 @@ What there is today:
      fields hold.
    - Physics materials are made and edited in the editor (Assets, New Physics Material), and loaded as collision assets
      are.
-   - **Built** (the format, the cook, and the runtime; the editor's panel follows):
+   - **Built:**
      - `PMAT` holds one 64-byte header: friction (0 to 100), restitution (0 to 1), density (0 to 10^6 kg/m^3), and
        the two modes, numbered as the physics module's. The source names the modes `default`, `average`, `minimum`,
        `multiply` and `maximum`.
      - The shapes wait for a material that loads, as for a collision asset. One that is missing or damaged leaves the
        Collider its own fields, logged, where a collision asset that cannot be read makes no shapes: a level with a
        material missing still plays.
-     - **Cooked again during play, a material changes in place** (`nph_engine_physics_reload`, called by the editor's
-       cooks): every shape naming it takes the new friction, restitution and modes from the next step, and a new
-       density weighs its body again (`nph_physics_shape_set_density`, new). Nothing is made again, so contacts keep
-       their warm starts. Nothing wakes either, as with the physics module's surface setters: what rests stays at rest
-       until something touches it.
+     - **A material changes in place while the world plays:** every shape naming it takes the new friction,
+       restitution and modes from the next step, and a new density weighs its body again
+       (`nph_physics_shape_set_density`, new). Nothing is made again, so contacts keep their warm starts. Nothing
+       wakes either, as with the physics module's surface setters: what rests stays at rest until something touches
+       it. The values come from `nph_engine_physics_material_set`, or from the asset loaded again
+       (`nph_engine_physics_reload`) for a host that cooks while the world plays.
+     - **The editor's physics material panel** (Assets, New Physics Material; Edit from the browser or from a
+       Collider's field, which takes a `.npmat` dropped on it) writes and cooks each settled change, with a history
+       of its own as the material panel's. It sets what it shows into play directly, as it is dragged, rather than
+       through its cooks: the editor holds cooks' results until play ends (scenes join the edited world outside
+       play), so a cook does not reach play. The panel sets its source again when play begins.
      - **Measured** (Profile, against #215): the frames of moving and hinged bodies, and the full pass over 10,000
        Colliders, are within the noise (x0.995 to x1.011). The frame of 1,000 sleeping bodies costs 0.14 µs more
        (4.56 to 4.70 µs, x1.03): the Collider's 16 more bytes put the bodies in 21 chunks of 16 KiB where they took

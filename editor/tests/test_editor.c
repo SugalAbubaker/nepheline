@@ -12,6 +12,8 @@
 #include <nepheline/gpu/device.h>
 #include <nepheline/gpu/resources.h>
 #include <nepheline/math/scalar.h>
+#include <nepheline/physics/body.h>
+#include <nepheline/physics/shape.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/platform.h>
 #include <nepheline/platform/time.h>
@@ -25,6 +27,7 @@
 
 #include <cook/cooker.h>
 #include <cook/material.h>
+#include <cook/physics_material.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -2060,6 +2063,179 @@ NTEST(Editor, a_material_is_drawn_as_it_changes_written_as_it_settles_and_undone
     s.roughness = 2.0F;
     NTEST_EXPECT_EQ_INT(editor_material_change(ed, &s, true), NPH_RESULT_INVALID_ARGUMENT);
     NTEST_EXPECT_NEAR_F32(editor_material_source(ed)->roughness, 1.0F, 1e-6F);
+    finish(&fx);
+}
+
+// ---------------------------------------------------------------------------
+// The physics material panel (ADR-0108 decision 7)
+// ---------------------------------------------------------------------------
+
+// The physics material source of the project's `key`, read from its file.
+static CookPhysicsMaterialSource physics_source_on_disk(EditorFixture *f, const char *key)
+{
+    char path[1300];
+    (void)snprintf(path, sizeof path, "%s/assets/%s", f->project, key);
+    CookPhysicsMaterialSource s;
+    memset(&s, 0, sizeof s);
+    NTEST_EXPECT_EQ_INT(cook_physics_material_source_load(nph_allocator_system(), path, &s),
+                        NPH_RESULT_OK);
+    return s;
+}
+
+NTEST(Editor, a_new_physics_material_has_a_colliders_values_and_is_cooked_and_opened)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    char key[256];
+    NTEST_ASSERT_EQ_INT(editor_physics_material_new(ed, "surfaces", key, sizeof key),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(key, "surfaces/New Physics Material.npmat");
+    NTEST_ASSERT_NOT_NULL(editor_physics_material_key(ed));
+    NTEST_EXPECT_EQ_STR(editor_physics_material_key(ed), key);
+    CookPhysicsMaterialSource fresh;
+    cook_physics_material_source_default(&fresh);
+    NTEST_EXPECT_TRUE(
+        cook_physics_material_source_equal(editor_physics_material_source(ed), &fresh));
+    const CookPhysicsMaterialSource written = physics_source_on_disk(&fx, key);
+    NTEST_EXPECT_TRUE(cook_physics_material_source_equal(&written, &fresh));
+    // The name is taken now: the next one is numbered, and opens in its place.
+    char second[256];
+    NTEST_ASSERT_EQ_INT(editor_physics_material_new(ed, "surfaces", second, sizeof second),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_EQ_STR(second, "surfaces/New Physics Material 2.npmat");
+    NTEST_EXPECT_EQ_STR(editor_physics_material_key(ed), second);
+    // Both cooked, so either can be given to Colliders at once.
+    settle(&fx);
+    NTEST_EXPECT_TRUE(editor_project_is_cooked(editor_project(ed), key));
+    NTEST_EXPECT_TRUE(editor_project_is_cooked(editor_project(ed), second));
+    // Only a physics material opens; the material panel's stays its own.
+    NTEST_EXPECT_EQ_INT(editor_physics_material_open(ed, "surfaces/ice.nmat"),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_STR(editor_physics_material_key(ed), second);
+    NTEST_EXPECT_NULL(editor_material_key(ed));
+    editor_physics_material_close(ed);
+    NTEST_EXPECT_NULL(editor_physics_material_source(ed));
+    finish(&fx);
+}
+
+NTEST(Editor, a_physics_material_is_written_as_it_settles_and_undone_in_the_panel)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    char key[256];
+    NTEST_ASSERT_EQ_INT(editor_physics_material_new(ed, "surfaces", key, sizeof key),
+                        NPH_RESULT_OK);
+    settle(&fx);
+    const u64 scene = editor_history_state(ed->history);
+    CookPhysicsMaterialSource ice = *editor_physics_material_source(ed);
+    ice.friction = 0.02F;
+    ice.friction_combine = (u32)NPH_PHYSICS_MATERIAL_COMBINE_MIN;
+    // Being dragged: written nowhere.
+    NTEST_ASSERT_EQ_INT(editor_physics_material_change(ed, &ice, false), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F32(physics_source_on_disk(&fx, key).friction, 0.6F, 1e-6F);
+    // Let go: written and cooked as one step of the panel's history, not the scene's.
+    NTEST_ASSERT_EQ_INT(editor_physics_material_change(ed, &ice, true), NPH_RESULT_OK);
+    CookPhysicsMaterialSource disk = physics_source_on_disk(&fx, key);
+    NTEST_EXPECT_NEAR_F32(disk.friction, 0.02F, 1e-6F);
+    NTEST_EXPECT_EQ_UINT(disk.friction_combine, (u32)NPH_PHYSICS_MATERIAL_COMBINE_MIN);
+    settle(&fx);
+    NTEST_EXPECT_EQ_UINT(editor_history_state(ed->history), scene);
+    NTEST_ASSERT_TRUE(editor_physics_material_undo(ed));
+    disk = physics_source_on_disk(&fx, key);
+    NTEST_EXPECT_NEAR_F32(disk.friction, 0.6F, 1e-6F);
+    NTEST_EXPECT_EQ_UINT(disk.friction_combine, (u32)NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
+    NTEST_ASSERT_TRUE(editor_physics_material_redo(ed));
+    NTEST_EXPECT_NEAR_F32(physics_source_on_disk(&fx, key).friction, 0.02F, 1e-6F);
+    NTEST_EXPECT_FALSE(editor_physics_material_redo(ed));
+    NTEST_EXPECT_EQ_UINT(editor_history_state(ed->history), scene);
+    // A source that does not validate changes nothing.
+    ice.restitution = 2.0F;
+    NTEST_EXPECT_EQ_INT(editor_physics_material_change(ed, &ice, true),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_NEAR_F32(editor_physics_material_source(ed)->restitution, 0.0F, 0.0F);
+    settle(&fx);
+    finish(&fx);
+}
+
+// The friction of the one shape of an entity's body while playing, -1 without one.
+static f32 played_friction(EditorFixture *f, NphEntity e)
+{
+    const NphPhysicsBody body = nph_engine_physics_body(f->engine, e);
+    NphPhysicsShape s[2];
+    if (nph_physics_body_is_null(body) ||
+        nph_physics_body_shapes(nph_engine_physics(f->engine), body, s, 2U) != 1U) {
+        return -1.0F;
+    }
+    return nph_physics_shape_friction(nph_engine_physics(f->engine), s[0]);
+}
+
+// A floor of a physics material, played: the panel's changes are the floor's surface in play from
+// the next step, a drag's too, with nothing written until a change settles; play begun again
+// takes the panel's source.
+NTEST(Editor, a_physics_material_changed_in_play_reaches_its_shapes)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    char key[256];
+    NTEST_ASSERT_EQ_INT(editor_physics_material_new(ed, "surfaces", key, sizeof key),
+                        NPH_RESULT_OK);
+    settle(&fx);
+    // A floor whose Collider names it, made through the scene's history.
+    const NphComponentId collider = nph_engine_components(fx.engine)->collider;
+    const NphComponentId ids[3] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                   NPH_COMPONENT_ID_WORLD_TRANSFORM, collider};
+    NTEST_ASSERT_EQ_INT(editor_history_begin(ed->history, "Floor"), NPH_RESULT_OK);
+    NphEntity floor = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_history_spawn(ed->history, ids, 3U, &floor), NPH_RESULT_OK);
+    NphCollider c =
+        *(const NphCollider *)nph_world_get(nph_engine_edit_world(fx.engine), floor, collider);
+    c.half_extents = nph_vec3(5.0F, 0.25F, 5.0F);
+    c.physics_material = cooker_asset_guid(key, "physics_material");
+    NTEST_ASSERT_EQ_INT(editor_history_set(ed->history, floor, collider, &c), NPH_RESULT_OK);
+    editor_history_end(ed->history);
+    NphCvarRegistry *cvars = nph_engine_cvars(fx.engine);
+    NTEST_ASSERT_EQ_INT(
+        nph_cvar_set_bool(cvars, nph_cvar_find(cvars, NPH_STR("rt.lockstep")), true),
+        NPH_RESULT_OK);
+    editor_play_toggle(ed);
+    frames(&fx, 2U);
+    NTEST_ASSERT_TRUE(nph_engine_is_playing(fx.engine));
+    NTEST_EXPECT_NEAR_F32(played_friction(&fx, floor), 0.6F, 0.0F);
+    // A change settled: the floor's from the next step, and written.
+    CookPhysicsMaterialSource s = *editor_physics_material_source(ed);
+    s.friction = 0.02F;
+    NTEST_ASSERT_EQ_INT(editor_physics_material_change(ed, &s, true), NPH_RESULT_OK);
+    frames(&fx, 2U);
+    NTEST_EXPECT_NEAR_F32(played_friction(&fx, floor), 0.02F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(physics_source_on_disk(&fx, key).friction, 0.02F, 0.0F);
+    // A drag: the floor's as it moves, written nowhere.
+    s.friction = 0.3F;
+    NTEST_ASSERT_EQ_INT(editor_physics_material_change(ed, &s, false), NPH_RESULT_OK);
+    frames(&fx, 2U);
+    NTEST_EXPECT_NEAR_F32(played_friction(&fx, floor), 0.3F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(physics_source_on_disk(&fx, key).friction, 0.02F, 0.0F);
+    NTEST_ASSERT_EQ_INT(editor_physics_material_change(ed, &s, true), NPH_RESULT_OK);
+    // Undone in play: the floor's again.
+    NTEST_ASSERT_TRUE(editor_physics_material_undo(ed));
+    frames(&fx, 2U);
+    NTEST_EXPECT_NEAR_F32(played_friction(&fx, floor), 0.02F, 0.0F);
+    NTEST_ASSERT_TRUE(editor_physics_material_redo(ed));
+    editor_play_toggle(ed);
+    settle(&fx);
+    NTEST_EXPECT_FALSE(nph_engine_is_playing(fx.engine));
+    // Played again: the panel's source, 0.3, whatever the cooks did meanwhile.
+    editor_play_toggle(ed);
+    frames(&fx, 2U);
+    NTEST_EXPECT_NEAR_F32(played_friction(&fx, floor), 0.3F, 0.0F);
+    editor_play_toggle(ed);
+    settle(&fx);
+    NTEST_EXPECT_NEAR_F32(physics_source_on_disk(&fx, key).friction, 0.3F, 0.0F);
     finish(&fx);
 }
 
