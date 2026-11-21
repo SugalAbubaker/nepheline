@@ -158,6 +158,22 @@ What there is today:
      fields hold.
    - Physics materials are made and edited in the editor (Assets, New Physics Material), and loaded as collision assets
      are.
+   - **Built** (the format, the cook, and the runtime; the editor's panel follows):
+     - `PMAT` holds one 64-byte header: friction (0 to 100), restitution (0 to 1), density (0 to 10^6 kg/m^3), and
+       the two modes, numbered as the physics module's. The source names the modes `default`, `average`, `minimum`,
+       `multiply` and `maximum`.
+     - The shapes wait for a material that loads, as for a collision asset. One that is missing or damaged leaves the
+       Collider its own fields, logged, where a collision asset that cannot be read makes no shapes: a level with a
+       material missing still plays.
+     - **Cooked again during play, a material changes in place** (`nph_engine_physics_reload`, called by the editor's
+       cooks): every shape naming it takes the new friction, restitution and modes from the next step, and a new
+       density weighs its body again (`nph_physics_shape_set_density`, new). Nothing is made again, so contacts keep
+       their warm starts. Nothing wakes either, as with the physics module's surface setters: what rests stays at rest
+       until something touches it.
+     - **Measured** (Profile, against #215): the frames of moving and hinged bodies, and the full pass over 10,000
+       Colliders, are within the noise (x0.995 to x1.011). The frame of 1,000 sleeping bodies costs 0.14 µs more
+       (4.56 to 4.70 µs, x1.03): the Collider's 16 more bytes put the bodies in 21 chunks of 16 KiB where they took
+       20. The bridge's own work adds one test a step.
 8. **A character controller component.**
    - **Shape and limits:** a `CharacterController` is a capsule (a radius and a height), with the highest step it
      climbs, the steepest slope it walks, how far it snaps down to the ground, its filter, and the mass it pushes with.

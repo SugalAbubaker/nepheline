@@ -228,6 +228,8 @@ const NphPhysicsStats *physics_bridge_stats(const PhysicsBridge *b);
 NphTriggerEvents physics_bridge_triggers(const PhysicsBridge *b);
 // An entity's Joint's joint while it is made (engine.h nph_engine_physics_joint).
 NphPhysicsJoint physics_bridge_joint(const PhysicsBridge *b, NphEntity e);
+// nph_engine_physics_reload: a physics material cooked again.
+bool physics_bridge_reload(PhysicsBridge *b, NphGuid guid);
 
 // ---------------------------------------------------------------------------
 // The audio bridge (audio_bridge.c): the mixer, the streamer, and the device,

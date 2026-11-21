@@ -368,6 +368,16 @@ const NphPhysicsStats *nph_engine_physics_stats(const NphEngine *engine);
 // nph_game_physics_triggers), or none when not playing.
 NphTriggerEvents nph_engine_physics_triggers(const NphEngine *engine);
 
+// The physics material `guid` (asset/physics_material.h) was cooked again:
+// while playing, it loads again in the background, and once it is ready
+// every shape whose Collider names it takes its new values in place, from
+// the next step (a body at rest stays at rest until something touches it). A
+// load that fails keeps the values it had (logged). True when the playing
+// world's Colliders name it; false otherwise, when nothing is to be done (the
+// next play reads the file as it is). At the sync point (the host's `sync`
+// hook) or between frames: how the editor's cooks reach play.
+bool nph_engine_physics_reload(NphEngine *engine, NphGuid guid);
+
 // The joint of an entity's Joint (components.h) while it is made: a null
 // handle before both its bodies exist, once broken, or when not playing. Its
 // state (a hinge's angle, a slider's position) comes from physics/joint.h.

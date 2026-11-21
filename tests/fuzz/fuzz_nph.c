@@ -8,6 +8,7 @@
 #include <nepheline/asset/loader.h>
 #include <nepheline/asset/material.h>
 #include <nepheline/asset/mesh.h>
+#include <nepheline/asset/physics_material.h>
 #include <nepheline/asset/scene.h>
 #include <nepheline/asset/sound.h>
 #include <nepheline/asset/texture.h>
@@ -115,6 +116,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                     volatile u8 sink = (u8)(bytes[0] ^ bytes[b.size - 1U]);
                     (void)sink;
                 }
+            }
+            NphPhysicsMaterialView physics_material;
+            if (nph_physics_material_view(&asset, &physics_material) == NPH_RESULT_OK) {
+                volatile f32 sink = physics_material.header->density;
+                (void)sink;
             }
             NphSoundView sound;
             if (nph_sound_view(&asset, &sound) == NPH_RESULT_OK) {

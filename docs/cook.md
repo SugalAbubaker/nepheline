@@ -46,8 +46,9 @@ nph_cook --pack-only -o <out_dir> --pack <file.npk>
 
 A source is a `.gltf`, a `.glb`, an image (`.png`, `.jpg`, `.tga`, `.bmp`,
 `.hdr`), an editable mesh (`.nmesh`), a sound (`.wav`), a material
-(`.nmat`), or a directory, whose scenes, editable meshes, sounds, and
-materials are cooked in sorted order. `--root` is the source root that identities are relative to
+(`.nmat`), a physics material (`.npmat`), or a directory, whose scenes,
+editable meshes, sounds, materials, and physics materials are cooked in
+sorted order. `--root` is the source root that identities are relative to
 (default: the current directory); a source outside it is refused. The
 output directory receives the cooked files and the database; `--pack`
 then writes every asset the database knows into one archive. The exit
@@ -500,6 +501,34 @@ type version 3, [asset.md](asset.md)) as `KHR_texture_transform`'s do: scale, th
 offset, the glTF importer's composition. An untiled material has none. It is for the renderer to
 apply to every texture coordinate of the material (ADR-0105).
 
+## Physics materials (`physics_material.h`)
+
+A physics material the editor makes is a `.npmat` source (ADR-0108 decision 7): JSON in one
+canonical form, as a material's. It holds a surface's friction, restitution, and density, and how
+each of the first two combines with a touching surface's:
+
+    {
+      "npmat": 1,
+      "friction": 0.6,
+      "restitution": 0,
+      "density": 1000,
+      "friction_combine": "default",
+      "restitution_combine": "default"
+    }
+
+Every key but `"npmat"` may be left out, taking the value above, a Collider's own (density in
+kg/m^3); the writer writes every one. A combine mode is `"default"` (friction by the geometric
+mean, restitution by the larger), `"average"`, `"minimum"`, `"multiply"`, or `"maximum"`; of two
+touching surfaces' modes the later in that list decides (physics.md), so ice is
+`"friction_combine": "minimum"`. Reading refuses an unknown or repeated key, another version
+(`VERSION_MISMATCH`), an unknown mode, and a value out of the asset's ranges: friction 0 to 100,
+restitution 0 to 1, density 0 to 10^6.
+
+`cooker_cook_physics_material` cooks a `.npmat` into one physics material asset
+(asset.md "Physics material"), sub-asset `physics_material`, its GUID from its key as every
+source's; its content hash is the source's bytes. A Collider names it by that GUID
+(runtime.md "Physics").
+
 ## Material previews (`preview.h`)
 
 The editor's asset browser shows each material as a lit sphere (ADR-0105 decision 7), drawn on
@@ -897,6 +926,9 @@ input must never crash"):
 - `tests/fuzz/fuzz_nmat.c`: material sources. One that reads must
   validate, write back to text that reads as the same material, and make
   a header and a texture transform that `nph_material_view` takes.
+- `tests/fuzz/fuzz_npmat.c`: physics material sources. One that reads must
+  validate, write back to text that reads as the same material, and make a
+  header that `nph_physics_material_view` takes.
 - `tests/fuzz/fuzz_texture_import.c`: images' import settings, read and
   written back to the same settings.
 - `tests/fuzz/fuzz_scene_import.c`: scenes' import settings, read, written

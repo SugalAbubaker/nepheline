@@ -2144,6 +2144,12 @@ NphPhysicsJoint nph_engine_physics_joint(const NphEngine *e, NphEntity entity)
     return e->physics != NULL ? physics_bridge_joint(e->physics, entity) : NPH_PHYSICS_JOINT_NULL;
 }
 
+bool nph_engine_physics_reload(NphEngine *e, NphGuid guid)
+{
+    NPH_ASSERT(e != NULL);
+    return e->physics != NULL && physics_bridge_reload(e->physics, guid);
+}
+
 NphTriggerEvents nph_engine_physics_triggers(const NphEngine *e)
 {
     NPH_ASSERT(e != NULL);

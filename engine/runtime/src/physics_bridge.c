@@ -41,6 +41,13 @@
 // and visitor entities the overlapping shapes are counted, and a pair enters
 // when its count leaves zero over the step and leaves when it returns.
 //
+// Physics materials (ADR-0108): a Collider naming one makes its shapes with
+// the material's values over its own. The materials load as collision assets
+// do (before the first step at play begin, in the background during play, the
+// shapes waiting), each read once and let go; one that cannot be read leaves
+// the Colliders naming it their own values. A material cooked again during
+// play loads again, and the shapes naming it take its new values in place.
+//
 // Joints (ADR-0108): a Joint component's joint is made once both its bodies
 // exist. Its frames come from the world's poses when it is first made, when
 // its structure changes (kind, other, anchors, axis, collision), and when it
@@ -48,6 +55,7 @@
 // spring), or a body made again for the same entity, makes it again from the
 // frames it had, so its angle and length keep their zero.
 #include <nepheline/asset/collision.h>
+#include <nepheline/asset/physics_material.h>
 #include <nepheline/core/assert.h>
 #include <nepheline/core/hash.h>
 #include <nepheline/core/hashmap.h>
@@ -68,6 +76,15 @@
 
 #define NO_RECORD NPH_U32_MAX
 #define NO_COPY   NPH_U32_MAX
+
+// A physics material's modes are the physics module's, numbered alike.
+NPH_STATIC_ASSERT((u32)NPH_PHYSICS_MATERIAL_COMBINE_AVERAGE == (u32)NPH_PHYSICS_COMBINE_AVERAGE &&
+                      (u32)NPH_PHYSICS_MATERIAL_COMBINE_MIN == (u32)NPH_PHYSICS_COMBINE_MIN &&
+                      (u32)NPH_PHYSICS_MATERIAL_COMBINE_MULTIPLY ==
+                          (u32)NPH_PHYSICS_COMBINE_MULTIPLY &&
+                      (u32)NPH_PHYSICS_MATERIAL_COMBINE_MAX == (u32)NPH_PHYSICS_COMBINE_MAX &&
+                      (u32)NPH_PHYSICS_MATERIAL_COMBINE_COUNT == (u32)NPH_PHYSICS_COMBINE_COUNT,
+                  "physics materials number their combine modes as the physics module does");
 
 typedef enum BodyFlags {
     BODY_RIGID = 1U << 0U, // made from a RigidBody (else a Collider's static body)
@@ -140,6 +157,34 @@ typedef struct CollisionEntry {
     u32 *kinds;                // per shape: NphCollisionShapeKind
     NphCollisionBlock *blocks; // per shape
 } CollisionEntry;
+
+// What a shape's surface is made of: a Collider's own values, or its physics
+// material's.
+typedef struct Surface {
+    f32 density;
+    f32 friction;
+    f32 restitution;
+    NphPhysicsCombine friction_combine;
+    NphPhysicsCombine restitution_combine;
+} Surface;
+
+typedef enum MaterialState {
+    MATERIAL_LOADING = 0,
+    MATERIAL_READY = 1,
+    MATERIAL_FAILED = 2, // the Colliders naming it keep their own values
+} MaterialState;
+
+// A physics material the world's Colliders name, known while playing: its
+// values, read once its asset was ready (and the asset let go), and the load
+// in flight, the first or a reload's (`reloading`: the values stay until it
+// is ready).
+typedef struct MaterialEntry {
+    NphGuid guid;
+    u32 state; // MaterialState
+    b32 reloading;
+    NphAssetHandle asset;
+    Surface surface; // when READY
+} MaterialEntry;
 
 // A block's copy at a scale and turn: the asset, the shape, and the scale's
 // three and the rotation's four words as bits.
@@ -232,6 +277,12 @@ struct PhysicsBridge {
     NphArrayU32 copy_free; // free slots
     NphArrayU32 awaiting;  // slots of the records waiting for an asset (BODY_AWAITING)
     b32 load_sync;         // play begin: assets load before the first step
+    // Physics materials (ADR-0108) while playing.
+    MaterialEntry *materials;
+    u32 material_count;
+    u32 material_cap;
+    NphHashMap material_index; // NphGuid -> u32
+    u32 material_reloads;      // entries with a reload in flight
     // Joints (ADR-0108).
     NphQuery *joint_query; // Joint (changes), LocalTransform
     JointRecord *joints;
@@ -483,7 +534,8 @@ static bool collider_equal(const NphCollider *a, const NphCollider *b)
            vec3_bits_equal(a->center, b->center) && quat_bits_equal(a->rotation, b->rotation) &&
            f32_bits_equal(a->density, b->density) && f32_bits_equal(a->friction, b->friction) &&
            f32_bits_equal(a->restitution, b->restitution) && a->category == b->category &&
-           a->mask == b->mask && a->group == b->group && a->hit_events == b->hit_events &&
+           nph_guid_equals(a->physics_material, b->physics_material) && a->mask == b->mask &&
+           a->group == b->group && a->hit_events == b->hit_events &&
            nph_guid_equals(a->collision, b->collision) && a->trigger == b->trigger;
 }
 
@@ -658,12 +710,35 @@ static NphPhysicsFilter collider_filter(const NphCollider *c)
     return f;
 }
 
-// A Collider's material, filter, and events on a shape of the record's.
-static void apply_shape_desc(const BodyRecord *r, const NphCollider *c, NphPhysicsShapeDesc *sd)
+// The surface a Collider gives its shapes: its physics material's when it
+// names one that is ready, its own values otherwise.
+static Surface surface_of(const PhysicsBridge *b, const NphCollider *c)
 {
-    sd->density = nonneg(c->density);
-    sd->friction = nonneg(c->friction);
-    sd->restitution = nph_f32_clamp(finite_or(c->restitution, 0.0F), 0.0F, 1.0F);
+    Surface s;
+    s.density = nonneg(c->density);
+    s.friction = nonneg(c->friction);
+    s.restitution = nph_f32_clamp(finite_or(c->restitution, 0.0F), 0.0F, 1.0F);
+    s.friction_combine = NPH_PHYSICS_COMBINE_DEFAULT;
+    s.restitution_combine = NPH_PHYSICS_COMBINE_DEFAULT;
+    if (!nph_guid_is_null(c->physics_material)) {
+        const u32 *known = NPH_HASHMAP_FIND(&b->material_index, u32, &c->physics_material);
+        if (known != NULL && b->materials[*known].state == (u32)MATERIAL_READY) {
+            s = b->materials[*known].surface;
+        }
+    }
+    return s;
+}
+
+// A Collider's surface, filter, and events on a shape of the record's.
+static void apply_shape_desc(const PhysicsBridge *b, const BodyRecord *r, const NphCollider *c,
+                             NphPhysicsShapeDesc *sd)
+{
+    const Surface surface = surface_of(b, c);
+    sd->density = surface.density;
+    sd->friction = surface.friction;
+    sd->restitution = surface.restitution;
+    sd->friction_combine = surface.friction_combine;
+    sd->restitution_combine = surface.restitution_combine;
     sd->filter = collider_filter(c);
     sd->hit_events = c->hit_events != 0 ? 1 : 0;
     sd->sensor = c->trigger != 0 ? 1 : 0;
@@ -692,7 +767,7 @@ static void make_shape(PhysicsBridge *b, BodyRecord *r, const NphCollider *c)
         pose.rotation = nph_quat_normalize(nph_quat_mul(r->frame.rotation, pose.rotation));
     }
     NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(g);
-    apply_shape_desc(r, c, &sd);
+    apply_shape_desc(b, r, c, &sd);
     sd.pose = pose;
     const NphResult res = nph_physics_shape_create(b->physics, r->body, &sd, &r->shape);
     if (res != NPH_RESULT_OK) {
@@ -1091,6 +1166,208 @@ static void release_collisions(PhysicsBridge *b)
     nph_hashmap_clear(&b->collision_index);
 }
 
+// ---------------------------------------------------------------------------
+// Physics materials (ADR-0108)
+// ---------------------------------------------------------------------------
+
+static void log_material(NphGuid guid, const char *what, NphResult r)
+{
+    char text[NPH_GUID_STRING_LEN + 1U];
+    nph_guid_to_string(guid, text);
+    NPH_LOG_WARN(&NPH_LOG_RUNTIME, "physics material %s %s: %s", text, what, nph_result_string(r));
+}
+
+// A ready asset's values, through its view.
+static NphResult read_material(const NphAsset *asset, Surface *out)
+{
+    NphPhysicsMaterialView v;
+    NPH_TRY(nph_physics_material_view(asset, &v));
+    out->density = v.header->density;
+    out->friction = v.header->friction;
+    out->restitution = v.header->restitution;
+    out->friction_combine = (NphPhysicsCombine)v.header->friction_combine;
+    out->restitution_combine = (NphPhysicsCombine)v.header->restitution_combine;
+    return NPH_RESULT_OK;
+}
+
+// A shape's surface set in place: true when its density changed (its body
+// weighed again).
+static bool set_surface(PhysicsBridge *b, NphPhysicsShape shape, const Surface *s)
+{
+    nph_physics_shape_set_friction(b->physics, shape, s->friction);
+    nph_physics_shape_set_restitution(b->physics, shape, s->restitution);
+    nph_physics_shape_set_friction_combine(b->physics, shape, s->friction_combine);
+    nph_physics_shape_set_restitution_combine(b->physics, shape, s->restitution_combine);
+    if (f32_bits_equal(nph_physics_shape_density(b->physics, shape), s->density)) {
+        return false;
+    }
+    nph_physics_shape_set_density(b->physics, shape, s->density);
+    return true;
+}
+
+// The shapes of every record whose Collider names material `index` take its
+// values as they are now, in place, from the next step's contacts; a new
+// density weighs their bodies again, an explicit mass kept. Nothing wakes:
+// what rests stays at rest until something touches it.
+static void resurface(PhysicsBridge *b, u32 index)
+{
+    const NphGuid guid = b->materials[index].guid;
+    for (u32 i = 0U; i < b->count; ++i) {
+        BodyRecord *r = &b->records[i];
+        if (!nph_guid_equals(r->collider.physics_material, guid) ||
+            nph_physics_body_is_null(r->body)) {
+            continue;
+        }
+        const Surface surface = surface_of(b, &r->collider);
+        bool weighed = false;
+        if (!nph_physics_shape_is_null(r->shape)) {
+            weighed = set_surface(b, r->shape, &surface);
+        }
+        for (u32 k = 0U; k < r->asset_count; ++k) {
+            if (!nph_physics_shape_is_null(r->asset_shapes[k])) {
+                weighed = set_surface(b, r->asset_shapes[k], &surface) || weighed;
+            }
+        }
+        if (weighed) {
+            reweigh(b, (r->flags & BODY_PART) != 0U ? r->owner : r->entity);
+        }
+    }
+}
+
+// A material entry's load: once it finishes, its values (READY) or none
+// (FAILED, logged), its asset let go either way. A reload that fails keeps
+// the values there were; one that succeeds puts its values on the shapes.
+static void poll_material(PhysicsBridge *b, u32 index)
+{
+    MaterialEntry *m = &b->materials[index];
+    if (nph_asset_handle_is_null(m->asset)) {
+        return;
+    }
+    NphAssetLoader *loader = nph_engine_loader(b->engine);
+    const NphAssetState st = nph_asset_state(loader, m->asset);
+    if (st == NPH_ASSET_STATE_LOADING) {
+        return;
+    }
+    NphResult r = nph_asset_error(loader, m->asset);
+    Surface surface = m->surface;
+    if (st == NPH_ASSET_STATE_READY) {
+        r = read_material(nph_asset_get(loader, m->asset), &surface);
+    } else if (r == NPH_RESULT_OK) {
+        r = NPH_RESULT_NOT_FOUND;
+    }
+    nph_asset_release(loader, m->asset);
+    m->asset = NPH_ASSET_HANDLE_NULL;
+    const bool reload = m->reloading != 0;
+    if (reload) {
+        m->reloading = 0;
+        b->material_reloads -= 1U;
+    }
+    if (r != NPH_RESULT_OK) {
+        if (!reload) {
+            m->state = (u32)MATERIAL_FAILED;
+        }
+        log_material(m->guid,
+                     reload ? "failed to load again; it keeps the values it had"
+                            : "cannot be read; the Colliders naming it keep their own values",
+                     r);
+        return;
+    }
+    m->surface = surface;
+    m->state = (u32)MATERIAL_READY;
+    if (reload) {
+        resurface(b, index);
+    }
+}
+
+static NphResult grow_materials(PhysicsBridge *b)
+{
+    if (b->material_count < b->material_cap) {
+        return NPH_RESULT_OK;
+    }
+    const u32 cap = nph_max_u32(16U, 2U * b->material_cap);
+    MaterialEntry *grown = NPH_ALLOC_ARRAY(b->alloc, MaterialEntry, cap);
+    if (grown == NULL) {
+        return NPH_RESULT_OUT_OF_MEMORY;
+    }
+    if (b->materials != NULL) {
+        memcpy(grown, b->materials, (u64)b->material_count * sizeof *grown);
+        NPH_FREE_ARRAY(b->alloc, MaterialEntry, b->materials, b->material_cap);
+    }
+    b->materials = grown;
+    b->material_cap = cap;
+    return NPH_RESULT_OK;
+}
+
+// The entry of `guid`, its load started when it is new: before returning at
+// play begin (load_sync), in the background otherwise. NO_RECORD for the
+// null GUID or when the table cannot grow.
+static u32 material_of(PhysicsBridge *b, NphGuid guid)
+{
+    if (nph_guid_is_null(guid)) {
+        return NO_RECORD;
+    }
+    const u32 *known = NPH_HASHMAP_FIND(&b->material_index, u32, &guid);
+    if (known != NULL) {
+        poll_material(b, *known);
+        return *known;
+    }
+    if (grow_materials(b) != NPH_RESULT_OK) {
+        return NO_RECORD;
+    }
+    const u32 index = b->material_count;
+    if (nph_hashmap_insert(&b->material_index, &guid, &index) != NPH_RESULT_OK) {
+        return NO_RECORD;
+    }
+    MaterialEntry *m = &b->materials[index];
+    memset(m, 0, sizeof *m);
+    m->guid = guid;
+    b->material_count += 1U;
+    NphAssetLoader *loader = nph_engine_loader(b->engine);
+    const NphResult r = b->load_sync != 0
+                            ? nph_asset_load_guid(loader, guid, &m->asset)
+                            : nph_asset_load_guid_async(loader, guid, NULL, &m->asset);
+    if (r != NPH_RESULT_OK) {
+        m->state = (u32)MATERIAL_FAILED;
+        m->asset = NPH_ASSET_HANDLE_NULL;
+        log_material(guid, "cannot be loaded; the Colliders naming it keep their own values", r);
+        return index;
+    }
+    m->state = (u32)MATERIAL_LOADING;
+    poll_material(b, index); // finished already (at play begin, or loaded before)
+    return index;
+}
+
+// True while the physics material a Collider names is loading (its load
+// started when it is new).
+static bool material_loading(PhysicsBridge *b, const NphCollider *c)
+{
+    const u32 index = material_of(b, c->physics_material);
+    return index != NO_RECORD && b->materials[index].state == (u32)MATERIAL_LOADING;
+}
+
+// The materials whose reloads are in flight, polled.
+static void poll_reloads(PhysicsBridge *b)
+{
+    for (u32 i = 0U; i < b->material_count && b->material_reloads > 0U; ++i) {
+        if (b->materials[i].reloading != 0) {
+            poll_material(b, i);
+        }
+    }
+}
+
+static void release_materials(PhysicsBridge *b)
+{
+    NphAssetLoader *loader = nph_engine_loader(b->engine);
+    for (u32 i = 0U; i < b->material_count; ++i) {
+        if (!nph_asset_handle_is_null(b->materials[i].asset)) {
+            nph_asset_release(loader, b->materials[i].asset);
+        }
+    }
+    b->material_count = 0U;
+    b->material_reloads = 0U;
+    nph_hashmap_clear(&b->material_index);
+}
+
 static void free_copy_block(PhysicsBridge *b, ScaledCopy *c)
 {
     if (c->kind == (u32)NPH_COLLISION_SHAPE_HULL) {
@@ -1355,7 +1632,7 @@ static void make_asset_shapes(PhysicsBridge *b, BodyRecord *r)
             pose.rotation = nph_quat_normalize(nph_quat_mul(r->frame.rotation, pose.rotation));
         }
         NphPhysicsShapeDesc sd = nph_physics_shape_desc_default(g);
-        apply_shape_desc(r, c, &sd);
+        apply_shape_desc(b, r, c, &sd);
         sd.pose = pose;
         const NphResult res =
             nph_physics_shape_create(b->physics, r->body, &sd, &r->asset_shapes[i]);
@@ -1410,9 +1687,27 @@ static void drop_shapes(PhysicsBridge *b, BodyRecord *r, bool destroy)
     }
 }
 
-// A record's shapes from its Collider, on its body.
+// True while what a Collider's shapes are made of loads: its collision asset
+// (ASSET) or its physics material (each load started when it is new).
+static bool shapes_wait(PhysicsBridge *b, const NphCollider *c)
+{
+    bool loading = false;
+    if (c->shape == (u32)NPH_COLLIDER_ASSET) {
+        const u32 index = collision_of(b, c->collision);
+        loading = index != NO_RECORD && b->collisions[index].state == (u32)COLLISION_LOADING;
+    }
+    return material_loading(b, c) || loading;
+}
+
+// A record's shapes from its Collider, on its body, once what they are made
+// of has loaded: until then the record waits (await_asset).
 static void make_shapes(PhysicsBridge *b, BodyRecord *r)
 {
+    if (shapes_wait(b, &r->collider)) {
+        r->flags &= ~(u32)BODY_UNSHAPED;
+        await_asset(b, r);
+        return;
+    }
     if (r->collider.shape == (u32)NPH_COLLIDER_ASSET) {
         make_asset_shapes(b, r);
     } else {
@@ -1426,8 +1721,7 @@ static void poll_awaiting(PhysicsBridge *b)
 {
     for (u32 i = b->awaiting.len; i-- > 0U;) {
         BodyRecord *r = &b->records[b->slot_record[b->awaiting.data[i]]];
-        const u32 index = collision_of(b, r->collider.collision);
-        if (index != NO_RECORD && b->collisions[index].state == (u32)COLLISION_LOADING) {
+        if (shapes_wait(b, &r->collider)) {
             continue;
         }
         remove_slot(&b->awaiting, r->slot);
@@ -1435,7 +1729,7 @@ static void poll_awaiting(PhysicsBridge *b)
         if (nph_physics_body_is_null(r->body)) {
             continue;
         }
-        make_asset_shapes(b, r);
+        make_shapes(b, r);
         nph_physics_body_set_awake(b->physics, r->body, true);
         reweigh(b, (r->flags & BODY_PART) != 0U ? r->owner : r->entity);
     }
@@ -2412,6 +2706,9 @@ static void physics_system(NphSystemContext *ctx)
     b->targeted = last;
     NPH_ARRAY_CLEAR(&b->targeted);
     read_events(b);
+    if (b->material_reloads > 0U) {
+        poll_reloads(b);
+    }
     poll_awaiting(b);
     NphResult r = change_pass(b, ctx->last_tick, ctx->tick, dt);
     place_deep_parts(b);
@@ -2543,6 +2840,15 @@ NphResult physics_bridge_create(NphEngine *e, PhysicsBridge **out)
             nph_hashmap_free(&b->trigger_pairs);
         }
     }
+    if (r == NPH_RESULT_OK) {
+        r = nph_hashmap_init(&b->material_index, alloc, &cd);
+        if (r != NPH_RESULT_OK) {
+            nph_hashmap_free(&b->collision_index);
+            nph_hashmap_free(&b->copy_index);
+            nph_hashmap_free(&b->trigger_pairs);
+            nph_hashmap_free(&b->joint_index);
+        }
+    }
     if (r != NPH_RESULT_OK) {
         NPH_FREE_TYPE(alloc, PhysicsBridge, b);
         return r;
@@ -2579,6 +2885,10 @@ void physics_bridge_destroy(PhysicsBridge *b)
     nph_hashmap_free(&b->copy_index);
     nph_hashmap_free(&b->trigger_pairs);
     nph_hashmap_free(&b->joint_index);
+    nph_hashmap_free(&b->material_index);
+    if (b->materials != NULL) {
+        NPH_FREE_ARRAY(b->alloc, MaterialEntry, b->materials, b->material_cap);
+    }
     if (b->joints != NULL) {
         NPH_FREE_ARRAY(b->alloc, JointRecord, b->joints, b->joint_cap);
     }
@@ -2692,6 +3002,7 @@ void physics_bridge_end(PhysicsBridge *b)
     destroy_all(b);
     free_copies(b);
     release_collisions(b);
+    release_materials(b);
     nph_hashmap_clear(&b->trigger_pairs);
     NPH_ARRAY_CLEAR(&b->trigger_step);
     NPH_ARRAY_CLEAR(&b->entered);
@@ -2803,6 +3114,46 @@ NphPhysicsJoint physics_bridge_joint(const PhysicsBridge *b, NphEntity e)
         return NPH_PHYSICS_JOINT_NULL;
     }
     return b->joints[*index].joint;
+}
+
+bool physics_bridge_reload(PhysicsBridge *b, NphGuid guid)
+{
+    NPH_ASSERT(b != NULL);
+    if (b->physics == NULL || nph_guid_is_null(guid)) {
+        return false;
+    }
+    const u32 *known = NPH_HASHMAP_FIND(&b->material_index, u32, &guid);
+    if (known == NULL) {
+        return false;
+    }
+    MaterialEntry *m = &b->materials[*known];
+    NphAssetLoader *loader = nph_engine_loader(b->engine);
+    // The file was written again: a load from now on reads it as it is, and one in flight read
+    // it as it was.
+    nph_asset_forget(loader, nph_asset_find_guid(loader, guid));
+    if (!nph_asset_handle_is_null(m->asset)) {
+        nph_asset_release(loader, m->asset);
+        m->asset = NPH_ASSET_HANDLE_NULL;
+    }
+    const NphResult r = nph_asset_load_guid_async(loader, guid, NULL, &m->asset);
+    if (r != NPH_RESULT_OK) {
+        m->asset = NPH_ASSET_HANDLE_NULL;
+        log_material(guid, "cannot be loaded again; it keeps the values it had", r);
+        if (m->state == (u32)MATERIAL_LOADING) {
+            m->state = (u32)MATERIAL_FAILED; // its first load gone: its Colliders' own values
+        }
+        if (m->reloading != 0) {
+            m->reloading = 0;
+            b->material_reloads -= 1U;
+        }
+        return true;
+    }
+    // A first load started again is still the first: the shapes naming it wait on.
+    if (m->state != (u32)MATERIAL_LOADING && m->reloading == 0) {
+        m->reloading = 1;
+        b->material_reloads += 1U;
+    }
+    return true;
 }
 
 NphTriggerEvents physics_bridge_triggers(const PhysicsBridge *b)

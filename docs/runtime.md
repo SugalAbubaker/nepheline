@@ -549,7 +549,7 @@ after the game's systems and before the transform system:
 | Component | |
 |---|---|
 | `RigidBody` | the body: static, kinematic, or dynamic; its mass (0: the Collider's), velocities, damping, gravity scale, locks, `bullet` (swept against moving bodies too), `can_sleep` |
-| `Collider` | its shape: a sphere, a capsule along Y, or a box, at a centre and rotation in the entity's frame, scaled by the entity's world scale (a box per axis, a sphere by the largest, a capsule's core by Y and its radius by the larger of X and Z); or every shape of a collision asset (`ASSET`, `collision`: below); its density, friction, restitution; its filter (category, mask, group); hit events; `trigger` (below) |
+| `Collider` | its shape: a sphere, a capsule along Y, or a box, at a centre and rotation in the entity's frame, scaled by the entity's world scale (a box per axis, a sphere by the largest, a capsule's core by Y and its radius by the larger of X and Z); or every shape of a collision asset (`ASSET`, `collision`: below); its density, friction, restitution, or those of a physics material (`physics_material`: below); its filter (category, mask, group); hit events; `trigger` (below) |
 | `Joint` | a joint from the entity's body to another's, or the world's: ball, hinge, fixed, slider, or distance, with its limits, motor, spring, and breaking force (below) |
 
 A Collider alone is a static body (the level); a RigidBody alone, a point
@@ -573,6 +573,22 @@ shapes come. A missing or damaged asset makes no shapes (logged). Cooked
 scenes bring their collision: `nph_scene_import_cooked` gives each node
 the scene's `COLS` names an `ASSET` Collider and no RigidBody, a static
 shape until a designer adds one.
+
+**Physics materials** ([ADR-0108](adr/0108-physics-in-levels.md)). A
+Collider naming a physics material (`physics_material`: a `.npmat` source's
+asset, asset.md "Physics material") makes its shapes with the material's
+friction, restitution, density, and combine modes over its own fields: ice
+or rubber made once, for every surface of it. The bridge loads each
+material the world's Colliders name as it loads collision assets (before
+the first step when play begins, in the background during play, the
+Collider's shapes waiting for it, its body asleep), reads it once, and lets
+it go. One that is missing or damaged leaves the Colliders naming it their
+own fields (logged once). When the editor cooks a material again during
+play, `nph_engine_physics_reload` loads it again in the background, and
+once it is ready every shape naming it takes its new values in place, from
+the next step's contacts, its body weighed again for a new density (an
+explicit `mass` kept); a body at rest stays so until something touches it,
+and a load that fails keeps the values there were.
 
 **Triggers** ([ADR-0108](adr/0108-physics-in-levels.md)). A Collider
 with `trigger` makes sensors (physics.md "Sensors and ghosts"): shapes
@@ -1049,12 +1065,12 @@ side, its one-shots played, nothing starved or dropped ([audio.md](audio.md)
   main-thread budget. Capturing and blending in parallel jobs, or blending
   on the GPU (every consumer of instance transforms would), comes before
   games move that many.
-- Colliders are spheres, capsules, and boxes. The cooker writes convex
-  hulls and triangle meshes as collision assets, named by cooked scenes'
-  nodes (docs/cook.md "Collision"; ADR-0107), which colliders take next
-  (ADR-0102's step four). Heightfields, compounds through the hierarchy,
-  joint components, and sensors are to come (the physics API has them all
-  meanwhile).
+- Colliders are spheres, capsules, boxes, and collision assets' hulls and
+  meshes (ADR-0108); heightfields are to come (the physics API has them).
+- A Collider given another physics material during play waits without its
+  shapes while that material loads, unless another Collider named it
+  already: what a game swaps in play should be named somewhere at play
+  begin.
 - The character controller is not a component: a game keeps its
   characters in its state block and moves them in its systems.
 - Hot reload unloads the old image only after checking the engine's own

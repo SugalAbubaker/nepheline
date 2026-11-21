@@ -386,6 +386,25 @@ void nph_physics_shape_set_restitution_combine(NphPhysicsWorld *world, NphPhysic
     }
 }
 
+f32 nph_physics_shape_density(const NphPhysicsWorld *world, NphPhysicsShape shape)
+{
+    const PhysShape *s = checked(world, shape);
+    return s != NULL ? s->density : 0.0F;
+}
+
+void nph_physics_shape_set_density(NphPhysicsWorld *world, NphPhysicsShape shape, f32 density)
+{
+    NPH_ASSERT_MSG(!world->stepping, "physics: shape changed during a step");
+    const bool valid = nph_f32_is_finite(density) && density >= 0.0F;
+    NPH_ASSERT(valid);
+    PhysShape *s = checked(world, shape);
+    if (s == NULL || !valid) {
+        return;
+    }
+    s->density = density;
+    phys_body_update_mass(world, &world->bodies.data[s->body]);
+}
+
 void nph_physics_shape_set_friction(NphPhysicsWorld *world, NphPhysicsShape shape, f32 friction)
 {
     NPH_ASSERT(nph_f32_is_finite(friction) && friction >= 0.0F);

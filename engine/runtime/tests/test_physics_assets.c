@@ -3,9 +3,13 @@
 // ADR-0108): an asset's hulls and meshes as shapes, used in place at a scale of one and from
 // copies otherwise (shared, turned before they are scaled, mirrored with the entity); meshes left
 // out of dynamic bodies; assets missing or damaged making nothing; assets loading during play
-// waited for; parts taking their assets' shapes. Headless engines in lockstep: one step a frame.
+// waited for; parts taking their assets' shapes. And physics materials (components.h
+// `physics_material`): a Collider's surface and density from one, waited for while it loads, its
+// own where it cannot be read, and changed in place when it is cooked again. Headless engines in
+// lockstep: one step a frame.
 #include <nepheline/asset/collision.h>
 #include <nepheline/asset/format.h>
+#include <nepheline/asset/physics_material.h>
 #include <nepheline/core/alloc_debug.h>
 #include <nepheline/core/guid.h>
 #include <nepheline/math/quat.h>
@@ -541,5 +545,357 @@ NTEST(PhysicsAssets, parts_take_their_assets_shapes)
                               .mass,
                           1000.0F, 0.1F); // 2 x 1 x 0.5 m of water
     nph_engine_play_end(fx.engine);
+    finish(&fx);
+}
+
+// ---------------------------------------------------------------------------
+// Physics materials (ADR-0108)
+// ---------------------------------------------------------------------------
+
+static NphPhysicsMaterialHeader surface(f32 friction, f32 restitution, f32 density,
+                                        NphPhysicsMaterialCombine friction_combine,
+                                        NphPhysicsMaterialCombine restitution_combine)
+{
+    NphPhysicsMaterialHeader h;
+    memset(&h, 0, sizeof h);
+    h.friction = friction;
+    h.restitution = restitution;
+    h.density = density;
+    h.friction_combine = (u32)friction_combine;
+    h.restitution_combine = (u32)restitution_combine;
+    return h;
+}
+
+// The physics material asset `name` (its GUID's text and its file's) of `h`, in the fixture's
+// content: written again over the file it had when it has one (a cook again).
+static NphGuid write_physics_material(AssetFixture *f, const char *name,
+                                      const NphPhysicsMaterialHeader *h)
+{
+    const NphGuid guid = nph_guid_from_cstr(name);
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, nph_allocator_system(), NPH_ASSET_TYPE_PHYSICS_MATERIAL,
+                          NPH_PHYSICS_MATERIAL_TYPE_VERSION, guid, 1U);
+    NTEST_ASSERT_EQ_INT(nph_asset_writer_add_blob(&w, NPH_PHYSICS_MATERIAL_TAG_HEADER, 0U, h,
+                                                  sizeof *h, NPH_ASSET_CODEC_NONE, 0U),
+                        NPH_RESULT_OK);
+    TestAsset *t = NULL;
+    for (u32 i = 0U; i < f->asset_count && t == NULL; ++i) {
+        if (nph_guid_equals(f->assets[i].guid, guid)) {
+            t = &f->assets[i];
+        }
+    }
+    if (t == NULL) {
+        NTEST_ASSERT_LT_UINT(f->asset_count, NPH_ARRAY_COUNT(f->assets));
+        t = &f->assets[f->asset_count++];
+        t->guid = guid;
+        (void)snprintf(t->path, sizeof t->path, "%s.nph", name);
+    }
+    char full[1300];
+    (void)snprintf(full, sizeof full, "%s/%s", f->dir, t->path);
+    NTEST_ASSERT_EQ_INT(nph_asset_writer_write_file(&w, full), NPH_RESULT_OK);
+    nph_asset_writer_free(&w);
+    return guid;
+}
+
+// A box of half extents `half` at `at` turned by `q`, with a RigidBody of `type` (NO_RIGID_BODY:
+// none) and a Collider of the physics material `material` (null: its own surface), in the active
+// world.
+static NphEntity spawn_box(AssetFixture *f, NphDVec3 at, NphQuat q, NphVec3 half, u32 type,
+                           NphGuid material)
+{
+    NphWorld *w = nph_engine_world(f->engine);
+    NphComponentId comps[4] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM, NPH_COMPONENT_ID_WORLD_TRANSFORM,
+                               f->ids.collider};
+    u32 n = 3U;
+    if (type != NO_RIGID_BODY) {
+        comps[n++] = f->ids.rigid_body;
+    }
+    NphEntity e = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(w, comps, n, &e), NPH_RESULT_OK);
+    NphLocalTransform *lt =
+        NPH_WORLD_GET_MUT(w, e, NPH_COMPONENT_ID_LOCAL_TRANSFORM, NphLocalTransform);
+    lt->translation = at;
+    lt->rotation = q;
+    if (type != NO_RIGID_BODY) {
+        NPH_WORLD_GET_MUT(w, e, f->ids.rigid_body, NphRigidBody)->type = type;
+    }
+    NphCollider *c = NPH_WORLD_GET_MUT(w, e, f->ids.collider, NphCollider);
+    c->shape = (u32)NPH_COLLIDER_BOX;
+    c->half_extents = half;
+    c->physics_material = material;
+    return e;
+}
+
+// The one shape of an entity's body.
+static NphPhysicsShape only_shape(AssetFixture *f, NphEntity e)
+{
+    NphPhysicsShape s[2];
+    NTEST_ASSERT_EQ_UINT(shapes_of(f, e, s, 2U), 1U);
+    return s[0];
+}
+
+static f32 body_mass(AssetFixture *f, NphEntity e)
+{
+    return nph_physics_body_mass_data(nph_engine_physics(f->engine),
+                                      nph_engine_physics_body(f->engine, e))
+        .mass;
+}
+
+#define SLOPE 0.17453293F // 10 degrees: tan 0.176, so a friction of 0.6 holds and 0.02 slides
+
+static NphDVec3 position_of(AssetFixture *f, NphEntity e)
+{
+    return NPH_WORLD_GET(nph_engine_world(f->engine), e, NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                         NphLocalTransform)
+        ->translation;
+}
+
+// A box resting on a 10-degree slope of the slope's material `material`, the slope at `x`: the
+// box, and the slope in `out_slope`.
+static NphEntity box_on_slope(AssetFixture *f, f64 x, NphGuid material, NphEntity *out_slope)
+{
+    const NphQuat q = nph_quat_from_axis_angle(nph_vec3(0.0F, 0.0F, 1.0F), SLOPE);
+    *out_slope = spawn_box(f, nph_dvec3(x, 0.0, 0.0), q, nph_vec3(4.0F, 0.25F, 2.0F), NO_RIGID_BODY,
+                           material);
+    // On its surface, 1 mm above it: up the slope's normal from its centre, past both halves.
+    const NphVec3 n = nph_quat_rotate(q, nph_vec3(0.0F, 0.501F, 0.0F));
+    return spawn_box(f, nph_dvec3(x + (f64)n.x, (f64)n.y, (f64)n.z), q, nph_vec3_splat(0.25F),
+                     NPH_RIGID_BODY_DYNAMIC, NPH_GUID_NULL);
+}
+
+// How far the box went down its slope since `from`.
+static f64 slid(AssetFixture *f, NphEntity box, NphDVec3 from)
+{
+    const NphQuat q = nph_quat_from_axis_angle(nph_vec3(0.0F, 0.0F, 1.0F), SLOPE);
+    const NphVec3 down = nph_quat_rotate(q, nph_vec3(-1.0F, 0.0F, 0.0F));
+    const NphDVec3 to = position_of(f, box);
+    return (to.x - from.x) * (f64)down.x + (to.y - from.y) * (f64)down.y +
+           (to.z - from.z) * (f64)down.z;
+}
+
+// Ice: its Collider's shapes take the material's surface over their own, and a box holding on a
+// slope of the Collider's own friction slides down one of ice, slippery against it (the smaller
+// of the two) though the box's own mode is the default.
+NTEST(PhysicsMaterials, a_physics_material_is_its_colliders_surface)
+{
+    static AssetFixture fx;
+    start(&fx);
+    const NphPhysicsMaterialHeader ice_values =
+        surface(0.02F, 0.125F, 917.0F, NPH_PHYSICS_MATERIAL_COMBINE_MIN,
+                NPH_PHYSICS_MATERIAL_COMBINE_AVERAGE);
+    const NphGuid ice = write_physics_material(&fx, "ice.pmat", &ice_values);
+    create(&fx);
+    NphEntity plain_slope = NPH_ENTITY_NULL;
+    NphEntity icy_slope = NPH_ENTITY_NULL;
+    const NphEntity held = box_on_slope(&fx, -6.0, NPH_GUID_NULL, &plain_slope);
+    const NphEntity sliding = box_on_slope(&fx, 6.0, ice, &icy_slope);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(fx.engine, false), NPH_RESULT_OK);
+    NphPhysicsWorld *pw = nph_engine_physics(fx.engine);
+    const NphPhysicsShape icy = only_shape(&fx, icy_slope);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, icy), 0.02F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_restitution(pw, icy), 0.125F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_density(pw, icy), 917.0F, 0.0F);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_friction_combine(pw, icy), NPH_PHYSICS_COMBINE_MIN);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_restitution_combine(pw, icy),
+                        NPH_PHYSICS_COMBINE_AVERAGE);
+    const NphPhysicsShape plain = only_shape(&fx, plain_slope);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, plain), 0.6F, 0.0F);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_friction_combine(pw, plain), NPH_PHYSICS_COMBINE_DEFAULT);
+    const NphDVec3 held_from = position_of(&fx, held);
+    const NphDVec3 sliding_from = position_of(&fx, sliding);
+    frames(&fx, 240U); // a second
+    const f64 held_by = slid(&fx, held, held_from);
+    const f64 slid_by = slid(&fx, sliding, sliding_from);
+    NTEST_LOG("a second on 10 degrees: %.4f m down the plain slope, %.3f m down the ice", held_by,
+              slid_by);
+    NTEST_EXPECT_TRUE(held_by < 0.01);
+    // g (sin 10 - 0.02 cos 10) = 1.51 m/s^2: 0.75 m in a second.
+    NTEST_EXPECT_TRUE(slid_by > 0.6 && slid_by < 0.9);
+    nph_engine_play_end(fx.engine);
+    finish(&fx);
+}
+
+// A physics material's density weighs the bodies of the Colliders naming it, a part's its owner's;
+// a RigidBody's own mass still wins.
+NTEST(PhysicsMaterials, a_physics_materials_density_weighs_its_bodies)
+{
+    static AssetFixture fx;
+    start(&fx);
+    const NphPhysicsMaterialHeader lead_values =
+        surface(0.5F, 0.0F, 11340.0F, NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT,
+                NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
+    const NphGuid lead = write_physics_material(&fx, "lead.pmat", &lead_values);
+    create(&fx);
+    const NphVec3 half = nph_vec3_splat(0.5F); // a cubic metre
+    const NphEntity ingot = spawn_box(&fx, nph_dvec3(0.0, 5.0, 0.0), nph_quat_identity(), half,
+                                      NPH_RIGID_BODY_DYNAMIC, lead);
+    const NphEntity set = spawn_box(&fx, nph_dvec3(3.0, 5.0, 0.0), nph_quat_identity(), half,
+                                    NPH_RIGID_BODY_DYNAMIC, lead);
+    NphWorld *w = nph_engine_world(fx.engine);
+    NPH_WORLD_GET_MUT(w, set, fx.ids.rigid_body, NphRigidBody)->mass = 20.0F;
+    // A water crate with a lead lid: its part.
+    const NphEntity crate = spawn_box(&fx, nph_dvec3(6.0, 5.0, 0.0), nph_quat_identity(), half,
+                                      NPH_RIGID_BODY_DYNAMIC, NPH_GUID_NULL);
+    const NphEntity lid =
+        spawn_box(&fx, nph_dvec3(0.0, 1.0, 0.0), nph_quat_identity(), half, NO_RIGID_BODY, lead);
+    NTEST_ASSERT_EQ_INT(nph_world_set_parent(w, lid, crate), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(fx.engine, false), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F32(body_mass(&fx, ingot), 11340.0F, 0.5F);
+    NTEST_EXPECT_NEAR_F32(body_mass(&fx, set), 20.0F, 1e-3F);
+    NTEST_EXPECT_NEAR_F32(body_mass(&fx, crate), 12340.0F, 0.5F);
+    nph_engine_play_end(fx.engine);
+    finish(&fx);
+}
+
+// A Collider spawned in play naming a physics material nothing loaded before waits for it, asleep
+// where it is, then has its shape of the material's surface and falls.
+NTEST(PhysicsMaterials, physics_materials_loading_in_play_are_waited_for)
+{
+    static AssetFixture fx;
+    start(&fx);
+    const NphPhysicsMaterialHeader rubber_values =
+        surface(0.9F, 0.75F, 1100.0F, NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT,
+                NPH_PHYSICS_MATERIAL_COMBINE_MAX);
+    const NphGuid rubber = write_physics_material(&fx, "rubber.pmat", &rubber_values);
+    create(&fx);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(fx.engine, false), NPH_RESULT_OK);
+    const NphEntity bouncer = spawn_box(&fx, nph_dvec3(0.0, 3.0, 0.0), nph_quat_identity(),
+                                        nph_vec3_splat(0.25F), NPH_RIGID_BODY_DYNAMIC, rubber);
+    NphPhysicsShape s[2];
+    u32 waited = 0U;
+    bool still = true;
+    for (; waited < 600U && shapes_of(&fx, bouncer, s, 2U) == 0U; ++waited) {
+        frames(&fx, 1U);
+        still =
+            still && (shapes_of(&fx, bouncer, s, 2U) != 0U || position_of(&fx, bouncer).y == 3.0);
+    }
+    NTEST_ASSERT_EQ_UINT(shapes_of(&fx, bouncer, s, 2U), 1U);
+    NTEST_EXPECT_TRUE(still); // asleep while it waited
+    NTEST_LOG("the box waited %u frames for its physics material", waited);
+    NphPhysicsWorld *pw = nph_engine_physics(fx.engine);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, s[0]), 0.9F, 0.0F);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_restitution_combine(pw, s[0]), NPH_PHYSICS_COMBINE_MAX);
+    NTEST_EXPECT_NEAR_F32(body_mass(&fx, bouncer), 1100.0F * 0.125F, 0.01F);
+    frames(&fx, 120U);                                    // half a second: 1.2 m of fall
+    NTEST_EXPECT_TRUE(position_of(&fx, bouncer).y < 2.5); // woken with its shape, falling
+    nph_engine_play_end(fx.engine);
+    finish(&fx);
+}
+
+// A physics material that is missing or damaged leaves the Colliders naming it their own surface,
+// and they play.
+NTEST(PhysicsMaterials, a_material_that_cannot_be_read_leaves_the_colliders_own)
+{
+    static AssetFixture fx;
+    start(&fx);
+    const NphPhysicsMaterialHeader damaged_values =
+        surface(-1.0F, 0.0F, 1000.0F, NPH_PHYSICS_MATERIAL_COMBINE_MIN,
+                NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
+    const NphGuid damaged = write_physics_material(&fx, "damaged.pmat", &damaged_values);
+    create(&fx);
+    const NphEntity a = spawn_box(&fx, nph_dvec3(0.0, 0.0, 0.0), nph_quat_identity(),
+                                  nph_vec3_splat(0.5F), NO_RIGID_BODY, damaged);
+    const NphEntity b =
+        spawn_box(&fx, nph_dvec3(3.0, 0.0, 0.0), nph_quat_identity(), nph_vec3_splat(0.5F),
+                  NO_RIGID_BODY, nph_guid_from_cstr("nowhere.pmat"));
+    NphCollider *ca =
+        NPH_WORLD_GET_MUT(nph_engine_world(fx.engine), a, fx.ids.collider, NphCollider);
+    ca->friction = 0.3F;
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(fx.engine, false), NPH_RESULT_OK);
+    NphPhysicsWorld *pw = nph_engine_physics(fx.engine);
+    const NphPhysicsShape sa = only_shape(&fx, a);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, sa), 0.3F, 0.0F);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_friction_combine(pw, sa), NPH_PHYSICS_COMBINE_DEFAULT);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, only_shape(&fx, b)), 0.6F, 0.0F);
+    frames(&fx, 4U);
+    NTEST_EXPECT_FALSE(nph_engine_physics_reload(fx.engine, nph_guid_from_cstr("never.pmat")));
+    nph_engine_play_end(fx.engine);
+    finish(&fx);
+}
+
+// Whether the entity's body has one shape, of friction `want`.
+static bool has_friction(AssetFixture *f, NphEntity e, f32 want)
+{
+    NphPhysicsShape s[2];
+    return shapes_of(f, e, s, 2U) == 1U &&
+           nph_physics_shape_friction(nph_engine_physics(f->engine), s[0]) == want;
+}
+
+// Waits up to a second of frames for the entity's one shape to have friction `want` (none while
+// what it is made of loads); the frames waited.
+static u32 wait_friction(AssetFixture *f, NphEntity e, f32 want)
+{
+    u32 n = 0U;
+    for (; n < 240U && !has_friction(f, e, want); ++n) {
+        frames(f, 1U);
+    }
+    return n;
+}
+
+// A physics material cooked again during play: the shapes naming it take its new values in place
+// (the same shapes), their bodies weighed again, a part's owner too; a load that fails keeps the
+// values; a Collider naming another material is made again of it; nothing to do once play ends.
+NTEST(PhysicsMaterials, a_material_cooked_again_changes_its_shapes_in_place)
+{
+    static AssetFixture fx;
+    start(&fx);
+    const NphPhysicsMaterialHeader rubber_values =
+        surface(0.9F, 0.5F, 1100.0F, NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT,
+                NPH_PHYSICS_MATERIAL_COMBINE_MAX);
+    const NphGuid rubber = write_physics_material(&fx, "rubber.pmat", &rubber_values);
+    const NphPhysicsMaterialHeader steel_values =
+        surface(0.4F, 0.1F, 7850.0F, NPH_PHYSICS_MATERIAL_COMBINE_AVERAGE,
+                NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
+    const NphGuid steel = write_physics_material(&fx, "steel.pmat", &steel_values);
+    create(&fx);
+    const NphVec3 half = nph_vec3_splat(0.5F);
+    const NphEntity floor = spawn_box(&fx, nph_dvec3(0.0, -0.5, 0.0), nph_quat_identity(),
+                                      nph_vec3(10.0F, 0.5F, 10.0F), NO_RIGID_BODY, rubber);
+    const NphEntity crate = spawn_box(&fx, nph_dvec3(0.0, 0.5, 0.0), nph_quat_identity(), half,
+                                      NPH_RIGID_BODY_DYNAMIC, NPH_GUID_NULL);
+    const NphEntity lid =
+        spawn_box(&fx, nph_dvec3(0.0, 1.0, 0.0), nph_quat_identity(), half, NO_RIGID_BODY, rubber);
+    NphWorld *w = nph_engine_world(fx.engine);
+    NTEST_ASSERT_EQ_INT(nph_world_set_parent(w, lid, crate), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_engine_play_begin(fx.engine, false), NPH_RESULT_OK);
+    NphPhysicsWorld *pw = nph_engine_physics(fx.engine);
+    const NphPhysicsShape floor_shape = only_shape(&fx, floor);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, floor_shape), 0.9F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(body_mass(&fx, crate), 2100.0F, 0.5F); // water and rubber
+    // Cooked again: slippery, dead, and light.
+    const NphPhysicsMaterialHeader again = surface(
+        0.1F, 0.0F, 500.0F, NPH_PHYSICS_MATERIAL_COMBINE_MIN, NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
+    NTEST_ASSERT_TRUE(nph_guid_equals(write_physics_material(&fx, "rubber.pmat", &again), rubber));
+    NTEST_EXPECT_TRUE(nph_engine_physics_reload(fx.engine, rubber));
+    const u32 waited = wait_friction(&fx, floor, 0.1F);
+    NTEST_LOG("the reload reached the shapes in %u frames", waited);
+    NTEST_EXPECT_EQ_UINT(only_shape(&fx, floor).value, floor_shape.value); // in place
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_restitution(pw, floor_shape), 0.0F, 0.0F);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_friction_combine(pw, floor_shape),
+                        NPH_PHYSICS_COMBINE_MIN);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_restitution_combine(pw, floor_shape),
+                        NPH_PHYSICS_COMBINE_DEFAULT);
+    NTEST_EXPECT_NEAR_F32(body_mass(&fx, crate), 1500.0F, 0.5F); // the lid weighed again
+    // A load that fails keeps the values; the next good one is taken.
+    const NphPhysicsMaterialHeader damaged =
+        surface(-1.0F, 0.0F, 500.0F, NPH_PHYSICS_MATERIAL_COMBINE_MIN,
+                NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
+    (void)write_physics_material(&fx, "rubber.pmat", &damaged);
+    NTEST_EXPECT_TRUE(nph_engine_physics_reload(fx.engine, rubber));
+    frames(&fx, 30U);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_friction(pw, floor_shape), 0.1F, 0.0F);
+    const NphPhysicsMaterialHeader good =
+        surface(0.25F, 0.0F, 500.0F, NPH_PHYSICS_MATERIAL_COMBINE_MIN,
+                NPH_PHYSICS_MATERIAL_COMBINE_DEFAULT);
+    (void)write_physics_material(&fx, "rubber.pmat", &good);
+    NTEST_EXPECT_TRUE(nph_engine_physics_reload(fx.engine, rubber));
+    NTEST_EXPECT_LT_UINT(wait_friction(&fx, floor, 0.25F), 240U);
+    // Another material named: the shape made again of it, loaded in the background.
+    NPH_WORLD_GET_MUT(w, floor, fx.ids.collider, NphCollider)->physics_material = steel;
+    NTEST_EXPECT_LT_UINT(wait_friction(&fx, floor, 0.4F), 240U);
+    NTEST_EXPECT_EQ_INT(nph_physics_shape_friction_combine(pw, only_shape(&fx, floor)),
+                        NPH_PHYSICS_COMBINE_AVERAGE);
+    nph_engine_play_end(fx.engine);
+    NTEST_EXPECT_FALSE(nph_engine_physics_reload(fx.engine, rubber)); // not playing
     finish(&fx);
 }

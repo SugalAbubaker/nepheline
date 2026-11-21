@@ -3,6 +3,7 @@
 #include <nepheline/asset/material.h>
 #include <nepheline/asset/mesh.h>
 #include <nepheline/asset/pack.h>
+#include <nepheline/asset/physics_material.h>
 #include <nepheline/asset/scene.h>
 #include <nepheline/asset/sound.h>
 #include <nepheline/asset/texture.h>
@@ -2014,6 +2015,96 @@ NTEST(views, collision_view_resolves_and_checks_its_shapes)
 }
 
 // ---------------------------------------------------------------------------
+// Physics material
+// ---------------------------------------------------------------------------
+
+// Ice as a physics material asset of `type`: friction by the smaller (slippery against
+// anything), a little bounce averaged, ice's density; its header's first `header_bytes`.
+static void build_physics_material(ImageAsset *ia, u32 type, u64 header_bytes)
+{
+    NphAssetWriter w;
+    nph_asset_writer_init(&w, ia->alloc, type, NPH_PHYSICS_MATERIAL_TYPE_VERSION,
+                          nph_guid_from_cstr("ice"), 1U);
+    NphPhysicsMaterialHeader h;
+    memset(&h, 0, sizeof h);
+    h.friction = 0.02F;
+    h.restitution = 0.125F;
+    h.density = 917.0F;
+    h.friction_combine = (u32)NPH_PHYSICS_MATERIAL_COMBINE_MIN;
+    h.restitution_combine = (u32)NPH_PHYSICS_MATERIAL_COMBINE_AVERAGE;
+    add(&w, NPH_PHYSICS_MATERIAL_TAG_HEADER, 0U, &h, header_bytes);
+    image_asset_finish(ia, &w);
+}
+
+NTEST(views, physics_material_view_checks_every_value)
+{
+    ImageAsset ia;
+    memset(&ia, 0, sizeof ia);
+    ia.alloc = nph_allocator_system();
+    build_physics_material(&ia, NPH_ASSET_TYPE_PHYSICS_MATERIAL, sizeof(NphPhysicsMaterialHeader));
+    NphPhysicsMaterialView v;
+    NTEST_ASSERT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    NTEST_EXPECT_NEAR_F32(v.header->friction, 0.02F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(v.header->restitution, 0.125F, 0.0F);
+    NTEST_EXPECT_NEAR_F32(v.header->density, 917.0F, 0.0F);
+    NTEST_EXPECT_EQ_UINT(v.header->friction_combine, (u32)NPH_PHYSICS_MATERIAL_COMBINE_MIN);
+    NTEST_EXPECT_EQ_UINT(v.header->restitution_combine, (u32)NPH_PHYSICS_MATERIAL_COMBINE_AVERAGE);
+    NphPhysicsMaterialHeader *h =
+        (NphPhysicsMaterialHeader *)blob_bytes(&ia, NPH_PHYSICS_MATERIAL_TAG_HEADER, 0U);
+    // Each value is taken at its bounds, and refused past them, unbounded, or NaN.
+    f32 *const values[3] = {&h->friction, &h->restitution, &h->density};
+    const f32 highs[3] = {NPH_PHYSICS_MATERIAL_MAX_FRICTION, 1.0F,
+                          NPH_PHYSICS_MATERIAL_MAX_DENSITY};
+    for (u32 i = 0; i < 3U; ++i) {
+        const f32 was = *values[i];
+        *values[i] = 0.0F;
+        NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_OK);
+        *values[i] = highs[i];
+        NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_OK);
+        const f32 refused[4] = {-0.001F, highs[i] * 1.001F, NPH_F32_INFINITY,
+                                nph_f32_from_bits(0x7FC00000U)};
+        for (u32 k = 0; k < 4U; ++k) {
+            *values[i] = refused[k];
+            NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+        }
+        *values[i] = was;
+    }
+    // The modes: the last there is, and one past it.
+    h->friction_combine = (u32)NPH_PHYSICS_MATERIAL_COMBINE_MAX;
+    h->restitution_combine = (u32)NPH_PHYSICS_MATERIAL_COMBINE_MAX;
+    NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    h->friction_combine = (u32)NPH_PHYSICS_MATERIAL_COMBINE_COUNT;
+    NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->friction_combine = (u32)NPH_PHYSICS_MATERIAL_COMBINE_MIN;
+    h->restitution_combine = (u32)NPH_PHYSICS_MATERIAL_COMBINE_COUNT;
+    NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->restitution_combine = (u32)NPH_PHYSICS_MATERIAL_COMBINE_AVERAGE;
+    // Flags and reserved words.
+    h->flags = 1U;
+    NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->flags = 0U;
+    h->reserved[9] = 1U;
+    NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    h->reserved[9] = 0U;
+    NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_OK);
+    image_asset_free(&ia);
+    // A header short of its size; none; another type; another version.
+    build_physics_material(&ia, NPH_ASSET_TYPE_PHYSICS_MATERIAL,
+                           sizeof(NphPhysicsMaterialHeader) - 4U);
+    NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_CORRUPT);
+    NTEST_EXPECT_NULL(v.header);
+    image_asset_free(&ia);
+    build_collision(&ia, 128U, 64U, false);
+    NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_TYPE_MISMATCH);
+    image_asset_free(&ia);
+    build_physics_material(&ia, NPH_ASSET_TYPE_PHYSICS_MATERIAL, sizeof(NphPhysicsMaterialHeader));
+    ia.asset.header.type_version = NPH_PHYSICS_MATERIAL_TYPE_VERSION + 1U;
+    NTEST_EXPECT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_VERSION_MISMATCH);
+    image_asset_free(&ia);
+    NTEST_EXPECT_EQ_STR(nph_asset_type_name(NPH_ASSET_TYPE_PHYSICS_MATERIAL), "physics material");
+}
+
+// ---------------------------------------------------------------------------
 // Sound
 // ---------------------------------------------------------------------------
 
@@ -2303,6 +2394,10 @@ static void check_seed_asset(const char *name, u32 type)
         NphCollisionView v;
         NTEST_ASSERT_EQ_INT(nph_collision_view(&ia.asset, &v), NPH_RESULT_OK);
         NTEST_ASSERT_EQ_UINT(v.header->shape_count, 2U);
+    } else if (type == NPH_ASSET_TYPE_PHYSICS_MATERIAL) {
+        NphPhysicsMaterialView v;
+        NTEST_ASSERT_EQ_INT(nph_physics_material_view(&ia.asset, &v), NPH_RESULT_OK);
+        NTEST_ASSERT_EQ_UINT(v.header->friction_combine, (u32)NPH_PHYSICS_MATERIAL_COMBINE_MIN);
     } else if (type == NPH_ASSET_TYPE_SOUND) {
         NphSoundView v;
         NTEST_ASSERT_EQ_INT(nph_sound_view(&ia.asset, &v), NPH_RESULT_OK);
@@ -2334,6 +2429,7 @@ NTEST(views, fuzz_seeds_written_by_the_python_description_validate)
     check_seed_asset("nph/scene_cells", NPH_ASSET_TYPE_SCENE);
     check_seed_asset("nph/scene_collision", NPH_ASSET_TYPE_SCENE);
     check_seed_asset("nph/collision", NPH_ASSET_TYPE_COLLISION);
+    check_seed_asset("nph/physics_material", NPH_ASSET_TYPE_PHYSICS_MATERIAL);
     check_seed_asset("nph/sound", NPH_ASSET_TYPE_SOUND);
     check_seed_asset("nph/sound_streamed", NPH_ASSET_TYPE_SOUND);
 

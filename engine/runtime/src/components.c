@@ -58,6 +58,7 @@ static const NphCollider g_collider_defaults = {(u32)NPH_COLLIDER_BOX,
                                                 1000.0F,
                                                 0.6F,
                                                 0.0F,
+                                                {0U, 0U}, // its own surface, no physics material
                                                 1U,
                                                 NPH_U64_MAX,
                                                 0,

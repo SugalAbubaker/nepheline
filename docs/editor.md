@@ -204,11 +204,13 @@ changes directly, and those changes go with it when play stops.
 
 The asset browser shows the project's sources one folder at a time, with
 the path as buttons leading back up. Each file shows its kind (scene,
-editable mesh, image, sound, material, or neither) and whether the cooker
-has cooked it.
+editable mesh, image, sound, material, physics material, or neither) and
+whether the cooker has cooked it.
 - Double-clicking a folder opens it, a scene places it in front of the
   camera (cooking it first if it has not been), a material opens it in the
-  material panel, and an image or a sound cooks it.
+  material panel, and an image, a sound, or a physics material cooks it. A
+  physics material cooked during play reaches the shapes playing it
+  (runtime.md "Physics materials").
 - A scene dragged into the viewport is placed where the mouse is. A
   material drags onto an entity (in the viewport, the outliner, or a slot
   in the inspector), and an image onto a material's texture slot.

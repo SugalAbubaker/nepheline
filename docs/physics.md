@@ -567,7 +567,11 @@ product, or the maximum (`NphPhysicsCombine`; ADR-0108). Of a pair's two
 modes the higher decides, in that order (PhysX's), so ice (the minimum) is
 slippery against every shape of the default and the average modes; either
 order of the two shapes gives the same bits. Pairs of default shapes pay
-one test for it. A sensor or a ghost touches nothing ("Sensors and ghosts"
+one test for it. A shape's surface may change between steps: friction,
+restitution, and their modes apply from the next step's contacts, and a new
+density (`nph_physics_shape_set_density`) weighs its body again at once, as
+though the shape had been made with it (an explicit mass kept); neither
+wakes a body. A sensor or a ghost touches nothing ("Sensors and ghosts"
 below).
 
 **Compounds** are bodies with several shapes (ADR-0046 §11, as PhysX and
@@ -1483,9 +1487,10 @@ reference CPU class.
   to 8 workers with nothing under the surface; and the same slide 10 000 km
   out.
 - Compounds (`test_world.c`): a body's mass properties summed from posed
-  shapes, a table of five boxes standing on its four legs and sleeping on
-  a box ground and on a heightfield, and a compound's own shapes never
-  meeting.
+  shapes, and weighed again when a shape's density changes (as though made
+  so; an explicit mass kept until cleared), a table of five boxes standing
+  on its four legs and sleeping on a box ground and on a heightfield, and a
+  compound's own shapes never meeting.
 - The tree against brute force through random edits, moves, enlargements,
   category changes, and rebuilds; raycasts (every hit and the closest) and
   box casts (every box the swept box meets, a zero box as the ray); partial

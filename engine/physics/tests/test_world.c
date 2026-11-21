@@ -218,6 +218,65 @@ NTEST(world, compounds_sum_their_shapes_mass)
     scene_end(&s);
 }
 
+// Two unit cubes 2 m apart, of densities `left` and `right`, on a new body; `out` gets the
+// right one's shape.
+static NphPhysicsBody two_cubes(NphPhysicsWorld *w, f32 left, f32 right, NphPhysicsShape *out)
+{
+    NphPhysicsBodyDesc bd = nph_physics_body_desc_default();
+    NphPhysicsBody b;
+    NTEST_ASSERT_EQ_INT(nph_physics_body_create(w, &bd, &b), NPH_RESULT_OK);
+    NphPhysicsShapeDesc sd =
+        nph_physics_shape_desc_default(nph_physics_geometry_box(nph_vec3_splat(0.5F)));
+    sd.pose = nph_physics_pose(nph_vec3(-1.0F, 0.0F, 0.0F), nph_quat_identity());
+    sd.density = left;
+    NphPhysicsShape shape;
+    NTEST_ASSERT_EQ_INT(nph_physics_shape_create(w, b, &sd, &shape), NPH_RESULT_OK);
+    sd.pose = nph_physics_pose(nph_vec3(1.0F, 0.0F, 0.0F), nph_quat_identity());
+    sd.density = right;
+    NTEST_ASSERT_EQ_INT(nph_physics_shape_create(w, b, &sd, out), NPH_RESULT_OK);
+    return b;
+}
+
+// A shape's new density weighs its body again, as though the shape had been made with it (ADR-0108:
+// a physics material changed in play); a body whose mass was set keeps it until it is cleared.
+NTEST(world, a_new_density_weighs_the_body_again)
+{
+    Scene s;
+    scene_begin(&s);
+    NphPhysicsShape right;
+    const NphPhysicsBody b = two_cubes(s.w, 1000.0F, 1000.0F, &right);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_density(s.w, right), 1000.0F, 0.0F);
+    nph_physics_shape_set_density(s.w, right, 3000.0F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_shape_density(s.w, right), 3000.0F, 0.0F);
+    // Twice the mass, its centre halfway to the dense cube: what a body made so has.
+    const NphPhysicsMassData got = nph_physics_body_mass_data(s.w, b);
+    NTEST_EXPECT_NEAR_F32(got.mass, 4000.0F, 1e-2F);
+    NTEST_EXPECT_NEAR_F32(got.center.x, 0.5F, 1e-6F);
+    NphPhysicsShape unused;
+    const NphPhysicsMassData want =
+        nph_physics_body_mass_data(s.w, two_cubes(s.w, 1000.0F, 3000.0F, &unused));
+    NTEST_EXPECT_NEAR_F32(got.mass, want.mass, 0.0F);
+    NTEST_EXPECT_TRUE(nph_vec3_near(got.center, want.center, 0.0F));
+    for (u32 c = 0U; c < 3U; ++c) {
+        NTEST_EXPECT_TRUE(nph_vec3_near(got.inertia.c[c], want.inertia.c[c], 0.0F));
+    }
+    // A mass set explicitly stays; cleared, the shapes' as they are now.
+    NphPhysicsMassData set = got;
+    set.mass = 10.0F;
+    nph_physics_body_set_mass_data(s.w, b, &set);
+    nph_physics_shape_set_density(s.w, right, 5000.0F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(s.w, b).mass, 10.0F, 0.0F);
+    NphPhysicsMassData none;
+    memset(&none, 0, sizeof none);
+    nph_physics_body_set_mass_data(s.w, b, &none);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(s.w, b).mass, 6000.0F, 1e-2F);
+    // No density: no mass of its own.
+    nph_physics_shape_set_density(s.w, right, 0.0F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(s.w, b).mass, 1000.0F, 1e-2F);
+    NTEST_EXPECT_NEAR_F32(nph_physics_body_mass_data(s.w, b).center.x, -1.0F, 1e-6F);
+    scene_end(&s);
+}
+
 NTEST(world, a_table_stands_on_its_legs_and_sleeps)
 {
     // On a box ground and on a heightfield: a compound's every shape has

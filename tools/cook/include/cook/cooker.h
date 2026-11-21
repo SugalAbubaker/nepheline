@@ -16,7 +16,9 @@
 // image and usage) plus one scene asset; an image file becomes one
 // texture asset; an editable mesh (`.nmesh`, polymesh.h) becomes one mesh
 // asset; a WAV file becomes one sound asset (sound.h), with the settings
-// of the JSON file beside it when there is one. Output paths mirror the
+// of the JSON file beside it when there is one; a material (`.nmat`,
+// material.h) and a physics material (`.npmat`, physics_material.h) become
+// one asset each. Output paths mirror the
 // source tree:
 // `<key, its '.' made '_'>/<kind>_<index>_<name>.nph` (for example
 // `models/crate_gltf/mesh_0_Crate.nph`), sanitised to [A-Za-z0-9._-];
@@ -87,12 +89,13 @@ void cooker_destroy(Cooker *cooker);
 
 // What the cooker makes of a source, by its extension in any case.
 typedef enum CookerSourceKind {
-    COOKER_SOURCE_NONE = 0, // not a source the cooker reads
-    COOKER_SOURCE_SCENE,    // .gltf and .glb
-    COOKER_SOURCE_IMAGE,    // .png, .jpg, .jpeg, .tga, .bmp, .hdr, and .dds
-    COOKER_SOURCE_MESH,     // .nmesh (polymesh.h)
-    COOKER_SOURCE_SOUND,    // .wav (sound.h)
-    COOKER_SOURCE_MATERIAL, // .nmat (material.h)
+    COOKER_SOURCE_NONE = 0,         // not a source the cooker reads
+    COOKER_SOURCE_SCENE,            // .gltf and .glb
+    COOKER_SOURCE_IMAGE,            // .png, .jpg, .jpeg, .tga, .bmp, .hdr, and .dds
+    COOKER_SOURCE_MESH,             // .nmesh (polymesh.h)
+    COOKER_SOURCE_SOUND,            // .wav (sound.h)
+    COOKER_SOURCE_MATERIAL,         // .nmat (material.h)
+    COOKER_SOURCE_PHYSICS_MATERIAL, // .npmat (physics_material.h)
 } CookerSourceKind;
 
 CookerSourceKind cooker_source_kind(const char *path);
@@ -104,12 +107,14 @@ NphGuid cooker_asset_guid(const char *key, const char *sub);
 
 // Cooks one source by its kind: a scene, an image as a texture with the
 // default usage (HDR for .hdr) or its settings file's, an editable mesh, a
-// sound, or a material. A directory is walked (cooker_cook_directory).
+// sound, a material, or a physics material. A directory is walked
+// (cooker_cook_directory).
 // NPH_RESULT_UNSUPPORTED for another extension.
 NPH_MUST_USE NphResult cooker_cook_file(Cooker *cooker, const char *source_path);
 
 // Cooks every scene (.gltf, .glb), editable mesh (.nmesh), sound (.wav),
-// and material (.nmat) under `dir`, recursively, in name order (images are
+// material (.nmat), and physics material (.npmat) under `dir`, recursively,
+// in name order (images are
 // cooked through the scenes and materials that use them, or one by one with
 // cooker_cook_image). The first error is returned after every file was
 // tried.
@@ -133,6 +138,11 @@ NPH_MUST_USE NphResult cooker_cook_image(Cooker *cooker, const char *source_path
 // settings file). NPH_RESULT_NOT_FOUND for an image that is missing; the
 // reader's errors.
 NPH_MUST_USE NphResult cooker_cook_material(Cooker *cooker, const char *source_path);
+
+// Cooks a physics material source (physics_material.h) as a physics
+// material asset, sub-asset "physics_material" (asset/physics_material.h),
+// whose content hash is the source's bytes. The reader's errors.
+NPH_MUST_USE NphResult cooker_cook_physics_material(Cooker *cooker, const char *source_path);
 
 // Cooks an editable mesh (polymesh.h) as a mesh asset, sub-asset "mesh":
 // its faces triangulated, with normals by its smoothing angle, through the

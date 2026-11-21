@@ -363,10 +363,13 @@ static void finished(Editor *ed, const EditorImportResult *res)
                      res->skipped);
     }
     // What the cook replaced is read again wherever it is drawn, before
-    // anything new takes it.
+    // anything new takes it, and a physics material wherever it plays.
     NphSceneRenderer *sr = nph_engine_scene_renderer(ed->engine);
-    for (u32 i = 0; sr != NULL && i < res->written_count; ++i) {
-        (void)nph_scene_renderer_reload(sr, res->written[i]);
+    for (u32 i = 0; i < res->written_count; ++i) {
+        if (sr != NULL) {
+            (void)nph_scene_renderer_reload(sr, res->written[i]);
+        }
+        (void)nph_engine_physics_reload(ed->engine, res->written[i]);
     }
     editor_mesh_edit_finished(ed, res);
     editor_material_finished(ed, res);
@@ -668,6 +671,8 @@ static const char *kind_name(const EditorAssetEntry *e)
         return "sound";
     case (u32)COOKER_SOURCE_MATERIAL:
         return "material";
+    case (u32)COOKER_SOURCE_PHYSICS_MATERIAL:
+        return "physics material";
     default:
         break;
     }
@@ -734,6 +739,7 @@ static BrowserAction double_click_action(const EditorAssetEntry *e, bool playing
         return ACTION_EDIT;
     case COOKER_SOURCE_IMAGE:
     case COOKER_SOURCE_SOUND:
+    case COOKER_SOURCE_PHYSICS_MATERIAL:
         return ACTION_COOK;
     case COOKER_SOURCE_NONE:
         break;
@@ -796,6 +802,7 @@ static void drag_source(const EditorAssets *a, const EditorAssetEntry *e)
         verb = "Image";
         break;
     case COOKER_SOURCE_SOUND:
+    case COOKER_SOURCE_PHYSICS_MATERIAL:
     case COOKER_SOURCE_NONE:
         break;
     }

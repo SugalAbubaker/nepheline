@@ -34,6 +34,8 @@ nph_add_fuzzer(nmesh SOURCES fuzz_nmesh.c fuzz_mesh_check.h DEPS nph::cook)
 # texture_import.h; ADR-0105): read, written back, and the material's asset
 # viewed as the runtime views it.
 nph_add_fuzzer(nmat SOURCES fuzz_nmat.c DEPS nph::cook)
+# The physics material source reader (tools/cook/physics_material.h; ADR-0108).
+nph_add_fuzzer(npmat SOURCES fuzz_npmat.c DEPS nph::cook)
 nph_add_fuzzer(texture_import SOURCES fuzz_texture_import.c DEPS nph::cook)
 nph_add_fuzzer(scene_import SOURCES fuzz_scene_import.c DEPS nph::cook)
 # The material previews' cache files (tools/cook/preview.h; ADR-0105): read for the key
