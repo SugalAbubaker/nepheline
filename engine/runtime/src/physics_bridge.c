@@ -590,28 +590,6 @@ static NphQuat body_rotation(NphQuat q)
     return nph_quat_is_normalized(q, 1e-6F) ? q : nph_quat_normalize_or_identity(q);
 }
 
-// A frame's scale along each of its axes: their lengths, Z's negative where
-// the axes mirror (axes_rotation takes out the rotation of the unmirrored
-// twin, and this mirror puts it back).
-static NphVec3 axes_scale(NphVec3 x, NphVec3 y, NphVec3 z)
-{
-    const f32 sz = nph_vec3_length(z);
-    return nph_vec3(nph_vec3_length(x), nph_vec3_length(y),
-                    nph_vec3_dot(nph_vec3_cross(x, y), z) < 0.0F ? -sz : sz);
-}
-
-// The rotation of a frame's axes with their scale and shear taken out
-// (Gram-Schmidt from X; a mirrored frame turns into the rotation of its
-// unmirrored twin).
-static NphQuat axes_rotation(NphVec3 xa, NphVec3 ya)
-{
-    const NphVec3 x = nph_vec3_normalize_or(xa, nph_vec3_unit_x());
-    NphVec3 y = nph_vec3_sub(ya, nph_vec3_scale(x, nph_vec3_dot(ya, x)));
-    y = nph_vec3_normalize_or(y, nph_vec3_perpendicular(x));
-    const NphVec3 z = nph_vec3_cross(x, y);
-    return nph_quat_normalize(nph_quat_from_mat3(nph_mat3_from_cols(x, y, z)));
-}
-
 static const NphWorldTransform *transform_of(const PhysicsBridge *b, NphEntity parent)
 {
     if (nph_entity_is_null(parent)) {
@@ -642,8 +620,8 @@ static EntityPose entity_pose_under(const PhysicsBridge *b, NphEntity parent,
     }
     const NphWorldTransform w = nph_world_transform_compose(pw, local);
     p.position = w.translation;
-    p.rotation = axes_rotation(w.x_axis, w.y_axis);
-    p.scale = axes_scale(w.x_axis, w.y_axis, w.z_axis);
+    p.rotation = nph_body_axes_rotation(w.x_axis, w.y_axis);
+    p.scale = nph_body_axes_scale(w.x_axis, w.y_axis, w.z_axis);
     p.parented = true;
     return p;
 }
@@ -674,7 +652,7 @@ static void local_from_pose(const PhysicsBridge *b, NphEntity e, NphDVec3 positi
     // The offset in f32 is relative to the parent, near it: full precision
     // where it matters (§8.2).
     local->translation = nph_dvec3_from_vec3(nph_mat3_mul_vec3(inv, d));
-    const NphQuat parent_rotation = axes_rotation(pw->x_axis, pw->y_axis);
+    const NphQuat parent_rotation = nph_body_axes_rotation(pw->x_axis, pw->y_axis);
     local->rotation =
         nph_quat_normalize(nph_quat_mul(nph_quat_conjugate(parent_rotation), rotation));
 }
@@ -891,8 +869,8 @@ static bool part_frame(const PhysicsBridge *b, const BodyRecord *r, const NphLoc
     }
     m = nph_world_transform_compose(&m, local);
     out_frame->position = nph_dvec3_to_vec3(m.translation);
-    out_frame->rotation = axes_rotation(m.x_axis, m.y_axis);
-    *out_scale = axes_scale(m.x_axis, m.y_axis, m.z_axis);
+    out_frame->rotation = nph_body_axes_rotation(m.x_axis, m.y_axis);
+    *out_scale = nph_body_axes_scale(m.x_axis, m.y_axis, m.z_axis);
     *out_between = n;
     return true;
 }

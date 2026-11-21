@@ -31,6 +31,8 @@
 // Thread-safety: the descriptors are immutable statics (NPH_THREADSAFE);
 // registration is a change to the world.
 
+#include <nepheline/asset/asset.h>
+#include <nepheline/math/mat.h>
 #include <nepheline/physics/geometry.h>
 #include <nepheline/scene/world.h>
 
@@ -48,15 +50,15 @@ extern "C" {
 // MeshMaterials for it. `cell`: the id of the WorldCell it belongs to (0: none),
 // whose proxy stands for it from afar.
 #define NPH_MESH_RENDERER_FIELDS(F)                                                                \
-    F(GUID, mesh, NPH_FIELD_NO_HINTS)                                                              \
-    F(GUID, material0, NPH_FIELD_NO_HINTS)                                                         \
-    F(GUID, material1, NPH_FIELD_NO_HINTS)                                                         \
-    F(GUID, material2, NPH_FIELD_NO_HINTS)                                                         \
-    F(GUID, material3, NPH_FIELD_NO_HINTS)                                                         \
-    F(GUID, material4, NPH_FIELD_NO_HINTS)                                                         \
-    F(GUID, material5, NPH_FIELD_NO_HINTS)                                                         \
-    F(GUID, material6, NPH_FIELD_NO_HINTS)                                                         \
-    F(GUID, material7, NPH_FIELD_NO_HINTS)                                                         \
+    F(GUID, mesh, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MESH))                                            \
+    F(GUID, material0, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                   \
+    F(GUID, material1, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                   \
+    F(GUID, material2, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                   \
+    F(GUID, material3, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                   \
+    F(GUID, material4, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                   \
+    F(GUID, material5, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                   \
+    F(GUID, material6, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                   \
+    F(GUID, material7, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                   \
     F(BOOL, hidden, NPH_FIELD_NO_HINTS)                                                            \
     F(U32, cell, NPH_FIELD_NO_HINTS)
 NPH_COMPONENT_STRUCT(NphMeshRenderer, NPH_MESH_RENDERER_FIELDS);
@@ -95,30 +97,30 @@ NPH_STATIC_ASSERT(offsetof(NphMeshRenderer, material7) ==
 // the MeshRenderer too).
 #define NPH_MESH_MATERIALS_EXTRA 24U
 #define NPH_MESH_MATERIALS_FIELDS(F)                                                               \
-    F(GUID, material8, NPH_FIELD_NO_HINTS)                                                         \
-    F(GUID, material9, NPH_FIELD_NO_HINTS)                                                         \
-    F(GUID, material10, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material11, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material12, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material13, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material14, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material15, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material16, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material17, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material18, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material19, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material20, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material21, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material22, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material23, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material24, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material25, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material26, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material27, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material28, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material29, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material30, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, material31, NPH_FIELD_NO_HINTS)
+    F(GUID, material8, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                   \
+    F(GUID, material9, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                   \
+    F(GUID, material10, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material11, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material12, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material13, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material14, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material15, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material16, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material17, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material18, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material19, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material20, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material21, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material22, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material23, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material24, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material25, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material26, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material27, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material28, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material29, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material30, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                                  \
+    F(GUID, material31, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))
 NPH_COMPONENT_STRUCT(NphMeshMaterials, NPH_MESH_MATERIALS_FIELDS);
 NPH_COMPONENT_DECLARE(NphMeshMaterials);
 
@@ -155,7 +157,7 @@ typedef enum NphLightType {
 // many lights (render/renderer.h NphRenderManyLight): per pixel within it, through
 // the radiance cache beyond, and `shadows` does not apply.
 #define NPH_LIGHT_FIELDS(F)                                                                        \
-    F(U32, type, NPH_FIELD_RANGE(0.0F, 2.0F))                                                      \
+    F(U32, type, NPH_FIELD_ENUM("directional|point|spot"))                                         \
     F(VEC3, color, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_COLOR))                                          \
     F(F32, intensity, NPH_FIELD_NO_HINTS)                                                          \
     F(F32, range, NPH_FIELD_NO_HINTS)                                                              \
@@ -182,7 +184,7 @@ NPH_COMPONENT_DECLARE(NphLight);
     F(F32, yfov, NPH_FIELD_HINTS(NPH_FIELD_FLAG_ANGLE | NPH_FIELD_FLAG_RANGE, 0.1F, 2.8F))         \
     F(F32, znear, NPH_FIELD_RANGE(0.001F, 10.0F))                                                  \
     F(F32, ev100, NPH_FIELD_RANGE(-6.0F, 20.0F))                                                   \
-    F(U32, tonemapper, NPH_FIELD_RANGE(0.0F, 2.0F))                                                \
+    F(U32, tonemapper, NPH_FIELD_ENUM("none|ACES|AgX"))                                            \
     F(BOOL, active, NPH_FIELD_NO_HINTS)                                                            \
     F(F32, shutter, NPH_FIELD_RANGE(0.0F, 0.1F))                                                   \
     F(F32, aperture, NPH_FIELD_RANGE(0.0F, 32.0F))                                                 \
@@ -245,14 +247,14 @@ typedef enum NphRigidBodyType {
 // asleep when it comes to rest, which makes it free until something wakes
 // it.
 #define NPH_RIGID_BODY_FIELDS(F)                                                                   \
-    F(U32, type, NPH_FIELD_RANGE(0.0F, 2.0F))                                                      \
+    F(U32, type, NPH_FIELD_ENUM("static|kinematic|dynamic"))                                       \
     F(F32, mass, NPH_FIELD_RANGE(0.0F, 100000.0F))                                                 \
     F(VEC3, linear_velocity, NPH_FIELD_NO_HINTS)                                                   \
     F(VEC3, angular_velocity, NPH_FIELD_NO_HINTS)                                                  \
     F(F32, linear_damping, NPH_FIELD_RANGE(0.0F, 100.0F))                                          \
     F(F32, angular_damping, NPH_FIELD_RANGE(0.0F, 100.0F))                                         \
     F(F32, gravity_scale, NPH_FIELD_RANGE(-10.0F, 10.0F))                                          \
-    F(U32, locks, NPH_FIELD_RANGE(0.0F, 63.0F))                                                    \
+    F(U32, locks, NPH_FIELD_BITS("linear x|linear y|linear z|angular x|angular y|angular z"))      \
     F(BOOL, bullet, NPH_FIELD_NO_HINTS)                                                            \
     F(BOOL, can_sleep, NPH_FIELD_NO_HINTS)
 NPH_COMPONENT_STRUCT(NphRigidBody, NPH_RIGID_BODY_FIELDS);
@@ -290,7 +292,7 @@ typedef enum NphColliderShape {
 // see moving shapes whose category meets their mask; convex only, so an
 // ASSET trigger leaves its meshes out.
 #define NPH_COLLIDER_FIELDS(F)                                                                     \
-    F(U32, shape, NPH_FIELD_RANGE(0.0F, 3.0F))                                                     \
+    F(U32, shape, NPH_FIELD_ENUM("sphere|capsule|box|asset"))                                      \
     F(F32, radius, NPH_FIELD_RANGE(0.001F, 100.0F))                                                \
     F(F32, half_height, NPH_FIELD_RANGE(0.0F, 100.0F))                                             \
     F(VEC3, half_extents, NPH_FIELD_NO_HINTS)                                                      \
@@ -299,12 +301,12 @@ typedef enum NphColliderShape {
     F(F32, density, NPH_FIELD_RANGE(0.0F, 20000.0F))                                               \
     F(F32, friction, NPH_FIELD_RANGE(0.0F, 2.0F))                                                  \
     F(F32, restitution, NPH_FIELD_RANGE(0.0F, 1.0F))                                               \
-    F(GUID, physics_material, NPH_FIELD_NO_HINTS)                                                  \
-    F(U64, category, NPH_FIELD_NO_HINTS)                                                           \
-    F(U64, mask, NPH_FIELD_NO_HINTS)                                                               \
+    F(GUID, physics_material, NPH_FIELD_ASSET(NPH_ASSET_TYPE_PHYSICS_MATERIAL))                    \
+    F(U64, category, NPH_FIELD_BITS(NULL))                                                         \
+    F(U64, mask, NPH_FIELD_BITS(NULL))                                                             \
     F(I32, group, NPH_FIELD_NO_HINTS)                                                              \
     F(BOOL, hit_events, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, collision, NPH_FIELD_NO_HINTS)                                                         \
+    F(GUID, collision, NPH_FIELD_ASSET(NPH_ASSET_TYPE_COLLISION))                                  \
     F(BOOL, trigger, NPH_FIELD_NO_HINTS)
 NPH_COMPONENT_STRUCT(NphCollider, NPH_COLLIDER_FIELDS);
 NPH_COMPONENT_DECLARE(NphCollider);
@@ -351,7 +353,7 @@ typedef enum NphJointKind {
 } NphJointKind;
 
 #define NPH_JOINT_FIELDS(F)                                                                        \
-    F(U32, kind, NPH_FIELD_RANGE(0.0F, 4.0F))                                                      \
+    F(U32, kind, NPH_FIELD_ENUM("ball|hinge|fixed|slider|distance"))                               \
     F(ENTITY, other, NPH_FIELD_NO_HINTS)                                                           \
     F(VEC3, anchor, NPH_FIELD_NO_HINTS)                                                            \
     F(VEC3, axis, NPH_FIELD_NO_HINTS)                                                              \
@@ -414,8 +416,8 @@ NPH_STATIC_ASSERT(sizeof(NphJoint) == 96U, "Joint is 96 bytes");
     F(VEC3, velocity, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_READONLY | NPH_FIELD_FLAG_TRANSIENT))         \
     F(BOOL, grounded, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_READONLY | NPH_FIELD_FLAG_TRANSIENT))         \
     F(ENTITY, ground, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_READONLY | NPH_FIELD_FLAG_TRANSIENT))         \
-    F(U64, category, NPH_FIELD_NO_HINTS)                                                           \
-    F(U64, mask, NPH_FIELD_NO_HINTS)
+    F(U64, category, NPH_FIELD_BITS(NULL))                                                         \
+    F(U64, mask, NPH_FIELD_BITS(NULL))
 NPH_COMPONENT_STRUCT(NphCharacterController, NPH_CHARACTER_CONTROLLER_FIELDS);
 NPH_COMPONENT_DECLARE(NphCharacterController);
 
@@ -460,15 +462,15 @@ typedef enum NphAudioSourceBus {
 // `reverb` is its send to the room's reverberation (0 .. 1); `priority`
 // keeps its voice real over lower ones (0 .. 255).
 #define NPH_AUDIO_SOURCE_FIELDS(F)                                                                 \
-    F(GUID, sound, NPH_FIELD_NO_HINTS)                                                             \
-    F(U32, bus, NPH_FIELD_RANGE(0.0F, 4.0F))                                                       \
+    F(GUID, sound, NPH_FIELD_ASSET(NPH_ASSET_TYPE_SOUND))                                          \
+    F(U32, bus, NPH_FIELD_ENUM("effects|music|dialogue|ambience|ui"))                              \
     F(F32, volume, NPH_FIELD_RANGE(0.0F, 4.0F))                                                    \
     F(F32, pitch, NPH_FIELD_RANGE(0.125F, 8.0F))                                                   \
     F(BOOL, loop, NPH_FIELD_NO_HINTS)                                                              \
     F(BOOL, autoplay, NPH_FIELD_NO_HINTS)                                                          \
     F(BOOL, playing, NPH_FIELD_FLAGS(NPH_FIELD_FLAG_TRANSIENT))                                    \
     F(BOOL, spatial, NPH_FIELD_NO_HINTS)                                                           \
-    F(U32, rolloff, NPH_FIELD_RANGE(0.0F, 3.0F))                                                   \
+    F(U32, rolloff, NPH_FIELD_ENUM("inverse|linear|curve|none"))                                   \
     F(F32, min_distance, NPH_FIELD_RANGE(0.01F, 1000.0F))                                          \
     F(F32, max_distance, NPH_FIELD_RANGE(0.01F, 100000.0F))                                        \
     F(F32, rolloff_factor, NPH_FIELD_RANGE(0.0F, 10.0F))                                           \
@@ -490,6 +492,29 @@ NPH_COMPONENT_STRUCT(NphAudioListener, NPH_AUDIO_LISTENER_FIELDS);
 NPH_COMPONENT_DECLARE(NphAudioListener);
 
 NPH_STATIC_ASSERT(sizeof(NphAudioSource) == 112U, "AudioSource is 112 bytes");
+
+// How a body takes the frame of an entity under a parent (ADR-0108): from its
+// world transform's axes, the rotation of their unmirrored twin with their
+// scale and shear taken out (Gram-Schmidt from X), and their lengths, Z's
+// negative where the axes mirror (the rotation leaves the mirror out, the
+// scale puts it back). A root's body takes its LocalTransform's rotation and
+// scale as they are instead. The engine's bodies and the editor's outlines
+// of them both take frames so.
+NPH_INLINE NphQuat nph_body_axes_rotation(NphVec3 x_axis, NphVec3 y_axis)
+{
+    const NphVec3 x = nph_vec3_normalize_or(x_axis, nph_vec3_unit_x());
+    NphVec3 y = nph_vec3_sub(y_axis, nph_vec3_scale(x, nph_vec3_dot(y_axis, x)));
+    y = nph_vec3_normalize_or(y, nph_vec3_perpendicular(x));
+    const NphVec3 z = nph_vec3_cross(x, y);
+    return nph_quat_normalize(nph_quat_from_mat3(nph_mat3_from_cols(x, y, z)));
+}
+
+NPH_INLINE NphVec3 nph_body_axes_scale(NphVec3 x_axis, NphVec3 y_axis, NphVec3 z_axis)
+{
+    const f32 sz = nph_vec3_length(z_axis);
+    return nph_vec3(nph_vec3_length(x_axis), nph_vec3_length(y_axis),
+                    nph_vec3_dot(nph_vec3_cross(x_axis, y_axis), z_axis) < 0.0F ? -sz : sz);
+}
 
 // The shape a Collider makes on an entity of world scale `scale` (per
 // local axis, negative where the entity mirrors): its geometry, sized by
@@ -513,8 +538,8 @@ bool nph_collider_shape(const NphCollider *collider, NphVec3 scale,
     F(U32, id, NPH_FIELD_NO_HINTS)                                                                 \
     F(VEC3, bounds_min, NPH_FIELD_NO_HINTS)                                                        \
     F(VEC3, bounds_max, NPH_FIELD_NO_HINTS)                                                        \
-    F(GUID, proxy, NPH_FIELD_NO_HINTS)                                                             \
-    F(GUID, proxy_material, NPH_FIELD_NO_HINTS)                                                    \
+    F(GUID, proxy, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MESH))                                           \
+    F(GUID, proxy_material, NPH_FIELD_ASSET(NPH_ASSET_TYPE_MATERIAL))                              \
     F(VEC3, proxy_origin, NPH_FIELD_NO_HINTS)                                                      \
     F(F32, proxy_cell, NPH_FIELD_NO_HINTS)                                                         \
     F(F32, proxy_distance, NPH_FIELD_NO_HINTS)

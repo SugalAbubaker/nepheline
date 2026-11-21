@@ -54,6 +54,41 @@ const char *nph_field_kind_name(NphFieldKind kind)
 }
 
 // ---------------------------------------------------------------------------
+// Names of an enumeration's values and a mask's bits
+// ---------------------------------------------------------------------------
+
+u32 nph_field_name_count(const NphFieldDesc *field)
+{
+    NPH_ASSERT(field != NULL);
+    if (field->names == NULL) {
+        return 0U;
+    }
+    u32 n = 1U;
+    for (const char *p = field->names; *p != '\0'; ++p) {
+        n += *p == '|' ? 1U : 0U;
+    }
+    return n;
+}
+
+NphStr nph_field_name(const NphFieldDesc *field, u32 index)
+{
+    NPH_ASSERT(field != NULL);
+    if (field->names == NULL) {
+        return nph_str_empty();
+    }
+    const char *start = field->names;
+    for (u32 i = 0U; i < index; ++i) {
+        const char *bar = strchr(start, '|');
+        if (bar == NULL) {
+            return nph_str_empty();
+        }
+        start = bar + 1;
+    }
+    const char *end = strchr(start, '|');
+    return nph_str(start, end != NULL ? (u64)(end - start) : (u64)strlen(start));
+}
+
+// ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 
@@ -79,6 +114,55 @@ static NphResult invalid(const char **out_reason, const char *reason)
         *out_reason = reason;
     }
     return NPH_RESULT_INVALID_ARGUMENT;
+}
+
+// True when no name of `names` (a '|' between two) is empty.
+static bool names_are_valid(const char *names)
+{
+    char prev = '|';
+    for (const char *p = names; *p != '\0'; ++p) {
+        if (*p == '|' && prev == '|') {
+            return false;
+        }
+        prev = *p;
+    }
+    return prev != '|'; // an empty list ends as it began
+}
+
+// A field's ENUM, BITS and asset hints (component.h).
+static NphResult check_hints(const NphFieldDesc *f, const char **out_reason)
+{
+    const bool is_enum = (f->flags & (u32)NPH_FIELD_FLAG_ENUM) != 0U;
+    const bool bits = (f->flags & (u32)NPH_FIELD_FLAG_BITS) != 0U;
+    const bool integer = f->kind >= (u32)NPH_FIELD_U8 && f->kind <= (u32)NPH_FIELD_I64;
+    const bool is_unsigned = f->kind >= (u32)NPH_FIELD_U8 && f->kind <= (u32)NPH_FIELD_U64;
+    if (is_enum && bits) {
+        return invalid(out_reason, "a field is an ENUM or BITS, not both");
+    }
+    if ((is_enum || bits) && (f->flags & (u32)NPH_FIELD_FLAG_RANGE) != 0U) {
+        return invalid(out_reason, "an ENUM or BITS field takes no range");
+    }
+    if (is_enum && (!integer || f->names == NULL)) {
+        return invalid(out_reason, "an ENUM field is an integer with names");
+    }
+    if (bits && !is_unsigned) {
+        return invalid(out_reason, "a BITS field is an unsigned integer");
+    }
+    if (f->names != NULL) {
+        if (!is_enum && !bits) {
+            return invalid(out_reason, "only ENUM and BITS fields have names");
+        }
+        if (!names_are_valid(f->names)) {
+            return invalid(out_reason, "a field's names hold an empty one");
+        }
+        if (bits && nph_field_name_count(f) > f->size * 8U) {
+            return invalid(out_reason, "a BITS field names more bits than it has");
+        }
+    }
+    if (f->asset_type != 0U && f->kind != (u32)NPH_FIELD_GUID) {
+        return invalid(out_reason, "only a GUID field names an asset type");
+    }
+    return NPH_RESULT_OK;
 }
 
 NphResult nph_component_desc_validate(const NphComponentDesc *desc, const char **out_reason)
@@ -147,6 +231,7 @@ NphResult nph_component_desc_validate(const NphComponentDesc *desc, const char *
         if ((f->flags & NPH_FIELD_FLAG_RANGE) != 0U && !(f->min <= f->max)) {
             return invalid(out_reason, "a field's range has min > max");
         }
+        NPH_TRY(check_hints(f, out_reason));
     }
     return NPH_RESULT_OK;
 }

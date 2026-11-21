@@ -133,9 +133,9 @@ slot of the triangle's submesh).
 
 **Overlays** are the renderer's debug lines: the ground grid (a metre a
 cell, under the pivot), a sphere and an arrow for each light and camera,
-the bounds of the selected meshes, and the outlines of Colliders (the
-selection's over the scene, every one's in it with View > Colliders; see
-"Physics"). They are drawn relative to the frame's debug origin, which
+the bounds of the selected meshes, and the outlines of the physics
+components (the selection's over the scene, every one's in it with View >
+Colliders; see "Physics"). They are drawn relative to the frame's debug origin, which
 belongs to whoever owns the frame (the renderer takes one origin per
 frame).
 
@@ -185,18 +185,32 @@ A newly selected entity is revealed: the tree opens down to it.
 The primary selection's components, each field edited by its kind and its
 hints (`scene/component.h`): numbers are dragged within their RANGE,
 ANGLE fields are shown in degrees, COLOR vectors use a colour editor,
-rotations are edited as Euler angles, text, string ids, and GUIDs are
+rotations are edited as Euler angles, text, string ids, and plain GUIDs are
 typed, and an entity reference takes an entity dropped from the outliner.
-A material slot of MeshRenderer or MeshMaterials shows its material's
-source (or "(default)"), takes a material dropped from the asset browser,
-gives the default back on a right-click, and opens a `.nmat` in the
-material panel with Edit. A change to MeshMaterials touches the
-MeshRenderer in the same step, since its slots are read when the
-MeshRenderer's are. A Collider's `physics_material` does the same with
-physics materials: it shows the `.npmat` it names (or "(its own values)"),
-takes one dropped from the asset browser (cooked then if it never was),
-gives the Collider its own values back on a right-click, and opens it in
-the physics material panel with Edit.
+The hints of ADR-0108 (decision 10):
+- **An enumeration** (`NPH_FIELD_ENUM`: a RigidBody's type, a Collider's
+  shape, a Joint's kind, a Light's type, a Camera's tonemapper, an
+  AudioSource's bus and roll-off) shows its value's name and is picked from
+  a list of them; a value with no name shows its number.
+- **A bit mask** (`NPH_FIELD_BITS`) shows the bits it holds ("none", "all",
+  their names, or "bits 0, 3-5") and opens a box a bit: a RigidBody's
+  `locks` by name, a Collider's or a CharacterController's `category` and
+  `mask` as a grid of the 64 numbered layers with All and None.
+- **A GUID that names an asset of a type** (`NPH_FIELD_ASSET`) shows the
+  source it was cooked from (a scene's part with its sub-asset: "city.gltf
+  material/3"), or what none means ("(default)" for a material slot, "(its
+  own values)" for a physics material, else "(none)"). It takes an asset of
+  its kind dragged from the asset browser: a material on a material slot of
+  MeshRenderer, MeshMaterials or a WorldCell, a physics material on a
+  Collider's, an editable mesh on a mesh, a sound on an AudioSource's,
+  cooked then if it never was; anything else is not taken. The arrow beside
+  it lists the project's assets of the type, filtered by what is typed
+  (200 at most shown), a scene's parts with them: a collision asset, which
+  only scenes make, is picked there. A right-click gives the field none,
+  and Edit opens a `.nmat` or a `.npmat` in its panel.
+A change to MeshMaterials touches the MeshRenderer in the same step, since
+its slots are read when the MeshRenderer's are. A pick, a box, or a drop is
+one step of the history.
 READONLY fields are greyed and HIDDEN ones not shown. Add Component lists
 the registered components the entity lacks; each component's header
 removes it.
@@ -216,8 +230,8 @@ whether the cooker has cooked it.
   material opens it in its panel, and an image or a sound cooks it.
 - A scene dragged into the viewport is placed where the mouse is. A
   material drags onto an entity (in the viewport, the outliner, or a slot
-  in the inspector), a physics material onto a Collider's
-  `physics_material` in the inspector, and an image onto a material's
+  in the inspector), a physics material, an editable mesh, or a sound onto
+  an inspector field that names one, and an image onto a material's
   texture slot.
 - The context menu places, edits a material or a physics material, cooks,
   or cooks again even when current; Cook Folder cooks every scene under
@@ -363,9 +377,30 @@ Entities get bodies through their RigidBody and Collider components,
 edited in the inspector like any other (runtime.md "Physics"); Play makes
 the bodies from the play copy, and Stop leaves the edited world as it was.
 
-- The viewport outlines every Collider's shape where its body is (while
-  playing) or will be: the selection's over the scene, every one's in the
-  scene with View > Colliders (or the checkbox below).
+- The viewport outlines the physics components where their bodies are
+  (while playing) or will be (`physics_draw.c`): the selection's over the
+  scene, every one's in the scene with View > Colliders (or the checkbox
+  below).
+  - A Collider's shapes take the frame the engine gives its body (a root's
+    LocalTransform turn and signed scale, an entity under a parent its world
+    axes: `nph_body_axes_rotation`), mirrored where the entity mirrors.
+  - An ASSET Collider's hulls and triangle meshes come from its collision
+    asset, which the outline loads (held until it is cooked again or the
+    editor detaches; one that cannot be read is logged once and not drawn).
+    Each point is where the engine's scaled copy puts it: the Collider's
+    turn, then the entity's scale, from its centre. A mesh's triangles are
+    drawn as the physics module draws them (the active edges brighter), and
+    left out where the engine leaves them out: on a dynamic body and on a
+    trigger. Hulls show their merged faces' edges.
+  - A trigger's shapes are in the physics module's sensor colour.
+  - A CharacterController is its upright capsule, a skin over the entity's
+    origin, in the ghost colour, whatever the entity's turn and scale; its
+    Collider makes no body, so it is not drawn.
+  - A Joint's anchor is joined to its entity and to the other body (a
+    distance joint's to the other anchor, in the other's frame or the
+    world's), with its axis.
+  - An outline stops when the frame's debug lines are full, so a big mesh
+    costs at most the list's room.
 - The Statistics panel's Physics section shows, while playing, the
   physics world's bodies (and how many are awake), shapes, joints,
   contacts (touching, and their points), islands, the step's time by stage
@@ -810,10 +845,14 @@ step runs on the job system. It reads nothing the simulation writes.
   one takes 15 to 20 ms of a worker in Development; a cached one, a 64 KB
   read.
 - **Reading the clipboard** grows a buffer to the text's size.
+- **Physics outlines** (with View > Colliders, or of the selection) hold the
+  collision assets ASSET Colliders name, a table entry each (24 bytes, the
+  table doubling from 16), and allocate nothing else; drawing transforms a
+  hull's edges or a mesh's triangles a frame, up to the debug list's room.
 
 ## Testing
 
-`editor_tests` (92 tests):
+`editor_tests` (96 tests):
 - The camera's invariants, including a 64-bit pivot 10,000 km from the
   origin.
 - The view and the gizmo's math (projection and rays, axis and plane
@@ -831,9 +870,9 @@ step runs on the job system. It reads nothing the simulation writes.
   files it names and cooks it; the resolver names the cooked files and a
   new project starts from the database; sources already inside are cooked
   in place; a folder comes whole; images alone and beside a scene; the
-  refusals; failures in the results; bounded requests; cooks by key; and
-  the resolver answering from another thread while cooks swap the
-  snapshot.
+  refusals; failures in the results; bounded requests; cooks by key; the
+  resolver answering from another thread while cooks swap the snapshot;
+  and the assets listed by their type, a scene's parts with them.
 - The editor on an OFFSCREEN engine under the validation gate, with the
   input fed as window events:
   - The interface and the cooked showcase in the viewport are drawn
@@ -863,6 +902,21 @@ step runs on the job system. It reads nothing the simulation writes.
   - Colliders are outlined (the selection's over the scene, all with
     View > Colliders), and a box with a RigidBody falls in play onto a
     floor with a Collider, the edited scene untouched after Stop.
+  - The physics outlines where the engine puts the bodies: a box beside a
+    mirrored root mirrored with it, a part under a parent that mirrors by
+    the world's axes, a trigger in the sensor colour, a character's upright
+    capsule a skin over its feet whatever its turn and scale (its Collider
+    not drawn), a hinge's anchor, axis and bodies, a distance joint's world
+    anchor, and a sink that fills ending the outline. An ASSET Collider's
+    hull and mesh from a scene cooked in the test, outlined once the asset
+    loads, at the entity's mirrored scale from its centre, the mesh left
+    out of a dynamic body and a trigger, a missing asset drawn as nothing,
+    and an asset cooked again read again.
+  - An asset field takes an asset of its kind dropped on it, as one step of
+    the history: a physics material, a material, an editable mesh (not a
+    scene), a sound (cooked then); what is of another kind, a collision
+    asset (picked from the list, never dropped), fields that name no asset,
+    and fields or components the entity lacks are refused.
   - A material cooked again changes in place: the cube keeps its instance
     on every frame and turns to the new colour.
   - A new material is written with the defaults, numbered when its name is

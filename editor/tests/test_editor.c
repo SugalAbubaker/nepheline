@@ -14,6 +14,7 @@
 #include <nepheline/math/scalar.h>
 #include <nepheline/physics/body.h>
 #include <nepheline/physics/shape.h>
+#include <nepheline/physics/world.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/platform/platform.h>
 #include <nepheline/platform/time.h>
@@ -2236,6 +2237,448 @@ NTEST(Editor, a_physics_material_changed_in_play_reaches_its_shapes)
     editor_play_toggle(ed);
     settle(&fx);
     NTEST_EXPECT_NEAR_F32(physics_source_on_disk(&fx, key).friction, 0.3F, 0.0F);
+    finish(&fx);
+}
+
+// ---------------------------------------------------------------------------
+// Physics in the inspector and the viewport (ADR-0108 decision 10)
+// ---------------------------------------------------------------------------
+
+// A sound of `key` in the project's sources (a short buzz).
+static void write_sound(EditorFixture *f, const char *key)
+{
+    char path[1300];
+    (void)snprintf(path, sizeof path, "%s/assets/%s", f->project, key);
+    char dir[1300];
+    (void)snprintf(dir, sizeof dir, "%s", path);
+    char *slash = strrchr(dir, '/');
+    NTEST_ASSERT_NOT_NULL(slash);
+    *slash = '\0';
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(dir), NPH_RESULT_OK);
+    f32 x[400];
+    for (u32 i = 0U; i < 400U; ++i) {
+        x[i] = (f32)(i % 20U) / 20.0F - 0.5F;
+    }
+    const f32 *planes[1] = {x};
+    const u64 size = nph_wav_size(NPH_WAV_PCM_S16, 1U, 400U);
+    void *wav = NPH_ALLOC(nph_allocator_system(), size, 16U);
+    NTEST_ASSERT_NOT_NULL(wav);
+    NTEST_ASSERT_EQ_INT(nph_wav_write(NPH_WAV_PCM_S16, 1U, 8000U, planes, 400U, wav),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, wav, size), NPH_RESULT_OK);
+    NPH_FREE(nph_allocator_system(), wav, size, 16U);
+}
+
+static NphGuid guid_field_of(EditorFixture *f, NphEntity e, NphComponentId id, const char *name)
+{
+    const NphWorld *w = nph_engine_world(f->engine);
+    const NphFieldDesc *field =
+        nph_component_find_field(nph_world_component_desc(w, id), nph_str_from_cstr(name));
+    NTEST_ASSERT_NOT_NULL(field);
+    NphGuid g;
+    memcpy(&g, (const u8 *)nph_world_get(w, e, id) + field->offset, sizeof g);
+    return g;
+}
+
+NTEST(Editor, an_asset_field_takes_an_asset_of_its_kind_dropped_on_it)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    char material[256];
+    char surface[256];
+    NTEST_ASSERT_EQ_INT(editor_material_new(ed, "materials", material, sizeof material),
+                        NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(editor_physics_material_new(ed, "surfaces", surface, sizeof surface),
+                        NPH_RESULT_OK);
+    write_sound(&fx, "sounds/hum.wav");
+    const NphEntity cube = made_cube(&fx);
+    char mesh[EDITOR_PROJECT_PATH_MAX];
+    char sub[32];
+    NTEST_ASSERT_TRUE(editor_project_source_of(editor_project(ed), mesh_of(&fx, cube), mesh,
+                                               sizeof mesh, sub, sizeof sub));
+    // An entity of the fields, made through the scene's history.
+    const NphRuntimeComponents *rc = nph_engine_components(fx.engine);
+    const NphComponentId ids[5] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                                   NPH_COMPONENT_ID_WORLD_TRANSFORM, rc->collider,
+                                   rc->mesh_renderer, rc->audio_source};
+    NTEST_ASSERT_EQ_INT(editor_history_begin(ed->history, "Prop"), NPH_RESULT_OK);
+    NphEntity e = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(editor_history_spawn(ed->history, ids, 5U, &e), NPH_RESULT_OK);
+    editor_history_end(ed->history);
+    // A physics material on the Collider's: one step, undone and done again.
+    NTEST_ASSERT_EQ_INT(editor_inspector_drop(ed, e, rc->collider, "physics_material",
+                                              EDITOR_DRAG_PHYSICS_MATERIAL, surface),
+                        NPH_RESULT_OK);
+    const NphGuid surface_guid = cooker_asset_guid(surface, "physics_material");
+    NTEST_EXPECT_TRUE(
+        nph_guid_equals(guid_field_of(&fx, e, rc->collider, "physics_material"), surface_guid));
+    NTEST_ASSERT_EQ_INT(editor_history_undo(ed->history), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_guid_is_null(guid_field_of(&fx, e, rc->collider, "physics_material")));
+    NTEST_ASSERT_EQ_INT(editor_history_redo(ed->history), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(
+        nph_guid_equals(guid_field_of(&fx, e, rc->collider, "physics_material"), surface_guid));
+    // A material dragged as one, or a material's source as a physics material: refused.
+    NTEST_EXPECT_EQ_INT(editor_inspector_drop(ed, e, rc->collider, "physics_material",
+                                              EDITOR_DRAG_MATERIAL, material),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(editor_inspector_drop(ed, e, rc->collider, "physics_material",
+                                              EDITOR_DRAG_PHYSICS_MATERIAL, material),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    // A material on a material slot; an editable mesh on the mesh, not a scene.
+    NTEST_EXPECT_EQ_INT(editor_inspector_drop(ed, e, rc->mesh_renderer, "material0",
+                                              EDITOR_DRAG_MATERIAL, material),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_guid_equals(guid_field_of(&fx, e, rc->mesh_renderer, "material0"),
+                                      cooker_asset_guid(material, "material")));
+    NTEST_EXPECT_EQ_INT(
+        editor_inspector_drop(ed, e, rc->mesh_renderer, "mesh", EDITOR_DRAG_ASSET, mesh),
+        NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(
+        nph_guid_equals(guid_field_of(&fx, e, rc->mesh_renderer, "mesh"), mesh_of(&fx, cube)));
+    NTEST_EXPECT_EQ_INT(editor_inspector_drop(ed, e, rc->mesh_renderer, "mesh", EDITOR_DRAG_ASSET,
+                                              "models/city.gltf"),
+                        NPH_RESULT_INVALID_ARGUMENT);
+    // A sound on the AudioSource's, cooked since it had not been.
+    NTEST_EXPECT_FALSE(editor_project_is_cooked(editor_project(ed), "sounds/hum.wav"));
+    NTEST_EXPECT_EQ_INT(editor_inspector_drop(ed, e, rc->audio_source, "sound", EDITOR_DRAG_SOUND,
+                                              "sounds/hum.wav"),
+                        NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_guid_equals(guid_field_of(&fx, e, rc->audio_source, "sound"),
+                                      cooker_asset_guid("sounds/hum.wav", "sound")));
+    settle(&fx);
+    NTEST_EXPECT_TRUE(editor_project_is_cooked(editor_project(ed), "sounds/hum.wav"));
+    // A collision asset is a scene's part: picked from the list, never dropped. Fields that
+    // name no asset, and fields or components the entity lacks.
+    NTEST_EXPECT_EQ_INT(
+        editor_inspector_drop(ed, e, rc->collider, "collision", EDITOR_DRAG_ASSET, mesh),
+        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(
+        editor_inspector_drop(ed, e, rc->collider, "radius", EDITOR_DRAG_PHYSICS_MATERIAL, surface),
+        NPH_RESULT_INVALID_ARGUMENT);
+    NTEST_EXPECT_EQ_INT(editor_inspector_drop(ed, e, rc->collider, "no_such_field",
+                                              EDITOR_DRAG_PHYSICS_MATERIAL, surface),
+                        NPH_RESULT_NOT_FOUND);
+    NTEST_EXPECT_EQ_INT(
+        editor_inspector_drop(ed, e, rc->joint, "other", EDITOR_DRAG_PHYSICS_MATERIAL, surface),
+        NPH_RESULT_NOT_FOUND);
+    // Each drop was a step of its own: the last undone alone.
+    NTEST_ASSERT_EQ_INT(editor_history_undo(ed->history), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_guid_is_null(guid_field_of(&fx, e, rc->audio_source, "sound")));
+    NTEST_EXPECT_TRUE(
+        nph_guid_equals(guid_field_of(&fx, e, rc->mesh_renderer, "mesh"), mesh_of(&fx, cube)));
+    finish(&fx);
+}
+
+// The lines of an outline: how many, how many of `color`, and the box their ends span.
+typedef struct OutlineCount {
+    u32 lines;
+    u32 colored;
+    u32 color;
+    u32 cap; // the sink fills after this many (0: never)
+    NphVec3 lo;
+    NphVec3 hi;
+} OutlineCount;
+
+static bool count_line(void *user, NphVec3 a, NphVec3 b, u32 rgba)
+{
+    OutlineCount *c = (OutlineCount *)user;
+    if (c->cap != 0U && c->lines == c->cap) {
+        return false;
+    }
+    c->lines += 1U;
+    c->colored += rgba == c->color ? 1U : 0U;
+    c->lo = nph_vec3_min(c->lo, nph_vec3_min(a, b));
+    c->hi = nph_vec3_max(c->hi, nph_vec3_max(a, b));
+    return true;
+}
+
+static OutlineCount outline_of(EditorFixture *f, NphEntity e, u32 color, u32 cap, bool *out_room)
+{
+    OutlineCount c;
+    memset(&c, 0, sizeof c);
+    c.color = color;
+    c.cap = cap;
+    c.lo = nph_vec3(1e30F, 1e30F, 1e30F);
+    c.hi = nph_vec3(-1e30F, -1e30F, -1e30F);
+    EditorLineSink sink;
+    sink.line = count_line;
+    sink.user = &c;
+    sink.origin = nph_dvec3(0.0, 0.0, 0.0);
+    const bool room = editor_physics_outline(f->editor, e, &sink);
+    if (out_room != NULL) {
+        *out_room = room;
+    }
+    return c;
+}
+
+static OutlineCount outline(EditorFixture *f, NphEntity e, u32 color)
+{
+    return outline_of(f, e, color, 0U, NULL);
+}
+
+static bool spans(const OutlineCount *c, NphVec3 lo, NphVec3 hi)
+{
+    const f32 eps = 1e-4F;
+    return nph_f32_abs(c->lo.x - lo.x) < eps && nph_f32_abs(c->lo.y - lo.y) < eps &&
+           nph_f32_abs(c->lo.z - lo.z) < eps && nph_f32_abs(c->hi.x - hi.x) < eps &&
+           nph_f32_abs(c->hi.y - hi.y) < eps && nph_f32_abs(c->hi.z - hi.z) < eps;
+}
+
+static NphEntity spawn_of(EditorFixture *f, const NphComponentId *extra, u32 n)
+{
+    NphComponentId ids[6] = {NPH_COMPONENT_ID_LOCAL_TRANSFORM, NPH_COMPONENT_ID_WORLD_TRANSFORM};
+    NTEST_ASSERT_LE_UINT(n, 4U);
+    for (u32 i = 0U; i < n; ++i) {
+        ids[2U + i] = extra[i];
+    }
+    NphEntity e = NPH_ENTITY_NULL;
+    NTEST_ASSERT_EQ_INT(nph_world_spawn(nph_engine_edit_world(f->engine), ids, 2U + n, &e),
+                        NPH_RESULT_OK);
+    return e;
+}
+
+static NphLocalTransform *local_of(EditorFixture *f, NphEntity e)
+{
+    return NPH_WORLD_GET_MUT(nph_engine_edit_world(f->engine), e, NPH_COMPONENT_ID_LOCAL_TRANSFORM,
+                             NphLocalTransform);
+}
+
+NTEST(Editor, physics_components_are_outlined_where_their_bodies_go)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    frames(&fx, 2U);
+    NphWorld *w = nph_engine_edit_world(fx.engine);
+    const NphRuntimeComponents *rc = nph_engine_components(fx.engine);
+    // A box beside a mirrored root's origin, mirrored with it: its centre at -1.
+    const NphEntity box = spawn_of(&fx, &rc->collider, 1U);
+    NphCollider *c = NPH_WORLD_GET_MUT(w, box, rc->collider, NphCollider);
+    c->shape = (u32)NPH_COLLIDER_BOX;
+    c->half_extents = nph_vec3(0.5F, 0.5F, 0.5F);
+    c->center = nph_vec3(1.0F, 0.0F, 0.0F);
+    local_of(&fx, box)->translation = nph_dvec3(0.0, 2.0, 0.0);
+    local_of(&fx, box)->scale = nph_vec3(-1.0F, 1.0F, 1.0F);
+    frames(&fx, 2U);
+    OutlineCount o = outline(&fx, box, NPH_PHYSICS_DRAW_SENSOR_RGBA);
+    NTEST_EXPECT_EQ_UINT(o.lines, 12U);
+    NTEST_EXPECT_EQ_UINT(o.colored, 0U);
+    NTEST_EXPECT_TRUE(spans(&o, nph_vec3(-1.5F, 1.5F, -0.5F), nph_vec3(-0.5F, 2.5F, 0.5F)));
+    // A trigger, in the sensor colour.
+    NPH_WORLD_GET_MUT(w, box, rc->collider, NphCollider)->trigger = 1;
+    o = outline(&fx, box, NPH_PHYSICS_DRAW_SENSOR_RGBA);
+    NTEST_EXPECT_EQ_UINT(o.colored, 12U);
+    // Under a parent that mirrors Z: the world's axes mirror the centre.
+    const NphEntity parent = spawn_of(&fx, NULL, 0U);
+    local_of(&fx, parent)->scale = nph_vec3(1.0F, 1.0F, -1.0F);
+    const NphEntity part = spawn_of(&fx, &rc->collider, 1U);
+    c = NPH_WORLD_GET_MUT(w, part, rc->collider, NphCollider);
+    c->shape = (u32)NPH_COLLIDER_BOX;
+    c->half_extents = nph_vec3(0.5F, 0.5F, 0.5F);
+    c->center = nph_vec3(0.0F, 0.0F, 1.0F);
+    NTEST_ASSERT_EQ_INT(nph_world_set_parent(w, part, parent), NPH_RESULT_OK);
+    frames(&fx, 2U);
+    o = outline(&fx, part, 0U);
+    NTEST_EXPECT_EQ_UINT(o.lines, 12U);
+    NTEST_EXPECT_TRUE(spans(&o, nph_vec3(-0.5F, -0.5F, -1.5F), nph_vec3(0.5F, 0.5F, -0.5F)));
+    // A character: its capsule upright on its feet, a skin up, whatever its turn and scale,
+    // and no body for its Collider.
+    const NphComponentId character[2] = {rc->collider, rc->character_controller};
+    const NphEntity walker = spawn_of(&fx, character, 2U);
+    local_of(&fx, walker)->translation = nph_dvec3(3.0, 0.0, 0.0);
+    local_of(&fx, walker)->rotation = nph_quat_from_axis_angle(nph_vec3_unit_z(), 1.5707964F);
+    local_of(&fx, walker)->scale = nph_vec3(2.0F, 2.0F, 2.0F);
+    frames(&fx, 2U);
+    o = outline(&fx, walker, NPH_PHYSICS_DRAW_GHOST_RGBA);
+    NTEST_EXPECT_GT_UINT(o.lines, 0U);
+    NTEST_EXPECT_EQ_UINT(o.colored, o.lines);
+    NTEST_EXPECT_TRUE(spans(&o, nph_vec3(2.7F, 0.005F, -0.3F), nph_vec3(3.3F, 1.805F, 0.3F)));
+    // A hinge: its anchor joined to its entity and to the other's, and its axis.
+    const NphEntity door = spawn_of(&fx, NULL, 0U);
+    local_of(&fx, door)->translation = nph_dvec3(2.0, 1.0, 0.0);
+    const NphEntity hinge = spawn_of(&fx, &rc->joint, 1U);
+    NphJoint *j = NPH_WORLD_GET_MUT(w, hinge, rc->joint, NphJoint);
+    j->kind = (u32)NPH_JOINT_HINGE;
+    j->anchor = nph_vec3(0.0F, 1.0F, 0.0F);
+    j->axis = nph_vec3(0.0F, 0.0F, 1.0F);
+    j->other = door;
+    frames(&fx, 2U);
+    o = outline(&fx, hinge, 0U);
+    NTEST_EXPECT_EQ_UINT(o.lines, 6U); // to its entity, a cross, its axis, to the other
+    NTEST_EXPECT_TRUE(spans(&o, nph_vec3(-0.05F, 0.0F, -0.05F), nph_vec3(2.0F, 1.05F, 0.3F)));
+    // A distance joint to the world: to its other anchor, a world point.
+    j = NPH_WORLD_GET_MUT(w, hinge, rc->joint, NphJoint);
+    j->kind = (u32)NPH_JOINT_DISTANCE;
+    j->other = NPH_ENTITY_NULL;
+    j->other_anchor = nph_vec3(0.0F, 5.0F, 0.0F);
+    o = outline(&fx, hinge, 0U);
+    NTEST_EXPECT_EQ_UINT(o.lines, 9U);
+    NTEST_EXPECT_NEAR_F32(o.hi.y, 5.05F, 1e-4F);
+    // A sink that fills ends the outline.
+    bool room = true;
+    o = outline_of(&fx, box, 0U, 4U, &room);
+    NTEST_EXPECT_FALSE(room);
+    NTEST_EXPECT_EQ_UINT(o.lines, 4U);
+    // An entity without any: nothing.
+    o = outline(&fx, door, 0U);
+    NTEST_EXPECT_EQ_UINT(o.lines, 0U);
+    finish(&fx);
+}
+
+// A scene of a crate whose extras ask for a hull and a floor whose ask for triangles
+// (cook/collision.h): a box of corners at +-1 and a plane at y = 0 of corners at +-1.
+static void write_collision_scene(EditorFixture *f, const char *key)
+{
+    f32 pos[12 * 3];
+    for (u32 i = 0; i < 8U; ++i) {
+        const u64 at = (u64)i * 3U;
+        pos[at] = (i & 1U) != 0U ? 1.0F : -1.0F;
+        pos[at + 1U] = (i & 2U) != 0U ? 1.0F : -1.0F;
+        pos[at + 2U] = (i & 4U) != 0U ? 1.0F : -1.0F;
+    }
+    static const f32 plane[12] = {-1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1};
+    memcpy(&pos[24], plane, sizeof plane);
+    static const u16 idx[42] = {0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3,
+                                3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5, 0, 2, 1, 0, 3, 2};
+    u8 buffer[sizeof pos + sizeof idx];
+    memcpy(buffer, pos, sizeof pos);
+    memcpy(buffer + sizeof pos, idx, sizeof idx);
+    static char uri[1024];
+    (void)snprintf(uri, sizeof uri, "data:application/octet-stream;base64,");
+    test_base64(buffer, sizeof buffer, uri + strlen(uri));
+    static char json[4096];
+    (void)snprintf(
+        json, sizeof json,
+        "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[{\"nodes\":[0,1]}],\n"
+        "\"nodes\":[{\"name\":\"Crate\",\"mesh\":0,\"extras\":{\"collision\":\"hull\"}},\n"
+        " {\"name\":\"Floor\",\"mesh\":1,\"extras\":{\"collision\":\"mesh\"}}],\n"
+        "\"meshes\":[{\"name\":\"Box\",\"primitives\":[{\"attributes\":{\"POSITION\":0},"
+        "\"indices\":2}]},\n"
+        " {\"name\":\"Plane\",\"primitives\":[{\"attributes\":{\"POSITION\":1},\"indices\":3}]}],\n"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":8,\"type\":\"VEC3\","
+        "\"min\":[-1,-1,-1],\"max\":[1,1,1]},\n"
+        " {\"bufferView\":0,\"byteOffset\":96,\"componentType\":5126,\"count\":4,"
+        "\"type\":\"VEC3\",\"min\":[-1,0,-1],\"max\":[1,0,1]},\n"
+        " {\"bufferView\":1,\"componentType\":5123,\"count\":36,\"type\":\"SCALAR\"},\n"
+        " {\"bufferView\":1,\"byteOffset\":72,\"componentType\":5123,\"count\":6,"
+        "\"type\":\"SCALAR\"}],\n"
+        "\"bufferViews\":[{\"buffer\":0,\"byteLength\":144},"
+        "{\"buffer\":0,\"byteOffset\":144,\"byteLength\":84}],\n"
+        "\"buffers\":[{\"byteLength\":%u,\"uri\":\"%s\"}]}\n",
+        (u32)sizeof buffer, uri);
+    char path[1300];
+    (void)snprintf(path, sizeof path, "%s/assets/%s", f->project, key);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(f->project), NPH_RESULT_OK);
+    char assets[1300];
+    (void)snprintf(assets, sizeof assets, "%s/assets", f->project);
+    NTEST_ASSERT_EQ_INT(nph_fs_create_directories(assets), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_INT(nph_file_write_all(path, json, strlen(json)), NPH_RESULT_OK);
+}
+
+typedef struct FoundCollision {
+    NphGuid hull;
+    NphGuid mesh;
+    u32 count;
+} FoundCollision;
+
+static void find_collision(void *user, NphGuid guid, const char *key, const char *sub)
+{
+    FoundCollision *found = (FoundCollision *)user;
+    (void)key;
+    const u64 n = strlen(sub);
+    found->count += 1U;
+    if (n > 5U && strcmp(sub + n - 5U, "/hull") == 0) {
+        found->hull = guid;
+    } else if (n > 5U && strcmp(sub + n - 5U, "/mesh") == 0) {
+        found->mesh = guid;
+    }
+}
+
+// Waits for the load of `guid` the outline began (a load of it waits for the one in flight).
+static void await_collision(EditorFixture *f, NphGuid guid)
+{
+    NphAssetLoader *loader = nph_engine_loader(f->engine);
+    NphAssetHandle h = NPH_ASSET_HANDLE_NULL;
+    NTEST_ASSERT_EQ_INT(nph_asset_load_guid(loader, guid, &h), NPH_RESULT_OK);
+    nph_asset_release(loader, h);
+}
+
+static NphEntity spawn_asset_collider(EditorFixture *f, NphGuid collision)
+{
+    const NphRuntimeComponents *rc = nph_engine_components(f->engine);
+    const NphEntity e = spawn_of(f, &rc->collider, 1U);
+    NphCollider *c =
+        NPH_WORLD_GET_MUT(nph_engine_edit_world(f->engine), e, rc->collider, NphCollider);
+    c->shape = (u32)NPH_COLLIDER_ASSET;
+    c->collision = collision;
+    return e;
+}
+
+NTEST(Editor, an_asset_colliders_hulls_and_meshes_are_outlined_once_its_asset_loads)
+{
+    static EditorFixture fx;
+    START_OR_SKIP(&fx, NULL);
+    Editor *ed = fx.editor;
+    frames(&fx, 2U);
+    write_collision_scene(&fx, "props.gltf");
+    u32 id = 0U;
+    NTEST_ASSERT_EQ_INT(editor_project_cook(editor_project(ed), "props.gltf", false, 0U, &id),
+                        NPH_RESULT_OK);
+    settle(&fx);
+    // The project's collision assets, by type: the crate's hull and the floor's triangles.
+    FoundCollision found;
+    memset(&found, 0, sizeof found);
+    editor_project_each_asset(editor_project(ed), NPH_ASSET_TYPE_COLLISION, find_collision, &found);
+    NTEST_EXPECT_EQ_UINT(found.count, 2U);
+    NTEST_ASSERT_FALSE(nph_guid_is_null(found.hull));
+    NTEST_ASSERT_FALSE(nph_guid_is_null(found.mesh));
+    // A crate twice as long along X, its centre a metre over: outlined once its asset is in.
+    NphWorld *w = nph_engine_edit_world(fx.engine);
+    const NphRuntimeComponents *rc = nph_engine_components(fx.engine);
+    const NphEntity crate = spawn_asset_collider(&fx, found.hull);
+    local_of(&fx, crate)->translation = nph_dvec3(0.0, 5.0, 0.0);
+    local_of(&fx, crate)->scale = nph_vec3(-2.0F, 1.0F, 1.0F);
+    NPH_WORLD_GET_MUT(w, crate, rc->collider, NphCollider)->center = nph_vec3(1.0F, 0.0F, 0.0F);
+    frames(&fx, 2U);
+    OutlineCount o = outline(&fx, crate, 0U);
+    NTEST_EXPECT_EQ_UINT(o.lines, 0U); // loading
+    await_collision(&fx, found.hull);
+    o = outline(&fx, crate, 0U);
+    NTEST_EXPECT_EQ_UINT(o.lines, 12U); // the box's twelve edges, its faces merged
+    // Mirrored by its scale: its centre at -2, its corners at -2 +- 2.
+    NTEST_EXPECT_TRUE(spans(&o, nph_vec3(-4.0F, 4.0F, -1.0F), nph_vec3(0.0F, 6.0F, 1.0F)));
+    // The floor's triangles on a static entity; none on a dynamic body or a trigger, which
+    // the engine leaves them out of.
+    const NphEntity floor = spawn_asset_collider(&fx, found.mesh);
+    frames(&fx, 2U);
+    o = outline(&fx, floor, 0U);
+    await_collision(&fx, found.mesh);
+    o = outline(&fx, floor, 0U);
+    NTEST_EXPECT_EQ_UINT(o.lines, 6U); // two triangles' edges
+    NTEST_EXPECT_TRUE(spans(&o, nph_vec3(-1.0F, 0.0F, -1.0F), nph_vec3(1.0F, 0.0F, 1.0F)));
+    NTEST_ASSERT_EQ_INT(nph_world_add(w, floor, rc->rigid_body, NULL), NPH_RESULT_OK);
+    NPH_WORLD_GET_MUT(w, floor, rc->rigid_body, NphRigidBody)->type = (u32)NPH_RIGID_BODY_DYNAMIC;
+    NTEST_EXPECT_EQ_UINT(outline(&fx, floor, 0U).lines, 0U);
+    NTEST_ASSERT_EQ_INT(nph_world_remove(w, floor, rc->rigid_body), NPH_RESULT_OK);
+    NPH_WORLD_GET_MUT(w, floor, rc->collider, NphCollider)->trigger = 1;
+    NTEST_EXPECT_EQ_UINT(outline(&fx, floor, 0U).lines, 0U);
+    // One the project lacks: no outline (logged once).
+    const NphEntity lost = spawn_asset_collider(&fx, nph_guid_from_cstr("nothing#collision"));
+    frames(&fx, 2U);
+    NTEST_EXPECT_EQ_UINT(outline(&fx, lost, 0U).lines, 0U);
+    NTEST_EXPECT_EQ_UINT(outline(&fx, lost, 0U).lines, 0U);
+    // Cooked again: read again, and outlined again once it is in.
+    const u32 held = editor_physics_draw_collisions(ed);
+    EditorImportResult res;
+    memset(&res, 0, sizeof res);
+    res.written = &found.hull;
+    res.written_count = 1U;
+    editor_physics_draw_finished(ed, &res);
+    NTEST_EXPECT_EQ_UINT(editor_physics_draw_collisions(ed), held - 1U);
+    NTEST_EXPECT_EQ_UINT(outline(&fx, crate, 0U).lines, 0U);
+    await_collision(&fx, found.hull);
+    NTEST_EXPECT_EQ_UINT(outline(&fx, crate, 0U).lines, 12U);
     finish(&fx);
 }
 

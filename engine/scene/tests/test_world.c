@@ -52,7 +52,8 @@ NTEST(world, registration_is_idempotent_and_checks_layouts)
     NTEST_EXPECT_EQ_UINT(again, ids.position);
 
     // Same name, another layout.
-    static const NphFieldDesc fields[1] = {{"other", NPH_FIELD_F32, 0U, 4U, 0U, 0.0F, 0.0F}};
+    static const NphFieldDesc fields[1] = {
+        {"other", NPH_FIELD_F32, 0U, 4U, 0U, 0.0F, 0.0F, NULL, 0U}};
     const NphComponentDesc clash = {"test.Position", 4U, 4U, fields, 1U, 0U, NULL};
     NTEST_EXPECT_EQ_INT(nph_world_register_component(w, &clash, &again), NPH_RESULT_ALREADY_EXISTS);
     NTEST_EXPECT_EQ_UINT(again, NPH_COMPONENT_NONE);
@@ -387,7 +388,7 @@ NTEST(world, spawn_batch_is_all_or_nothing)
 NTEST(world, archetype_too_large_for_a_chunk)
 {
     NphWorld *w = test_world_create(0U, NULL);
-    static const NphFieldDesc f[1] = {{"x", NPH_FIELD_F32, 0U, 4U, 0U, 0.0F, 0.0F}};
+    static const NphFieldDesc f[1] = {{"x", NPH_FIELD_F32, 0U, 4U, 0U, 0.0F, 0.0F, NULL, 0U}};
     static char names[9][16];
     static NphComponentDesc descs[9];
     NphComponentId ids[9];

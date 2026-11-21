@@ -33,6 +33,10 @@ typedef struct GameComponentCopy {
     NphFieldDesc *fields; // desc.fields
     char *text;           // desc.name, then every field's name
     u64 text_bytes;
+    // Every field's `names` (its values' or bits' names), which a build of
+    // the same layout may change (refresh_component takes the new block).
+    char *hint_text;
+    u64 hint_bytes;
     u8 *defaults; // desc.defaults (desc.size bytes), or NULL
 } GameComponentCopy;
 

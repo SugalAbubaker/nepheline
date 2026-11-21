@@ -855,6 +855,7 @@ NphResult editor_create(const EditorDesc *desc, Editor **out)
     editor_material_init(ed);
     editor_physics_material_init(ed);
     editor_material_previews_init(ed);
+    editor_physics_draw_init(ed);
     (void)snprintf(ed->shader_dir, sizeof ed->shader_dir, "%s",
                    desc->shader_dir != NULL ? desc->shader_dir : NPH_SHADER_DIR);
     editor_camera_default(&ed->camera);
@@ -1086,7 +1087,9 @@ void editor_detach(Editor *ed)
     editor_physics_material_init(ed);
     editor_material_previews_free(ed); // the pictures being made first: they read the project
     editor_material_previews_init(ed);
-    editor_assets_close(ed); // after the import in progress, if any
+    editor_assets_close(ed);      // after the import in progress, if any
+    editor_physics_draw_free(ed); // the collision assets outlined, while the loader is there
+    editor_physics_draw_init(ed);
     editor_viewport_free(ed);
     editor_console_free(ed);
     editor_profiler_panel_free(ed);

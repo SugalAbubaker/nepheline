@@ -226,11 +226,31 @@ What there is today:
 10. **The editor.**
     - **Fields:**
       - enumerations show their names in a list (a field hint, `NPH_FIELD_ENUM`), and bit masks show as boxes
-        (`NPH_FIELD_FLAGS`);
+        (`NPH_FIELD_BITS`);
       - an entity field takes an entity dragged from the outliner;
       - a GUID field takes an asset of its kind dragged from the browser.
     - **Drawing:** the viewport outlines hulls and meshes, draws triggers in a colour of their own, and draws joints'
       anchors and axes.
+    - **Built:**
+      - **The hints** are the scene module's: `NphFieldDesc` gains `names` (one string literal, a `|` between two
+        names) and `asset_type`, with `NPH_FIELD_ENUM(names)`, `NPH_FIELD_BITS(names or NULL)` and
+        `NPH_FIELD_ASSET(type)`. Validation refuses what a field cannot take, and the layout hash leaves them out,
+        so no file changes. A game module's names are copied with its descriptors, so a reload unloads no string
+        the editor reads.
+      - **The runtime's components use them:** the enumerations of RigidBody, Collider, Joint, Light, Camera and
+        AudioSource; RigidBody's `locks` by name; the 64 numbered layers of `category` and `mask`; and every asset
+        field (meshes, materials, physics materials, collision assets, sounds).
+      - **The inspector** draws an enumeration as a list of its names and a mask as a popup of boxes. Asset fields
+        are one widget, replacing the material and physics material fields: the source it names, a drop of a
+        browser source of its kind (a material, a physics material, an editable mesh, a sound), and a list of the
+        project's assets of its type, which is where a collision asset, a scene's part, is picked. Entity fields
+        took outliner drops already.
+      - **The outlines** draw where the engine makes the bodies: the frame rule is shared with the bridge
+        (`nph_body_axes_rotation`, `nph_body_axes_scale`), so a mirrored entity's centre is mirrored as its body's
+        is. ASSET Colliders draw their collision asset, loaded and held by the editor, at the scale and turn of the
+        engine's copy, without the meshes the engine refuses. Triggers draw in the sensor colour, a
+        CharacterController's capsule in the ghost colour, and a Joint draws its anchor joined to both bodies and
+        its axis.
 
 The step lands as about ten pull requests, stacked (ADR-0102; the user's batching of 2026-11-19):
 1. sensors, with this record;

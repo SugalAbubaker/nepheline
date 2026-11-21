@@ -162,6 +162,16 @@ bool editor_project_source_of(EditorProject *p, NphGuid guid, char *out, u64 cap
 // Whether the source `key` has cooked assets.
 bool editor_project_is_cooked(EditorProject *p, const char *key);
 
+// Calls `fn` for every asset of `type` (asset/asset.h NphAssetType) the
+// snapshot holds, in the database's order: its GUID, its source's key and
+// its sub-asset name, valid during the call (the inspector's lists of a
+// field's assets; ADR-0108). The project's lock is held across the calls:
+// `fn` must not call into the project.
+void editor_project_each_asset(EditorProject *p, u32 type,
+                               void (*fn)(void *user, NphGuid guid, const char *key,
+                                          const char *sub),
+                               void *user);
+
 // A key of what the asset cooked from source `key` as sub-asset `sub` was cooked from: its
 // content hash with those of the assets it references (a material's textures), as the database
 // last recorded them; it changes when any of them is cooked from other content. False when the

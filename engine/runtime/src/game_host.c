@@ -112,14 +112,18 @@ static void free_component(NphAllocator *alloc, GameComponentCopy *c)
     if (c->text != NULL) {
         NPH_FREE_ARRAY(alloc, char, c->text, c->text_bytes);
     }
+    if (c->hint_text != NULL) {
+        NPH_FREE_ARRAY(alloc, char, c->hint_text, c->hint_bytes);
+    }
     if (c->defaults != NULL) {
         NPH_FREE(alloc, c->defaults, c->desc.size, COPY_DEFAULTS_ALIGN);
     }
     memset(c, 0, sizeof *c);
 }
 
-// The descriptor, its field array, its names, and its defaults, in memory
-// of the engine's, so the world's descriptor never points into the module.
+// The descriptor, its field array, its names (its fields' value and bit names
+// too), and its defaults, in memory of the engine's, so the world's
+// descriptor never points into the module.
 static NphResult copy_component(NphAllocator *alloc, const NphComponentDesc *src,
                                 GameComponentCopy *out)
 {
@@ -133,8 +137,14 @@ static NphResult copy_component(NphAllocator *alloc, const NphComponentDesc *src
     out->text_bytes = strlen(src->name) + 1U;
     for (u32 i = 0; i < src->field_count; ++i) {
         out->text_bytes += strlen(src->fields[i].name) + 1U;
+        if (src->fields[i].names != NULL) {
+            out->hint_bytes += strlen(src->fields[i].names) + 1U;
+        }
     }
     out->text = NPH_ALLOC_ARRAY(alloc, char, out->text_bytes);
+    if (out->hint_bytes > 0U) {
+        out->hint_text = NPH_ALLOC_ARRAY(alloc, char, out->hint_bytes);
+    }
     if (src->field_count > 0U) {
         out->fields = NPH_ALLOC_ARRAY(alloc, NphFieldDesc, src->field_count);
     }
@@ -142,6 +152,7 @@ static NphResult copy_component(NphAllocator *alloc, const NphComponentDesc *src
         out->defaults = (u8 *)NPH_ALLOC(alloc, src->size, COPY_DEFAULTS_ALIGN);
     }
     if (out->text == NULL || (src->field_count > 0U && out->fields == NULL) ||
+        (out->hint_bytes > 0U && out->hint_text == NULL) ||
         (src->defaults != NULL && out->defaults == NULL)) {
         free_component(alloc, out);
         return NPH_RESULT_OUT_OF_MEMORY;
@@ -151,12 +162,19 @@ static NphResult copy_component(NphAllocator *alloc, const NphComponentDesc *src
     memcpy(text, src->name, (size_t)name_len);
     out->desc.name = text;
     text += name_len;
+    char *hints = out->hint_text;
     for (u32 i = 0; i < src->field_count; ++i) {
         out->fields[i] = src->fields[i];
         const u64 len = strlen(src->fields[i].name) + 1U;
         memcpy(text, src->fields[i].name, (size_t)len);
         out->fields[i].name = text;
         text += len;
+        if (src->fields[i].names != NULL) { // out->hint_text has room for it
+            const u64 names_len = strlen(src->fields[i].names) + 1U;
+            memcpy(hints, src->fields[i].names, (size_t)names_len);
+            out->fields[i].names = hints;
+            hints += names_len;
+        }
     }
     out->desc.fields = out->fields;
     if (src->defaults != NULL) { // out->defaults was allocated for it above
@@ -224,8 +242,10 @@ static bool layouts_compatible(const GameComponentSet *old_set, const GameCompon
 }
 
 // Takes what a new build changed without changing the layout (flags, field
-// hints, defaults) into the copy the world points at.
-static void refresh_component(GameComponentCopy *dst, const GameComponentCopy *src)
+// hints, defaults) into the copy the world points at. The fields' value and
+// bit names come in `src`'s block, which `dst` takes in exchange for its
+// own: `src` is freed next.
+static void refresh_component(GameComponentCopy *dst, GameComponentCopy *src)
 {
     NPH_ASSERT(dst->layout_hash == src->layout_hash && dst->desc.size == src->desc.size &&
                dst->desc.field_count == src->desc.field_count);
@@ -234,7 +254,15 @@ static void refresh_component(GameComponentCopy *dst, const GameComponentCopy *s
         dst->fields[i].flags = src->fields[i].flags;
         dst->fields[i].min = src->fields[i].min;
         dst->fields[i].max = src->fields[i].max;
+        dst->fields[i].names = src->fields[i].names; // into the block taken below
+        dst->fields[i].asset_type = src->fields[i].asset_type;
     }
+    char *const hint_text = dst->hint_text;
+    const u64 hint_bytes = dst->hint_bytes;
+    dst->hint_text = src->hint_text;
+    dst->hint_bytes = src->hint_bytes;
+    src->hint_text = hint_text;
+    src->hint_bytes = hint_bytes;
     if (dst->defaults != NULL && src->defaults != NULL) {
         memcpy(dst->defaults, src->defaults, dst->desc.size);
     }

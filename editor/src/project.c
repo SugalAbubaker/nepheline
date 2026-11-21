@@ -1516,6 +1516,23 @@ bool editor_project_source_of(EditorProject *p, NphGuid guid, char *out, u64 cap
     return found;
 }
 
+void editor_project_each_asset(EditorProject *p, u32 type,
+                               void (*fn)(void *user, NphGuid guid, const char *key,
+                                          const char *sub),
+                               void *user)
+{
+    NPH_ASSERT(p != NULL && fn != NULL);
+    nph_mutex_lock(&p->lock);
+    const CookDb *db = p->snapshot != NULL ? &p->snapshot->db : NULL;
+    for (u32 i = 0U; db != NULL && i < db->entries.len; ++i) {
+        const CookDbEntry *e = &db->entries.data[i];
+        if (e->type == type) {
+            fn(user, e->guid, e->source, e->sub);
+        }
+    }
+    nph_mutex_unlock(&p->lock);
+}
+
 bool editor_project_is_cooked(EditorProject *p, const char *key)
 {
     NPH_ASSERT(p != NULL && key != NULL);

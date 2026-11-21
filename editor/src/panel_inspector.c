@@ -7,19 +7,24 @@
 //   - ANGLE fields are shown in degrees;
 //   - COLOR vectors use a colour editor;
 //   - rotations are edited as Euler angles;
+//   - an ENUM's value is picked from its names, and a BITS mask's bits are
+//     boxes in a popup, named or numbered (ADR-0108);
 //   - TEXT, string ids, and GUIDs are typed;
 //   - entity references take an entity dropped from the outliner;
-//   - a material slot (MeshRenderer's, MeshMaterials') names its material's
-//     source, takes a material dropped from the asset browser, and opens a
-//     `.nmat` in the material panel (ADR-0105);
-//   - a Collider's physics material, the same with a `.npmat` and the
-//     physics material panel (ADR-0108).
+//   - a GUID that names an asset of a type (NPH_FIELD_ASSET) shows its
+//     source, takes an asset of its kind dropped from the asset browser
+//     (a material, a physics material, an editable mesh, a sound), picks
+//     one of the project's from a list (a scene's parts too: its materials,
+//     its collision), and opens a `.nmat` or a `.npmat` in its panel
+//     (ADR-0105, ADR-0108).
 // READONLY fields are shown greyed and HIDDEN ones not at all.
 //
 // While editing, a change goes through the history: a drag, or typing into
 // a field, is one undoable step (merged by the widget). While playing, the
 // play copy is changed directly; those changes go with it when play stops.
+#include <nepheline/asset/asset.h>
 #include <nepheline/core/assert.h>
+#include <nepheline/core/hash.h>
 #include <nepheline/core/string_id.h>
 #include <nepheline/math/quat.h>
 #include <nepheline/math/scalar.h>
@@ -231,18 +236,430 @@ static void guid_field(u8 *value, const NphFieldDesc *f, FieldEdit *edit)
     }
 }
 
-// True for a field that holds a material slot: MeshRenderer's material<i>,
-// MeshMaterials' (runtime/components.h).
-static bool is_material_slot(const NphFieldDesc *f)
+// ---------------------------------------------------------------------------
+// Integers by their kind
+// ---------------------------------------------------------------------------
+
+// An integer field's value, sign-extended from a signed kind.
+static i64 int_get(NphFieldKind kind, const u8 *p)
 {
-    return (NphFieldKind)f->kind == NPH_FIELD_GUID && strncmp(f->name, "material", 8U) == 0;
+    switch (kind) {
+    case NPH_FIELD_U8: {
+        u8 v = 0U;
+        memcpy(&v, p, sizeof v);
+        return (i64)v;
+    }
+    case NPH_FIELD_U16: {
+        u16 v = 0U;
+        memcpy(&v, p, sizeof v);
+        return (i64)v;
+    }
+    case NPH_FIELD_U32: {
+        u32 v = 0U;
+        memcpy(&v, p, sizeof v);
+        return (i64)v;
+    }
+    case NPH_FIELD_I8: {
+        i8 v = 0;
+        memcpy(&v, p, sizeof v);
+        return (i64)v;
+    }
+    case NPH_FIELD_I16: {
+        i16 v = 0;
+        memcpy(&v, p, sizeof v);
+        return (i64)v;
+    }
+    case NPH_FIELD_I32: {
+        i32 v = 0;
+        memcpy(&v, p, sizeof v);
+        return (i64)v;
+    }
+    default: { // U64, I64: the bits as they are
+        i64 v = 0;
+        memcpy(&v, p, sizeof v);
+        return v;
+    }
+    }
 }
 
-// A material slot: its material's source, or the default material; a
-// material dropped from the asset browser takes it, right-click gives it
-// the default, and Edit opens a `.nmat` in the material panel (ADR-0105).
-static void material_field(Editor *ed, u8 *value, const NphFieldDesc *f, FieldEdit *edit)
+// Writes `v` into an integer field, truncated to its kind.
+static void int_set(NphFieldKind kind, u8 *p, i64 v)
 {
+    switch (kind) {
+    case NPH_FIELD_U8:
+    case NPH_FIELD_I8: {
+        const u8 b = (u8)((u64)v & 0xFFU);
+        memcpy(p, &b, sizeof b);
+        break;
+    }
+    case NPH_FIELD_U16:
+    case NPH_FIELD_I16: {
+        const u16 b = (u16)((u64)v & 0xFFFFU);
+        memcpy(p, &b, sizeof b);
+        break;
+    }
+    case NPH_FIELD_U32:
+    case NPH_FIELD_I32: {
+        const u32 b = (u32)((u64)v & 0xFFFFFFFFU);
+        memcpy(p, &b, sizeof b);
+        break;
+    }
+    default:
+        memcpy(p, &v, sizeof v);
+        break;
+    }
+}
+
+// Copies a name into `out` (NUL-terminated, cut to fit).
+static void name_text(NphStr name, char *out, u64 cap)
+{
+    (void)snprintf(out, (size_t)cap, "%.*s", (int)name.len, name.data);
+}
+
+static void note_discrete(FieldEdit *edit, u64 widget)
+{
+    edit->changed = true;
+    edit->key = widget;
+    edit->finished = true; // one step a pick
+}
+
+// An enumeration (NPH_FIELD_ENUM): its value's name, picked from a list of
+// them. A value with no name shows its number.
+static void enum_field(const NphFieldDesc *f, u8 *p, FieldEdit *edit)
+{
+    const NphFieldKind kind = (NphFieldKind)f->kind;
+    const i64 v = int_get(kind, p);
+    const u32 count = nph_field_name_count(f);
+    char preview[80];
+    if (v >= 0 && v < (i64)count) {
+        name_text(nph_field_name(f, (u32)v), preview, sizeof preview);
+    } else {
+        (void)snprintf(preview, sizeof preview, "%lld (no name)", (long long)v);
+    }
+    if (!igBeginCombo("##v", preview, ImGuiComboFlags_None)) {
+        return;
+    }
+    for (u32 i = 0U; i < count; ++i) {
+        char item[80];
+        name_text(nph_field_name(f, i), item, sizeof item);
+        igPushID_Int((int)i);
+        if (igSelectable_Bool(item, v == (i64)i, ImGuiSelectableFlags_None, ui_vec2(0.0F, 0.0F)) &&
+            v != (i64)i) {
+            int_set(kind, p, (i64)i);
+            note_discrete(edit, (u64)igGetItemID());
+        }
+        igPopID();
+    }
+    igEndCombo();
+}
+
+// The bits a mask's summary counts as "all": its named ones, or every bit
+// of its width.
+static u64 bits_all(const NphFieldDesc *f, u32 width)
+{
+    const u32 named = nph_field_name_count(f);
+    const u32 n = named > 0U ? named : width;
+    return n >= 64U ? NPH_U64_MAX : (1ULL << n) - 1ULL;
+}
+
+// "none", "all", or the bits set: their names, else their numbers with runs
+// joined ("bits 0, 3-5"), cut short with "..." when they do not fit.
+static void bits_summary(const NphFieldDesc *f, u64 v, u32 width, char *out, u64 cap)
+{
+    const u64 all = bits_all(f, width);
+    if (v == 0U) {
+        (void)snprintf(out, (size_t)cap, "none");
+        return;
+    }
+    if (v == all) {
+        (void)snprintf(out, (size_t)cap, "all");
+        return;
+    }
+    const u32 named = nph_field_name_count(f);
+    u64 len = 0U;
+    out[0] = '\0';
+    if (named == 0U) { // numbers alone would read as a value
+        const bool one = (v & (v - 1U)) == 0U;
+        len = (u64)snprintf(out, (size_t)cap, "%s", one ? "bit " : "bits ");
+    }
+    bool first = true;
+    for (u32 i = 0U; i < width; ++i) {
+        if (((v >> i) & 1U) == 0U) {
+            continue;
+        }
+        char item[80];
+        if (i < named) {
+            name_text(nph_field_name(f, i), item, sizeof item);
+        } else {
+            u32 last = i;
+            while (last + 1U < width && last + 1U >= named && ((v >> (last + 1U)) & 1U) != 0U) {
+                ++last;
+            }
+            if (last > i + 1U) {
+                (void)snprintf(item, sizeof item, "%u-%u", i, last);
+                i = last;
+            } else {
+                (void)snprintf(item, sizeof item, "%u", i);
+            }
+        }
+        const int n = snprintf(out + len, (size_t)(cap - len), "%s%s", first ? "" : ", ", item);
+        first = false;
+        if (n < 0 || len + (u64)n + 4U >= cap) {
+            (void)snprintf(out + (len < cap - 4U ? len : cap - 4U), 4U, "...");
+            return;
+        }
+        len += (u64)n;
+    }
+}
+
+// A bit mask (NPH_FIELD_BITS): what it holds, and a box a bit in a popup,
+// named or numbered.
+static void bits_field(const NphFieldDesc *f, u8 *p, FieldEdit *edit)
+{
+    const NphFieldKind kind = (NphFieldKind)f->kind;
+    const u32 width = f->size * 8U;
+    u64 v = (u64)int_get(kind, p);
+    char summary[160];
+    bits_summary(f, v, width, summary, sizeof summary);
+    if (igButton(summary, ui_vec2(-FLT_MIN, 0.0F))) {
+        (void)igOpenPopup_Str("##bits", ImGuiPopupFlags_None);
+    }
+    if (!igBeginPopup("##bits", ImGuiWindowFlags_None)) {
+        return;
+    }
+    const u32 named = nph_field_name_count(f);
+    bool changed = false;
+    u64 widget = 0U;
+    if (named > 0U) {
+        for (u32 i = 0U; i < named; ++i) {
+            char item[80];
+            name_text(nph_field_name(f, i), item, sizeof item);
+            igPushID_Int((int)i);
+            bool on = ((v >> i) & 1U) != 0U;
+            if (igCheckbox(item, &on)) {
+                v = on ? v | (1ULL << i) : v & ~(1ULL << i);
+                changed = true;
+                widget = (u64)igGetItemID();
+            }
+            igPopID();
+        }
+    } else {
+        const u64 all = bits_all(f, width);
+        if (igSmallButton("All")) {
+            v = all;
+            changed = true;
+            widget = (u64)igGetItemID();
+        }
+        igSameLine(0.0F, -1.0F);
+        if (igSmallButton("None")) {
+            v = 0U;
+            changed = true;
+            widget = (u64)igGetItemID();
+        }
+        const ImGuiTableFlags tflags =
+            ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoSavedSettings;
+        if (igBeginTable("##grid", 8, tflags, ui_vec2(0.0F, 0.0F), 0.0F)) {
+            for (u32 i = 0U; i < width; ++i) {
+                (void)igTableNextColumn();
+                char item[12];
+                (void)snprintf(item, sizeof item, "%u", i);
+                bool on = ((v >> i) & 1U) != 0U;
+                if (igCheckbox(item, &on)) {
+                    v = on ? v | (1ULL << i) : v & ~(1ULL << i);
+                    changed = true;
+                    widget = (u64)igGetItemID();
+                }
+            }
+            igEndTable();
+        }
+    }
+    igEndPopup();
+    if (changed) {
+        int_set(kind, p, (i64)v);
+        note_discrete(edit, widget);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Asset fields
+// ---------------------------------------------------------------------------
+
+// What the inspector takes for a GUID that names an asset of a type
+// (NPH_FIELD_ASSET; ADR-0108): the payload a source of it is dragged as
+// from the browser, the kind of source that cooks to it and the sub-asset
+// it cooks it as, what a null GUID means, and what the tooltip calls it.
+typedef struct AssetKind {
+    u32 type;         // NphAssetType
+    const char *drag; // NULL: no source cooks to it alone (a scene's part): picked from the list
+    u32 source;       // CookerSourceKind
+    const char *sub;  // its sub-asset in that source
+    const char *none; // a null GUID's label
+    const char *noun;
+} AssetKind;
+
+static const AssetKind k_asset_kinds[] = {
+    {NPH_ASSET_TYPE_MATERIAL, EDITOR_DRAG_MATERIAL, COOKER_SOURCE_MATERIAL, "material", "(default)",
+     "a material"},
+    {NPH_ASSET_TYPE_PHYSICS_MATERIAL, EDITOR_DRAG_PHYSICS_MATERIAL, COOKER_SOURCE_PHYSICS_MATERIAL,
+     "physics_material", "(its own values)", "a physics material"},
+    {NPH_ASSET_TYPE_MESH, EDITOR_DRAG_ASSET, COOKER_SOURCE_MESH, "mesh", "(none)",
+     "an editable mesh"},
+    {NPH_ASSET_TYPE_SOUND, EDITOR_DRAG_SOUND, COOKER_SOURCE_SOUND, "sound", "(none)", "a sound"},
+    {NPH_ASSET_TYPE_COLLISION, NULL, COOKER_SOURCE_NONE, NULL, "(none)", "a collision asset"},
+};
+
+static const AssetKind *asset_kind_of(u32 type)
+{
+    for (u32 i = 0U; i < NPH_ARRAY_COUNT(k_asset_kinds); ++i) {
+        if (k_asset_kinds[i].type == type) {
+            return &k_asset_kinds[i];
+        }
+    }
+    return NULL;
+}
+
+// The asset a drop of the source `key`, dragged as `drag`, gives a field of
+// kind `k`, its cook queued when the source has none yet. False for a drag
+// or a source of another kind.
+static bool asset_drop_guid(Editor *ed, const AssetKind *k, const char *drag, const char *key,
+                            NphGuid *out)
+{
+    if (k->drag == NULL || strcmp(drag, k->drag) != 0 ||
+        cooker_source_kind(key) != (CookerSourceKind)k->source) {
+        return false;
+    }
+    *out = cooker_asset_guid(key, k->sub);
+    if (ed->project != NULL && !editor_project_is_cooked(ed->project, key)) {
+        u32 id = 0U;
+        NPH_IGNORE_RESULT(editor_project_cook(ed->project, key, false, 0U, &id));
+    }
+    return true;
+}
+
+// A dragged source this field takes: peeked at while it hovers, accepted
+// (and highlighted) only when it is of the field's kind.
+static const char *accept_source(const AssetKind *k)
+{
+    if (k->drag == NULL) {
+        return NULL;
+    }
+    const ImGuiPayload *peek = igAcceptDragDropPayload(k->drag, ImGuiDragDropFlags_AcceptPeekOnly);
+    if (peek == NULL || peek->DataSize <= 0 ||
+        ((const char *)peek->Data)[peek->DataSize - 1] != '\0' ||
+        cooker_source_kind((const char *)peek->Data) != (CookerSourceKind)k->source) {
+        return NULL;
+    }
+    const ImGuiPayload *p = igAcceptDragDropPayload(k->drag, ImGuiDragDropFlags_None);
+    return p != NULL ? (const char *)p->Data : NULL;
+}
+
+static bool contains_nocase(const char *hay, const char *needle)
+{
+    const u64 n = strlen(needle);
+    for (const char *h = hay; *h != '\0'; ++h) {
+        u64 i = 0U;
+        while (i < n && h[i] != '\0' && nph_ascii_to_lower(h[i]) == nph_ascii_to_lower(needle[i])) {
+            ++i;
+        }
+        if (i == n) {
+            return true;
+        }
+    }
+    return n == 0U;
+}
+
+// The list of the project's assets of a type, as a popup draws it.
+#define PICK_SHOWN 200U
+
+typedef struct AssetPick {
+    const char *filter;
+    const char *own; // the sub-asset a source of the kind cooks it as: named by its key alone
+    NphGuid current;
+    NphGuid picked;
+    bool chosen;
+    u32 shown;
+    u32 more; // matches not shown
+} AssetPick;
+
+static void pick_visit(void *user, NphGuid guid, const char *key, const char *sub)
+{
+    AssetPick *pick = (AssetPick *)user;
+    char label[EDITOR_PROJECT_PATH_MAX + 40U];
+    const bool own = pick->own != NULL && strcmp(sub, pick->own) == 0;
+    (void)snprintf(label, sizeof label, "%s%s%s", key, own ? "" : " ", own ? "" : sub);
+    if (!contains_nocase(label, pick->filter)) {
+        return;
+    }
+    if (pick->shown == PICK_SHOWN) {
+        pick->more += 1U;
+        return;
+    }
+    igPushID_Int((int)pick->shown);
+    if (igSelectable_Bool(label, nph_guid_equals(guid, pick->current), ImGuiSelectableFlags_None,
+                          ui_vec2(0.0F, 0.0F))) {
+        pick->picked = guid;
+        pick->chosen = true;
+    }
+    igPopID();
+    pick->shown += 1U;
+}
+
+// The popup of the project's assets of the field's type, filtered by what
+// is typed; true with `out` when one (or none) was chosen.
+static bool asset_picker(Editor *ed, const AssetKind *k, NphGuid current, NphGuid *out)
+{
+    if (!igBeginPopup("##pick", ImGuiWindowFlags_None)) {
+        return false;
+    }
+    bool chosen = false;
+    igSetNextItemWidth(360.0F);
+    (void)igInputTextWithHint("##filter", "filter", ed->asset_filter, sizeof ed->asset_filter,
+                              ImGuiInputTextFlags_None, NULL, NULL);
+    if (igSelectable_Bool(k->none, nph_guid_is_null(current), ImGuiSelectableFlags_None,
+                          ui_vec2(0.0F, 0.0F))) {
+        *out = NPH_GUID_NULL;
+        chosen = true;
+    }
+    AssetPick pick;
+    memset(&pick, 0, sizeof pick);
+    pick.filter = ed->asset_filter;
+    pick.own = k->sub;
+    pick.current = current;
+    if (igBeginChild_Str("##list", ui_vec2(360.0F, 240.0F), ImGuiChildFlags_None,
+                         ImGuiWindowFlags_None)) {
+        if (ed->project != NULL) {
+            editor_project_each_asset(ed->project, k->type, pick_visit, &pick);
+        }
+        if (pick.more > 0U) {
+            igTextDisabled("%u more: type to narrow the list", pick.more);
+        } else if (pick.shown == 0U) {
+            igTextDisabled("the project has none");
+        }
+    }
+    igEndChild();
+    if (pick.chosen) {
+        *out = pick.picked;
+        chosen = true;
+    }
+    if (chosen) {
+        igCloseCurrentPopup();
+    }
+    igEndPopup();
+    return chosen;
+}
+
+// A GUID that names an asset of a type (NPH_FIELD_ASSET): its source, or
+// what none means; an asset of its kind dropped from the browser takes it,
+// the list beside it picks one of the project's, right-click clears it, and
+// Edit opens a material or physics material in its panel (ADR-0105,
+// ADR-0108).
+static void asset_field(Editor *ed, u8 *value, const NphFieldDesc *f, FieldEdit *edit)
+{
+    const AssetKind *k = asset_kind_of(f->asset_type);
+    const AssetKind any = {f->asset_type, NULL, COOKER_SOURCE_NONE, NULL, "(none)", "an asset"};
+    if (k == NULL) {
+        k = &any; // a type no source cooks alone: its assets picked from the list
+    }
     NphGuid g;
     memcpy(&g, value + f->offset, sizeof g);
     char key[EDITOR_PROJECT_PATH_MAX];
@@ -251,8 +668,8 @@ static void material_field(Editor *ed, u8 *value, const NphFieldDesc *f, FieldEd
                        editor_project_source_of(ed->project, g, key, sizeof key, sub, sizeof sub);
     char label[EDITOR_PROJECT_PATH_MAX + 40U];
     if (nph_guid_is_null(g)) {
-        (void)snprintf(label, sizeof label, "(default)");
-    } else if (known && strcmp(sub, "material") == 0) {
+        (void)snprintf(label, sizeof label, "%s", k->none);
+    } else if (known && k->sub != NULL && strcmp(sub, k->sub) == 0) {
         (void)snprintf(label, sizeof label, "%s", key);
     } else if (known) {
         (void)snprintf(label, sizeof label, "%s %s", key, sub); // a glTF's: "city.gltf material/3"
@@ -261,112 +678,58 @@ static void material_field(Editor *ed, u8 *value, const NphFieldDesc *f, FieldEd
         nph_guid_to_string(g, hex);
         (void)snprintf(label, sizeof label, "%s", hex);
     }
-    const bool editable = known && cooker_source_kind(key) == COOKER_SOURCE_MATERIAL;
-    (void)igButton(label, ui_vec2(editable ? -48.0F : -FLT_MIN, 0.0F));
+    const CookerSourceKind source = known ? cooker_source_kind(key) : COOKER_SOURCE_NONE;
+    const bool editable =
+        source == COOKER_SOURCE_MATERIAL || source == COOKER_SOURCE_PHYSICS_MATERIAL;
+    const f32 room = (editable ? 48.0F : 0.0F) + igGetFrameHeight() + 4.0F;
+    (void)igButton(label, ui_vec2(-room, 0.0F));
     const u64 widget = (u64)igGetItemID();
     if (igIsItemHovered(ImGuiHoveredFlags_None)) {
-        igSetTooltip("drop a material from the Assets panel here; right-click for the default");
+        if (k->drag != NULL) {
+            igSetTooltip("drop %s from the Assets panel here, or pick one from the list; "
+                         "right-click for %s",
+                         k->noun, k->none);
+        } else {
+            igSetTooltip("pick %s of the project's from the list; right-click for %s", k->noun,
+                         k->none);
+        }
     }
     bool changed = false;
+    NphGuid next = g;
     if (igBeginDragDropTarget()) {
-        const ImGuiPayload *p =
-            igAcceptDragDropPayload(EDITOR_DRAG_MATERIAL, ImGuiDragDropFlags_None);
-        if (p != NULL && p->DataSize > 0 && ((const char *)p->Data)[p->DataSize - 1] == '\0') {
-            const char *dropped = (const char *)p->Data;
-            const NphGuid material = cooker_asset_guid(dropped, "material");
-            memcpy(value + f->offset, &material, sizeof material);
+        const char *dropped = accept_source(k);
+        NphGuid guid;
+        if (dropped != NULL && k->drag != NULL && asset_drop_guid(ed, k, k->drag, dropped, &guid)) {
+            next = guid;
             changed = true;
-            if (ed->project != NULL && !editor_project_is_cooked(ed->project, dropped)) {
-                u32 id = 0U;
-                NPH_IGNORE_RESULT(editor_project_cook(ed->project, dropped, false, 0U, &id));
-            }
         }
         igEndDragDropTarget();
     }
     if (igIsItemClicked(ImGuiMouseButton_Right) && !nph_guid_is_null(g)) {
-        const NphGuid none = NPH_GUID_NULL;
-        memcpy(value + f->offset, &none, sizeof none);
+        next = NPH_GUID_NULL;
         changed = true;
+    }
+    igSameLine(0.0F, 4.0F);
+    if (igArrowButton("##list", ImGuiDir_Down)) {
+        ed->asset_filter[0] = '\0';
+        (void)igOpenPopup_Str("##pick", ImGuiPopupFlags_None);
+    }
+    if (asset_picker(ed, k, g, &next)) {
+        changed = !nph_guid_equals(next, g);
     }
     if (editable) {
         igSameLine(0.0F, -1.0F);
         if (igSmallButton("Edit")) {
-            NPH_IGNORE_RESULT(editor_material_open(ed, key)); // logged
-        }
-    }
-    if (changed) {
-        edit->changed = true;
-        edit->key = widget;
-        edit->finished = true;
-    }
-}
-
-// True for a Collider's physics material (runtime/components.h).
-static bool is_physics_material(const NphFieldDesc *f)
-{
-    return (NphFieldKind)f->kind == NPH_FIELD_GUID && strcmp(f->name, "physics_material") == 0;
-}
-
-// A Collider's physics material: its source, or the Collider's own values; a
-// physics material dropped from the asset browser takes it, right-click gives
-// the Collider its own values back, and Edit opens it in the physics material
-// panel (ADR-0108).
-static void physics_material_field(Editor *ed, u8 *value, const NphFieldDesc *f, FieldEdit *edit)
-{
-    NphGuid g;
-    memcpy(&g, value + f->offset, sizeof g);
-    char key[EDITOR_PROJECT_PATH_MAX];
-    char sub[32];
-    const bool known = !nph_guid_is_null(g) && ed->project != NULL &&
-                       editor_project_source_of(ed->project, g, key, sizeof key, sub, sizeof sub);
-    char label[EDITOR_PROJECT_PATH_MAX + 40U];
-    if (nph_guid_is_null(g)) {
-        (void)snprintf(label, sizeof label, "(its own values)");
-    } else if (known) {
-        (void)snprintf(label, sizeof label, "%s", key);
-    } else {
-        char hex[NPH_GUID_STRING_LEN + 1U];
-        nph_guid_to_string(g, hex);
-        (void)snprintf(label, sizeof label, "%s", hex);
-    }
-    const bool editable = known && cooker_source_kind(key) == COOKER_SOURCE_PHYSICS_MATERIAL;
-    (void)igButton(label, ui_vec2(editable ? -48.0F : -FLT_MIN, 0.0F));
-    const u64 widget = (u64)igGetItemID();
-    if (igIsItemHovered(ImGuiHoveredFlags_None)) {
-        igSetTooltip("drop a physics material from the Assets panel here; right-click for the "
-                     "Collider's own values");
-    }
-    bool changed = false;
-    if (igBeginDragDropTarget()) {
-        const ImGuiPayload *p =
-            igAcceptDragDropPayload(EDITOR_DRAG_PHYSICS_MATERIAL, ImGuiDragDropFlags_None);
-        if (p != NULL && p->DataSize > 0 && ((const char *)p->Data)[p->DataSize - 1] == '\0') {
-            const char *dropped = (const char *)p->Data;
-            const NphGuid material = cooker_asset_guid(dropped, "physics_material");
-            memcpy(value + f->offset, &material, sizeof material);
-            changed = true;
-            if (ed->project != NULL && !editor_project_is_cooked(ed->project, dropped)) {
-                u32 id = 0U;
-                NPH_IGNORE_RESULT(editor_project_cook(ed->project, dropped, false, 0U, &id));
+            if (source == COOKER_SOURCE_MATERIAL) {
+                NPH_IGNORE_RESULT(editor_material_open(ed, key)); // logged
+            } else {
+                NPH_IGNORE_RESULT(editor_physics_material_open(ed, key)); // logged
             }
         }
-        igEndDragDropTarget();
-    }
-    if (igIsItemClicked(ImGuiMouseButton_Right) && !nph_guid_is_null(g)) {
-        const NphGuid none = NPH_GUID_NULL;
-        memcpy(value + f->offset, &none, sizeof none);
-        changed = true;
-    }
-    if (editable) {
-        igSameLine(0.0F, -1.0F);
-        if (igSmallButton("Edit")) {
-            NPH_IGNORE_RESULT(editor_physics_material_open(ed, key)); // logged
-        }
     }
     if (changed) {
-        edit->changed = true;
-        edit->key = widget;
-        edit->finished = true;
+        memcpy(value + f->offset, &next, sizeof next);
+        note_discrete(edit, widget);
     }
 }
 
@@ -400,6 +763,14 @@ static void field(Editor *ed, NphWorld *w, const NphFieldDesc *f, u8 *value, Fie
     case NPH_FIELD_I16:
     case NPH_FIELD_I32:
     case NPH_FIELD_I64: {
+        if ((f->flags & (u32)NPH_FIELD_FLAG_ENUM) != 0U) {
+            enum_field(f, p, edit);
+            break;
+        }
+        if ((f->flags & (u32)NPH_FIELD_FLAG_BITS) != 0U) {
+            bits_field(f, p, edit);
+            break;
+        }
         u64 lo = 0U;
         u64 hi = 0U;
         int_bound(kind, f->min, &lo);
@@ -482,10 +853,8 @@ static void field(Editor *ed, NphWorld *w, const NphFieldDesc *f, u8 *value, Fie
         text_field(value, f, edit);
         break;
     case NPH_FIELD_GUID:
-        if (is_material_slot(f)) {
-            material_field(ed, value, f, edit);
-        } else if (is_physics_material(f)) {
-            physics_material_field(ed, value, f, edit);
+        if (f->asset_type != 0U) {
+            asset_field(ed, value, f, edit);
         } else {
             guid_field(value, f, edit);
         }
@@ -498,8 +867,8 @@ static void field(Editor *ed, NphWorld *w, const NphFieldDesc *f, u8 *value, Fie
 
 // Applies an edited component: through the history while editing, straight
 // into the play copy while playing.
-static void apply(Editor *ed, NphWorld *w, NphEntity e, NphComponentId id, const u8 *value,
-                  const FieldEdit *edit, const char *component)
+static NphResult apply(Editor *ed, NphWorld *w, NphEntity e, NphComponentId id, const u8 *value,
+                       const FieldEdit *edit, const char *component)
 {
     NphResult r = NPH_RESULT_OK;
     const NphRuntimeComponents *rc = nph_engine_components(ed->engine);
@@ -533,6 +902,41 @@ static void apply(Editor *ed, NphWorld *w, NphEntity e, NphComponentId id, const
     if (r != NPH_RESULT_OK) {
         NPH_LOG_WARN(&LOG_EDITOR, "editing %s: %s", component, nph_result_string(r));
     }
+    return r;
+}
+
+NphResult editor_inspector_drop(Editor *ed, NphEntity e, NphComponentId id, const char *field,
+                                const char *drag, const char *key)
+{
+    NPH_ASSERT(ed != NULL && field != NULL && drag != NULL && key != NULL);
+    NphWorld *w = nph_engine_world(ed->engine);
+    const NphComponentDesc *d = nph_world_component_desc(w, id);
+    if (d == NULL || d->size == 0U || !nph_world_is_alive(w, e) || !nph_world_has(w, e, id)) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    const NphFieldDesc *f = nph_component_find_field(d, nph_str_from_cstr(field));
+    if (f == NULL) {
+        return NPH_RESULT_NOT_FOUND;
+    }
+    const AssetKind *k = f->kind == (u32)NPH_FIELD_GUID ? asset_kind_of(f->asset_type) : NULL;
+    NphGuid guid;
+    if (k == NULL || (f->flags & (u32)NPH_FIELD_FLAG_READONLY) != 0U ||
+        !asset_drop_guid(ed, k, drag, key, &guid)) {
+        return NPH_RESULT_INVALID_ARGUMENT;
+    }
+    u8 value[NPH_ECS_MAX_COMPONENT_SIZE];
+    memcpy(value, nph_world_get(w, e, id), d->size);
+    memcpy(value + f->offset, &guid, sizeof guid);
+    FieldEdit edit;
+    memset(&edit, 0, sizeof edit);
+    edit.changed = true;
+    edit.finished = true;
+    edit.key = nph_hash64(field, strlen(field), (u64)id); // a step of its own
+    const NphResult r = apply(ed, w, e, id, value, &edit, d->name);
+    if (!nph_engine_is_playing(ed->engine)) {
+        editor_history_end_merge(ed->history);
+    }
+    return r;
 }
 
 static void component(Editor *ed, NphWorld *w, NphEntity e, NphComponentId id)
@@ -591,7 +995,7 @@ static void component(Editor *ed, NphWorld *w, NphEntity e, NphComponentId id)
         igEndTable();
     }
     if (edit.changed) {
-        apply(ed, w, e, id, value, &edit, d->name);
+        NPH_IGNORE_RESULT(apply(ed, w, e, id, value, &edit, d->name)); // logged
     }
     if (edit.finished && !playing) {
         editor_history_end_merge(ed->history);

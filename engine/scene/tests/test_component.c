@@ -94,7 +94,7 @@ NTEST(component, find_field_and_defaults)
     nph_component_init_default(TestTagA_component(), NULL); // a tag has no data
 }
 
-static const NphFieldDesc g_one_f32[] = {{"x", NPH_FIELD_F32, 0U, 4U, 0U, 0.0F, 0.0F}};
+static const NphFieldDesc g_one_f32[] = {{"x", NPH_FIELD_F32, 0U, 4U, 0U, 0.0F, 0.0F, NULL, 0U}};
 
 static NphComponentDesc base_desc(void)
 {
@@ -142,8 +142,8 @@ NTEST(component, validation_rejects_malformed_descriptors)
     d.field_count = 0U;
     NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&d, &reason), NPH_RESULT_OK);
 
-    NphFieldDesc f[2] = {{"x", NPH_FIELD_F32, 0U, 4U, 0U, 0.0F, 0.0F},
-                         {"y", NPH_FIELD_F32, 4U, 4U, 0U, 0.0F, 0.0F}};
+    NphFieldDesc f[2] = {{"x", NPH_FIELD_F32, 0U, 4U, 0U, 0.0F, 0.0F, NULL, 0U},
+                         {"y", NPH_FIELD_F32, 4U, 4U, 0U, 0.0F, 0.0F, NULL, 0U}};
     NphComponentDesc two = {"test.Two", 8U, 4U, f, 2U, 0U, NULL};
     NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&two, &reason), NPH_RESULT_OK);
     f[1].offset = 2U; // misaligned
@@ -170,6 +170,120 @@ NTEST(component, validation_rejects_malformed_descriptors)
     NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&two, &reason), NPH_RESULT_OK);
     f[1].name = "";
     NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&two, &reason), NPH_RESULT_INVALID_ARGUMENT);
+}
+
+// The editor's hints (ADR-0108): an enumeration's names, a mask's bits, the
+// asset a GUID names.
+#define TEST_HINTED_FIELDS(F)                                                                      \
+    F(U32, shape, NPH_FIELD_ENUM("sphere|capsule|box"))                                            \
+    F(U8, locks, NPH_FIELD_BITS("move x|move y|turn"))                                             \
+    F(U64, layers, NPH_FIELD_BITS(NULL))                                                           \
+    F(GUID, mesh, NPH_FIELD_ASSET(0x4853454DU))
+NPH_COMPONENT_STRUCT(TestHinted, TEST_HINTED_FIELDS);
+NPH_COMPONENT_DECLARE(TestHinted);
+NPH_COMPONENT_DEFINE(TestHinted, TEST_HINTED_FIELDS, "test.Hinted", 0U, NULL)
+
+static bool str_is(NphStr s, const char *text)
+{
+    return nph_str_equals(s, nph_str_from_cstr(text));
+}
+
+NTEST(component, the_generator_carries_names_and_asset_types)
+{
+    const NphComponentDesc *d = TestHinted_component();
+    NTEST_EXPECT_EQ_INT(nph_component_desc_validate(d, NULL), NPH_RESULT_OK);
+    NTEST_ASSERT_EQ_UINT(d->field_count, 4U);
+    const NphFieldDesc *shape = &d->fields[0];
+    NTEST_EXPECT_EQ_UINT(shape->flags, NPH_FIELD_FLAG_ENUM);
+    NTEST_EXPECT_EQ_UINT(nph_field_name_count(shape), 3U);
+    NTEST_EXPECT_TRUE(str_is(nph_field_name(shape, 0U), "sphere"));
+    NTEST_EXPECT_TRUE(str_is(nph_field_name(shape, 1U), "capsule"));
+    NTEST_EXPECT_TRUE(str_is(nph_field_name(shape, 2U), "box"));
+    NTEST_EXPECT_EQ_UINT(nph_field_name(shape, 3U).len, 0U); // past the last
+    NTEST_EXPECT_EQ_UINT(nph_field_name(shape, 99U).len, 0U);
+    NTEST_EXPECT_EQ_UINT(shape->asset_type, 0U);
+    const NphFieldDesc *locks = &d->fields[1];
+    NTEST_EXPECT_EQ_UINT(locks->flags, NPH_FIELD_FLAG_BITS);
+    NTEST_EXPECT_EQ_UINT(nph_field_name_count(locks), 3U);
+    NTEST_EXPECT_TRUE(str_is(nph_field_name(locks, 1U), "move y")); // spaces kept
+    const NphFieldDesc *layers = &d->fields[2];
+    NTEST_EXPECT_EQ_UINT(layers->flags, NPH_FIELD_FLAG_BITS);
+    NTEST_EXPECT_NULL(layers->names);
+    NTEST_EXPECT_EQ_UINT(nph_field_name_count(layers), 0U);
+    NTEST_EXPECT_EQ_UINT(nph_field_name(layers, 0U).len, 0U);
+    const NphFieldDesc *mesh = &d->fields[3];
+    NTEST_EXPECT_EQ_UINT(mesh->flags, 0U);
+    NTEST_EXPECT_NULL(mesh->names);
+    NTEST_EXPECT_EQ_UINT(mesh->asset_type, 0x4853454DU);
+    // Fields without them have none.
+    const NphFieldDesc *plain = &TestHealth_component()->fields[1];
+    NTEST_EXPECT_NULL(plain->names);
+    NTEST_EXPECT_EQ_UINT(plain->asset_type, 0U);
+    NTEST_EXPECT_EQ_UINT(nph_field_name_count(plain), 0U);
+    // The hints are the editor's: the layout hash does not see them.
+    NphFieldDesc bare[4];
+    memcpy(bare, d->fields, sizeof bare);
+    for (u32 i = 0U; i < 4U; ++i) {
+        bare[i].flags = 0U;
+        bare[i].names = NULL;
+        bare[i].asset_type = 0U;
+    }
+    NphComponentDesc unhinted = *d;
+    unhinted.fields = bare;
+    NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&unhinted, NULL), NPH_RESULT_OK);
+    NTEST_EXPECT_TRUE(nph_component_layout_hash(&unhinted) == nph_component_layout_hash(d));
+}
+
+NTEST(component, validation_rejects_hints_a_field_cannot_take)
+{
+    const char *reason = NULL;
+    NphFieldDesc f[2] = {{"kind", NPH_FIELD_U8, 0U, 1U, 0U, 0.0F, 0.0F, NULL, 0U},
+                         {"asset", NPH_FIELD_GUID, 8U, 16U, 0U, 0.0F, 0.0F, NULL, 0U}};
+    NphComponentDesc d = {"test.Hints", 24U, 8U, f, 2U, 0U, NULL};
+    NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&d, &reason), NPH_RESULT_OK);
+    const struct {
+        u32 kind;
+        u32 flags;
+        const char *names;
+    } bad[] = {
+        {NPH_FIELD_U8, NPH_FIELD_FLAG_ENUM, NULL},                        // an enum without names
+        {NPH_FIELD_U8, NPH_FIELD_FLAG_ENUM, ""},                          // nothing named
+        {NPH_FIELD_U8, NPH_FIELD_FLAG_ENUM, "a||b"},                      // an empty name
+        {NPH_FIELD_U8, NPH_FIELD_FLAG_ENUM, "a|"},                        // likewise, last
+        {NPH_FIELD_U8, NPH_FIELD_FLAG_ENUM, "|a"},                        // likewise, first
+        {NPH_FIELD_U8, NPH_FIELD_FLAG_ENUM | NPH_FIELD_FLAG_BITS, "a|b"}, // both
+        {NPH_FIELD_U8, NPH_FIELD_FLAG_ENUM | NPH_FIELD_FLAG_RANGE, "a"},  // and a range
+        {NPH_FIELD_U8, NPH_FIELD_FLAG_BITS, "0|1|2|3|4|5|6|7|8"},         // nine bits of eight
+        {NPH_FIELD_U8, 0U, "a|b"},                                        // names, no hint
+        {NPH_FIELD_I8, NPH_FIELD_FLAG_BITS, NULL},                        // signed bits
+        {NPH_FIELD_BOOL, NPH_FIELD_FLAG_ENUM, "off|on"},                  // not an integer
+    };
+    for (u32 i = 0U; i < NPH_ARRAY_COUNT(bad); ++i) {
+        f[0].kind = bad[i].kind;
+        f[0].size = nph_field_kind_size((NphFieldKind)bad[i].kind);
+        f[0].flags = bad[i].flags;
+        f[0].names = bad[i].names;
+        f[0].max = (bad[i].flags & (u32)NPH_FIELD_FLAG_RANGE) != 0U ? 1.0F : 0.0F;
+        NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&d, &reason), NPH_RESULT_INVALID_ARGUMENT);
+        NTEST_EXPECT_TRUE(reason != NULL && reason[0] != '\0');
+    }
+    // What a field may take: eight named bits of eight, an I32 enumeration.
+    f[0].kind = NPH_FIELD_U8;
+    f[0].size = 1U;
+    f[0].flags = NPH_FIELD_FLAG_BITS;
+    f[0].names = "0|1|2|3|4|5|6|7";
+    f[0].max = 0.0F;
+    NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&d, &reason), NPH_RESULT_OK);
+    f[0].kind = NPH_FIELD_I32;
+    f[0].size = 4U;
+    f[0].flags = NPH_FIELD_FLAG_ENUM;
+    f[0].names = "a";
+    NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&d, &reason), NPH_RESULT_OK);
+    // An asset type on a GUID alone.
+    f[1].asset_type = 0x4C54414DU;
+    NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&d, &reason), NPH_RESULT_OK);
+    f[0].asset_type = 0x4C54414DU;
+    NTEST_EXPECT_EQ_INT(nph_component_desc_validate(&d, &reason), NPH_RESULT_INVALID_ARGUMENT);
 }
 
 NTEST(component, fields_equal_and_hash_ignore_padding_and_text_tails)
@@ -220,14 +334,15 @@ NTEST(component, layout_hash_tracks_the_layout_only)
     NphComponentDesc d = base_desc();
     const u64 h = nph_component_layout_hash(&d);
     NTEST_EXPECT_EQ_UINT(nph_component_layout_hash(&d), h);
-    NphFieldDesc renamed[1] = {{"y", NPH_FIELD_F32, 0U, 4U, 0U, 0.0F, 0.0F}};
+    NphFieldDesc renamed[1] = {{"y", NPH_FIELD_F32, 0U, 4U, 0U, 0.0F, 0.0F, NULL, 0U}};
     d.fields = renamed;
     NTEST_EXPECT_NE_UINT(nph_component_layout_hash(&d), h);
-    NphFieldDesc retyped[1] = {{"x", NPH_FIELD_I32, 0U, 4U, 0U, 0.0F, 0.0F}};
+    NphFieldDesc retyped[1] = {{"x", NPH_FIELD_I32, 0U, 4U, 0U, 0.0F, 0.0F, NULL, 0U}};
     d.fields = retyped;
     NTEST_EXPECT_NE_UINT(nph_component_layout_hash(&d), h);
     // Editor hints are not part of the layout.
-    NphFieldDesc hinted[1] = {{"x", NPH_FIELD_F32, 0U, 4U, NPH_FIELD_FLAG_COLOR, 0.0F, 0.0F}};
+    NphFieldDesc hinted[1] = {
+        {"x", NPH_FIELD_F32, 0U, 4U, NPH_FIELD_FLAG_COLOR, 0.0F, 0.0F, NULL, 0U}};
     d.fields = hinted;
     NTEST_EXPECT_EQ_UINT(nph_component_layout_hash(&d), h);
     d.name = "test.Other";

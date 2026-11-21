@@ -4,6 +4,7 @@
 // whole), cook on the import thread, and leave a snapshot of the database
 // that the resolver reads, also while other imports run. Failures arrive
 // in the results, and the requests in flight are bounded.
+#include <nepheline/asset/asset.h>
 #include <nepheline/asset/sound.h>
 #include <nepheline/asset/texture.h>
 #include <nepheline/audio/wav.h>
@@ -17,6 +18,7 @@
 #include "project.h"
 #include "test_cook_support.h"
 
+#include <stdio.h>
 #include <string.h>
 
 typedef struct ProjectFixture {
@@ -605,6 +607,54 @@ NTEST_F(ProjectFixture, cooks_take_sources_by_key)
     NTEST_EXPECT_EQ_INT(cook_now(f, "models/none.gltf", false).result, NPH_RESULT_NOT_FOUND);
     NTEST_EXPECT_EQ_INT(editor_project_cook(f->p, "../x.gltf", false, 0U, NULL),
                         NPH_RESULT_INVALID_ARGUMENT);
+}
+
+// What a listing of the project's assets of a type gave.
+typedef struct Listed {
+    u32 count;
+    char keys[8][96];
+    char subs[8][32];
+} Listed;
+
+static void list_one(void *user, NphGuid guid, const char *key, const char *sub)
+{
+    Listed *l = (Listed *)user;
+    NTEST_EXPECT_FALSE(nph_guid_is_null(guid));
+    if (l->count < 8U) {
+        (void)snprintf(l->keys[l->count], sizeof l->keys[0], "%s", key);
+        (void)snprintf(l->subs[l->count], sizeof l->subs[0], "%s", sub);
+    }
+    l->count += 1U;
+}
+
+static Listed listed(ProjectFixture *f, u32 type)
+{
+    Listed l;
+    memset(&l, 0, sizeof l);
+    editor_project_each_asset(f->p, type, list_one, &l);
+    return l;
+}
+
+NTEST_F(ProjectFixture, assets_are_listed_by_their_type)
+{
+    // Before any cook, nothing.
+    NTEST_EXPECT_EQ_UINT(listed(f, NPH_ASSET_TYPE_SCENE).count, 0U);
+    test_write_gltf(&f->src, "crate", true);
+    char path[1200];
+    test_path_in(&f->src, "crate.gltf", path, sizeof path);
+    const char *paths[1] = {path};
+    NTEST_ASSERT_EQ_INT(import_now(f, paths, 1U, "models").result, NPH_RESULT_OK);
+    // The scene, with its key and its sub-asset's name; its materials, the scene's parts.
+    const Listed scenes = listed(f, NPH_ASSET_TYPE_SCENE);
+    NTEST_ASSERT_EQ_UINT(scenes.count, 1U);
+    NTEST_EXPECT_EQ_STR(scenes.keys[0], "models/crate.gltf");
+    NTEST_EXPECT_EQ_STR(scenes.subs[0], "scene");
+    const Listed materials = listed(f, NPH_ASSET_TYPE_MATERIAL);
+    NTEST_ASSERT_GE_UINT(materials.count, 1U);
+    NTEST_EXPECT_EQ_STR(materials.keys[0], "models/crate.gltf");
+    NTEST_EXPECT_EQ_INT(strncmp(materials.subs[0], "material/", 9U), 0);
+    // A type it has none of.
+    NTEST_EXPECT_EQ_UINT(listed(f, NPH_ASSET_TYPE_PHYSICS_MATERIAL).count, 0U);
 }
 
 typedef struct ResolveLoop {

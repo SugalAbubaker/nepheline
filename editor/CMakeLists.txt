@@ -35,6 +35,7 @@ add_library(nph_editor_core STATIC
     src/panel_profiler.c
     src/panel_stats.c
     src/panel_viewport.c
+    src/physics_draw.c
     src/physics_material_edit.c
     src/picking.c
     src/picking.h

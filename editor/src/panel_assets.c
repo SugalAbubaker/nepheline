@@ -371,6 +371,7 @@ static void finished(Editor *ed, const EditorImportResult *res)
     editor_mesh_edit_finished(ed, res);
     editor_material_finished(ed, res);
     editor_physics_material_finished(ed, res);
+    editor_physics_draw_finished(ed, res);
     EditorPlacement *slot = placement_of(ed, res->id);
     if (slot == NULL) {
         return;
@@ -785,7 +786,8 @@ static void act(Editor *ed, const EditorAssetEntry *e, BrowserAction action)
 
 // A source dragged out of the browser: a scene or a mesh to place in the
 // viewport, a material to drop on an entity or a slot, an image to drop on a
-// material's texture slot.
+// material's texture slot, a physics material or a sound to drop on a field
+// that names one (the inspector; ADR-0108).
 static void drag_source(const EditorAssets *a, const EditorAssetEntry *e)
 {
     const char *type = NULL;
@@ -809,6 +811,9 @@ static void drag_source(const EditorAssets *a, const EditorAssetEntry *e)
         verb = "Physics material";
         break;
     case COOKER_SOURCE_SOUND:
+        type = EDITOR_DRAG_SOUND;
+        verb = "Sound";
+        break;
     case COOKER_SOURCE_NONE:
         break;
     }

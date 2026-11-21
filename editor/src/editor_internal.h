@@ -3,6 +3,7 @@
 
 // The editor's state, shared by editor.c and the panels (panel_*.c).
 
+#include <nepheline/core/hashmap.h>
 #include <nepheline/platform/file.h>
 #include <nepheline/profile/memory.h>
 #include <nepheline/profile/profiler.h>
@@ -54,9 +55,31 @@
 #define EDITOR_DRAG_IMAGE    "nph.image"    // an image's source key, NUL-terminated
 // A physics material's source key, NUL-terminated.
 #define EDITOR_DRAG_PHYSICS_MATERIAL "nph.physics_material"
+#define EDITOR_DRAG_SOUND            "nph.sound" // a sound's source key, NUL-terminated
 
 // The smallest viewport image, in pixels a side.
 #define EDITOR_VIEWPORT_MIN 16U
+
+// The collision assets the viewport outlines ASSET Colliders with
+// (physics_draw.c), each loaded once and held until it is cooked again or
+// the editor detaches.
+typedef struct EditorCollisionEntry EditorCollisionEntry;
+typedef struct EditorCollisionCache {
+    EditorCollisionEntry *entries;
+    u32 count;
+    u32 cap;
+    NphHashMap index; // NphGuid -> u32 entry
+    bool indexed;     // `index` is initialised
+} EditorCollisionCache;
+
+// Where an outline's lines go (physics_draw.c): positions relative to
+// `origin`, the colour ABGR as the renderer's (NPH_RENDER_RGBA). `line`
+// returns false when it has no room for more, which ends the outline.
+typedef struct EditorLineSink {
+    bool (*line)(void *user, NphVec3 a, NphVec3 b, u32 rgba);
+    void *user;
+    NphDVec3 origin;
+} EditorLineSink;
 
 typedef struct EditorViewport {
     NphGpuImage image; // the scene's target
@@ -414,6 +437,7 @@ struct Editor {
     char scene_path[EDITOR_PATH_MAX];
     char popup_error[160];
     char cvar_filter[64];
+    char asset_filter[64]; // the inspector's list of a field's assets
 
     // Editing.
     EditorHistory *history; // over the edited world
@@ -441,7 +465,10 @@ struct Editor {
     NphLocalTransform gizmo_start_local;
     u64 gizmo_drag_id; // a merge key per drag
     bool show_grid;
-    bool show_colliders; // every Collider's outline (the selection's always)
+    // Every Collider's, CharacterController's and Joint's outline (the
+    // selection's always).
+    bool show_colliders;
+    EditorCollisionCache collisions;
 };
 
 // editor.c
@@ -567,8 +594,34 @@ void editor_physics_material_finished(Editor *ed, const EditorImportResult *res)
 // The panel is open on a physics material and had the keyboard focus last frame.
 bool editor_physics_material_focused(const Editor *ed);
 
+// panel_inspector.c
+// What a drop of the source `key`, dragged from the browser as `drag`
+// (EDITOR_DRAG_*), on field `field` of entity `e`'s component `id` does in
+// the inspector: a field that names an asset of the source's kind
+// (NPH_FIELD_ASSET) takes the asset the source cooks to, as one step of the
+// history (the play copy's while playing), and the source's cook is queued
+// when it has none. NPH_RESULT_NOT_FOUND without the component or the field;
+// NPH_RESULT_INVALID_ARGUMENT for a field that is read only or names no such
+// asset, or a source of another kind.
+NPH_MUST_USE NphResult editor_inspector_drop(Editor *ed, NphEntity e, NphComponentId id,
+                                             const char *field, const char *drag, const char *key);
+
 // panel_physics_material.c
 void editor_panel_physics_material(Editor *ed);
+
+// physics_draw.c (docs/editor.md "Viewport"; ADR-0108)
+void editor_physics_draw_init(Editor *ed);
+// Lets go of the collision assets held (detach: while the engine's loader is there).
+void editor_physics_draw_free(Editor *ed);
+// An import finished: the collision assets it wrote are read again.
+void editor_physics_draw_finished(Editor *ed, const EditorImportResult *res);
+// The outlines of entity `e`'s physics components, where the engine makes
+// their bodies: its Collider's shapes (an ASSET Collider's once its asset has
+// loaded; a trigger's in the sensor colour), its CharacterController's
+// capsule, its Joint's anchor, axis and bodies. False when the sink filled.
+bool editor_physics_outline(Editor *ed, NphEntity e, const EditorLineSink *sink);
+// The collision assets outlined or loading (tests).
+u32 editor_physics_draw_collisions(const Editor *ed);
 // The Import Settings window (panel_import.c).
 void editor_panel_import_settings(Editor *ed);
 

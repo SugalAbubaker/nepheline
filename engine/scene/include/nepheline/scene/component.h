@@ -135,14 +135,31 @@ typedef enum NphFieldFlags {
     NPH_FIELD_FLAG_COLOR = 1U << 3U,     // VEC3/VEC4 edited as a linear color
     NPH_FIELD_FLAG_ANGLE = 1U << 4U,     // radians, shown in degrees
     NPH_FIELD_FLAG_TRANSIENT = 1U << 5U, // not saved; loads as the default value
+    // An integer that is one of the values `names` names, the first 0: the
+    // editor picks it from a list (ADR-0108).
+    NPH_FIELD_FLAG_ENUM = 1U << 6U,
+    // An unsigned integer's bits, named by `names` from bit 0 (none: by their
+    // numbers): the editor shows a box a bit (ADR-0108).
+    NPH_FIELD_FLAG_BITS = 1U << 7U,
 } NphFieldFlags;
 
-// A hint list is a parenthesised (flags, min, max) triple, expanded by the
-// generator macros.
-#define NPH_FIELD_HINTS(flags, lo, hi) ((u32)(flags), (f32)(lo), (f32)(hi))
+// A hint list is a parenthesised (flags, min, max, names, asset type) list,
+// expanded by the generator macros. NPH_FIELD_HINTS gives the first three.
+#define NPH_FIELD_HINT_LIST(flags, lo, hi, names, asset_type)                                      \
+    ((u32)(flags), (f32)(lo), (f32)(hi), (names), (u32)(asset_type))
+#define NPH_FIELD_HINTS(flags, lo, hi) NPH_FIELD_HINT_LIST(flags, lo, hi, NULL, 0U)
 #define NPH_FIELD_NO_HINTS             NPH_FIELD_HINTS(0U, 0.0F, 0.0F)
 #define NPH_FIELD_RANGE(lo, hi)        NPH_FIELD_HINTS(NPH_FIELD_FLAG_RANGE, lo, hi)
 #define NPH_FIELD_FLAGS(flags)         NPH_FIELD_HINTS(flags, 0.0F, 0.0F)
+// An enumeration: `names` (a string literal) names its values from 0, a '|'
+// between two: NPH_FIELD_ENUM("sphere|capsule|box").
+#define NPH_FIELD_ENUM(names) NPH_FIELD_HINT_LIST(NPH_FIELD_FLAG_ENUM, 0.0F, 0.0F, names, 0U)
+// A bit mask: `names` names its bits from bit 0 likewise, or is NULL for bits
+// known by their numbers (a game's collision layers).
+#define NPH_FIELD_BITS(names) NPH_FIELD_HINT_LIST(NPH_FIELD_FLAG_BITS, 0.0F, 0.0F, names, 0U)
+// A GUID that names an asset of `type` (asset/asset.h NphAssetType, its
+// four-character code): the editor takes such assets for it.
+#define NPH_FIELD_ASSET(type) NPH_FIELD_HINT_LIST(0U, 0.0F, 0.0F, NULL, type)
 
 typedef struct NphFieldDesc {
     const char *name; // the field's C name, also its key in scene files
@@ -152,7 +169,21 @@ typedef struct NphFieldDesc {
     u32 flags;        // NphFieldFlags
     f32 min;          // with NPH_FIELD_FLAG_RANGE
     f32 max;
+    // With NPH_FIELD_FLAG_ENUM or NPH_FIELD_FLAG_BITS: the names of its
+    // values or bits, a '|' between two (nph_field_name); NULL otherwise.
+    const char *names;
+    // A GUID's: the type of asset it names (asset/asset.h NphAssetType); 0
+    // for any, and for every other kind.
+    u32 asset_type;
 } NphFieldDesc;
+
+// How many names a field's `names` holds (0 for none).
+// Thread-safety: NPH_THREADSAFE.
+u32 nph_field_name_count(const NphFieldDesc *field);
+
+// The name of a field's value or bit `index`, or an empty view past its
+// last one. Thread-safety: NPH_THREADSAFE.
+NphStr nph_field_name(const NphFieldDesc *field, u32 index);
 
 // ---------------------------------------------------------------------------
 // Component descriptors
@@ -205,7 +236,8 @@ typedef struct NphComponentDesc {
 // names the component type NphComponentSelf in its own scope, so the
 // X-macro entries need not repeat it. (`sizeof` does not evaluate its
 // operand: the null pointer is never dereferenced.)
-#define NPH_COMPONENT_HINTS_(flags, lo, hi) (flags), (lo), (hi)
+#define NPH_COMPONENT_HINTS_(flags, lo, hi, names, asset_type)                                     \
+    (flags), (lo), (hi), (names), (asset_type)
 #define NPH_COMPONENT_FIELD_META_(KIND, fname, hints)                                              \
     {#fname, (u32)NPH_FIELD_##KIND, (u32)offsetof(NphComponentSelf, fname),                        \
      (u32)sizeof(((NphComponentSelf *)0)->fname), NPH_COMPONENT_HINTS_ hints},
@@ -245,7 +277,11 @@ typedef struct NphComponentDesc {
 // and alignment in range (0 and no fields for a tag); every field of a
 // valid kind, of that kind's size, aligned for it, inside the component,
 // not overlapping another field, and uniquely named; at most
-// NPH_ECS_MAX_FIELDS fields. NPH_RESULT_OK or NPH_RESULT_INVALID_ARGUMENT
+// NPH_ECS_MAX_FIELDS fields; and its hints: a range with min <= max, ENUM
+// on an integer and BITS on an unsigned one (one or the other, without a
+// range), each with names none of which is empty (BITS: no names, or at
+// most one a bit; ENUM: at least one), names on no other field, and an
+// asset type on a GUID alone. NPH_RESULT_OK or NPH_RESULT_INVALID_ARGUMENT
 // with a static reason in *out_reason (may be NULL).
 // Thread-safety: NPH_THREADSAFE.
 NPH_MUST_USE NphResult nph_component_desc_validate(const NphComponentDesc *desc,

@@ -85,7 +85,17 @@ constant-initialised descriptor:
 - the component's stable name (its key in scene files);
 - its size and alignment, and a default value;
 - per field: the name, the kind, the offset, the size, and the editor
-  hints (range, hidden, read-only, color, angle, transient).
+  hints (range, hidden, read-only, color, angle, transient), with
+  (ADR-0108) an enumeration's names (`NPH_FIELD_ENUM("sphere|capsule|box")`:
+  the editor picks the value from them), a mask's bit names
+  (`NPH_FIELD_BITS`, or numbered bits with `NPH_FIELD_BITS(NULL)`: a box a
+  bit), and the type of asset a GUID names (`NPH_FIELD_ASSET`, an
+  `NphAssetType`: the editor takes such assets for it). The names are one
+  string literal, a `|` between two (`nph_field_name`); validation refuses
+  an ENUM on anything but an integer, BITS on anything but an unsigned one
+  or naming more bits than it has, either with a range or an empty name,
+  names on another field, and an asset type on anything but a GUID. The
+  hints are not in the layout hash: changing them changes no file.
 
 The descriptor function's statics are constant-initialised, so the
 function costs nothing and needs no registration order. A world registers

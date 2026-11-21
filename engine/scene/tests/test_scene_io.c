@@ -551,7 +551,8 @@ NTEST(scene_io, binary_rejects_damage_and_mismatches)
     NTEST_EXPECT_EQ_INT(nph_scene_load_binary(bare, nph_bin_writer_data(&bw), len, NULL, &res),
                         NPH_RESULT_NOT_FOUND);
     NTEST_EXPECT_TRUE(nph_str_contains(nph_str_from_cstr(res.error), NPH_STR("test.")));
-    static const NphFieldDesc moved[1] = {{"value", NPH_FIELD_VEC3, 4U, 12U, 0U, 0.0F, 0.0F}};
+    static const NphFieldDesc moved[1] = {
+        {"value", NPH_FIELD_VEC3, 4U, 12U, 0U, 0.0F, 0.0F, NULL, 0U}};
     static const NphComponentDesc other = {"test.Position", 16U, 4U, moved, 1U, 0U, NULL};
     NphComponentId id;
     NTEST_ASSERT_EQ_INT(nph_world_register_component(bare, &other, &id), NPH_RESULT_OK);
